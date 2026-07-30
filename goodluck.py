@@ -62,7 +62,6 @@ ORIENTATION_THRESHOLD = 0.19  # 朝向差异模长阈值，约11°，是2sin(11�
 POSITION_THRESHOLD = 3.0  # 位置差异模长阈值，单位cm
 STOP_TIME = 3  # 到达目标点后停留时间，单位秒
 MAX_LOCATE_RETRIES = 5  # 定位失败最大重试次数
-PANNING_ANGLE_THRESHOLD = 30.0  # 朝向到目标点夹角阈值，单位度
 OBSTACLE_THRESHOLD = 15.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
 SAFE_MARGIN_CM = 3.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
 
