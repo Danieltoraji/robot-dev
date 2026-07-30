@@ -34,6 +34,14 @@ tag_poses["39"] = np.array(
     dtype=np.float64,
 )
 
+# 赛道墙壁（不可通行区域），格式 [x_min, x_max, y_min, y_max]，单位cm
+# 来自赛道说明：左墙、中墙、右墙；外框底/顶边在 distance_to_walls 中单独处理
+WALLS = [
+    [0, 5, 40, 100],    # 左墙
+    [45, 55, 0, 60],    # 中墙
+    [95, 100, 40, 100], # 右墙
+]
+
 # 以下定义机器人定点站立课目的目标点坐标和朝向。
 stand_poses = {}
 stand_poses["1"] = np.array([14.7, 21.3], dtype=np.float64)
@@ -50,6 +58,7 @@ POSITION_THRESHOLD = 3.0  # 位置差异模长阈值，单位cm
 STOP_TIME = 3  # 到达目标点后停留时间，单位秒
 MAX_LOCATE_RETRIES = 5  # 定位失败最大重试次数
 PANNING_ANGLE_THRESHOLD = 30.0  # 朝向到目标点夹角阈值，单位度
+OBSTACLE_THRESHOLD = 15.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
 
 target_poses = {}
 target_poses["1"] = np.array([14.7, 21.3], dtype=np.float64)
@@ -98,13 +107,13 @@ def run_action(name, times=1):
     """执行动作组"""
     AGC.runActionGroup(name, times=times)
 
-def calculate_diff(poses):
+def calculate_diff(target_pos):
     """计算当前位置/朝向与目标点的差异
 
-    poses: 目标位置字典（stand_poses 或 target_poses），用 next_stop 索引。
+    target_pos: 目标位置坐标数组（2D）。
     朝向差异始终用 target_orientations（两阶段共用）。
     """
-    position_diff = np.array(current_position) - np.array(poses[next_stop])
+    position_diff = np.array(current_position) - np.array(target_pos)
     orientation_diff = np.array(current_orientation) - np.array(
         target_orientations[next_stop]
     )
@@ -113,6 +122,58 @@ def calculate_diff(poses):
 def calc_distance(position_diff):
     """计算水平距离"""
     return np.linalg.norm(position_diff)
+
+def distance_point_to_rect(pos, rect):
+    """点到矩形的最短距离（点在矩形内返回0）
+
+    pos: [x, y]，rect: [x_min, x_max, y_min, y_max]
+    """
+    x, y = pos[0], pos[1]
+    x_min, x_max, y_min, y_max = rect
+    dx = max(x_min - x, 0, x - x_max)
+    dy = max(y_min - y, 0, y - y_max)
+    return float(np.sqrt(dx * dx + dy * dy))
+
+def distance_to_walls(pos):
+    """计算位置到最近墙壁的距离（cm）
+
+    包含3个矩形墙 + 外框底边(y=0) + 顶边(y=100)。
+    左右外框已被左/右墙覆盖；出入口 x=0/x=100, y∈[0,40] 为开口不约束。
+    """
+    pos = np.array(pos, dtype=np.float64)
+    min_dist = float("inf")
+    for rect in WALLS:
+        min_dist = min(min_dist, distance_point_to_rect(pos, rect))
+    # 外框底边、顶边
+    min_dist = min(min_dist, float(pos[1]))       # y=0
+    min_dist = min(min_dist, float(100 - pos[1])) # y=100
+    return min_dist
+
+def nearest_safe_point(pos):
+    """找离 pos 最近的安全点（distance_to_walls >= OBSTACLE_THRESHOLD）
+
+    若 pos 本身安全直接返回；否则以 1cm 步长、16方向螺旋搜索，
+    返回首个安全点；兜底返回搜索范围内 distance_to_walls 最大的点。
+    """
+    pos = np.array(pos, dtype=np.float64)
+    if distance_to_walls(pos) >= OBSTACLE_THRESHOLD:
+        return pos
+
+    # 16方向螺旋搜索，步长1cm，最大搜索半径100cm
+    angles = np.linspace(0, 2 * np.pi, 16, endpoint=False)
+    best_point = pos.copy()
+    best_dist = distance_to_walls(pos)
+    for step in range(1, 101):
+        for a in angles:
+            candidate = pos + step * np.array([np.cos(a), np.sin(a)])
+            d = distance_to_walls(candidate)
+            if d >= OBSTACLE_THRESHOLD:
+                return candidate
+            if d > best_dist:
+                best_dist = d
+                best_point = candidate.copy()
+    print(f"nearest_safe_point: 未找到满足阈值的安全点，返回最优点 {best_point} (距离 {best_dist:.2f}cm)")
+    return best_point
 
 def capture_image():
     """拍照"""
@@ -288,12 +349,15 @@ def locate_with_retry():
     print("定位重试超限，程序终止。")
     return False
 
-def decide_panning_action(position_diff, orientation_xOy):
+def decide_panning_action(current_pos, target_pos, orientation_xOy):
     """贪心平移策略：模拟各方向动作后的预期位置，选最接近目标的
 
-    恢复后退和侧移动作，避免纯前进在朝向偏差略大于阈值时陷入
-    旋转-过冲-反向旋转的原地转圈。前进方向加偏好权重 FORWARD_BIAS。
+    current_pos/target_pos: 绝对坐标（2D）。
+    对每个候选动作执行后的绝对位置做避障过滤（离墙距离 >= OBSTACLE_THRESHOLD），
+    全部被排除时返回 None（信号：机器人已在危险区）。
+    前进方向加偏好权重 FORWARD_BIAS。
     """
+    position_diff = np.array(current_pos) - np.array(target_pos)
     # 各动作的位移向量（机体坐标系）
     # orientation_xOy 为机体朝向，左转为 [-oy[1], oy[0]]，右转为 [oy[1], -oy[0]]
     oy = orientation_xOy
@@ -310,18 +374,30 @@ def decide_panning_action(position_diff, orientation_xOy):
     }
 
     # 计算每个候选动作执行后到目标的距离，前进方向减去偏好权重
+    # 避障过滤：执行后绝对位置离墙距离 < 阈值则排除
     best_action = None
     best_score = float("inf")
     for action, new_pd in candidates.items():
+        new_pos = np.array(target_pos) + new_pd
+        wall_dist = distance_to_walls(new_pos)
+        if wall_dist < OBSTACLE_THRESHOLD:
+            print(
+                f"  {action}: 执行后位置 {new_pos} 离墙 {wall_dist:.2f}cm < {OBSTACLE_THRESHOLD}cm，排除"
+            )
+            continue
         score = calc_distance(new_pd)
         if action.startswith("go_forward"):
             score -= FORWARD_BIAS
         print(
-            f"  {action}: 执行后距离 {calc_distance(new_pd):.2f}cm (score={score:.2f})"
+            f"  {action}: 执行后距离 {calc_distance(new_pd):.2f}cm 离墙 {wall_dist:.2f}cm (score={score:.2f})"
         )
         if score < best_score:
             best_score = score
             best_action = action
+
+    if best_action is None:
+        print("所有平移动作均被避障排除，机器人可能已在危险区。")
+        return None
 
     print("最佳平移动作：", best_action)
     return best_action
@@ -380,24 +456,45 @@ def navigate_to_target(target_id, poses, stop_time=STOP_TIME):
         print("当前机体位置：", current_position)
         print("当前机体朝向：", current_orientation)
 
-        # 2. 计算差异
-        pd, od = calculate_diff(poses)
+        # 2. 危险检测：离墙距离 < 阈值 → 临时导航至最近安全点
+        wall_dist = distance_to_walls(current_position)
+        if wall_dist < OBSTACLE_THRESHOLD:
+            target = nearest_safe_point(current_position)
+            escaping = True
+            print(
+                f"机器人处于危险区（离墙 {wall_dist:.2f}cm < {OBSTACLE_THRESHOLD}cm），"
+                f"临时导航至安全点 {target}"
+            )
+        else:
+            target = poses[next_stop]
+            escaping = False
+
+        # 3. 计算差异
+        pd, od = calculate_diff(target)
         print("位置差异pd：", pd)
         print("朝向差异od：", od)
 
-        # 3. 朝向优先：od 模 > 阈值 → 旋转修正
-        if np.linalg.norm(od) > ORIENTATION_THRESHOLD:
+        # 4. 朝向优先：od 模 > 阈值 → 旋转修正（逃离时跳过，优先平移离开）
+        if not escaping and np.linalg.norm(od) > ORIENTATION_THRESHOLD:
             action, times = decide_rotation_action(od)
             run_action(action, times)
             continue
 
-        # 4. 平移接近：pd 模 > 阈值 → 贪心选最优方向
+        # 5. 平移接近：pd 模 > 阈值 → 贪心选最优方向
         if np.linalg.norm(pd) > POSITION_THRESHOLD:
-            action = decide_panning_action(pd, current_orientation)
-            run_action(action)
+            action = decide_panning_action(current_position, target, current_orientation)
+            if action is None:
+                # 极端兜底：所有动作被排除，强制后退尝试离开危险区
+                print("警告：无安全平移动作可选，强制后退尝试脱离危险区。")
+                run_action("back_one_step")
+            else:
+                run_action(action)
             continue
 
-        # 5. 到达
+        # 6. 到达
+        if escaping:
+            print(f"===== 已到达安全点 {target}，恢复原目标导航 =====")
+            continue
         if stop_time > 0:
             print(f"===== 到达{phase} {target_id}，停留 {stop_time} 秒 =====")
             run_action("stand")
