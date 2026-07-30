@@ -1,19 +1,56 @@
+# -*- coding: utf-8 -*-
+"""
+寻路算法测试程序（模拟器 + 可视化）
+
+架构说明：
+  PART A —— goodluck.py 的原样副本（勿改）。算法函数与 I/O 函数全部保留。
+            当 goodluck.py 算法更新后，只需把 PART A 整体替换为新版内容
+            （删除末尾主流程自动执行代码），PART B 无需任何改动。
+  PART B —— 模拟器 + 可视化（测试专用）。通过 monkey-patch 在运行前用桩函数
+            替换 PART A 的 I/O 函数（run_action / solve_pnp / set_head 等），
+            算法函数（decide_panning_action / navigate_to_target 等）原样执行。
+
+运行：python goodluck_sim.py
+"""
+
+# =====================================================================
+# ===== PART A: goodluck.py 原样副本（勿改）===========================
+# =====================================================================
+# 说明：此区块是 goodluck.py 的逐字副本。唯一允许的改动是：
+#   1. 硬件导入用 try/except 包裹（导入失败设为 None，不影响桩函数运行）
+#   2. 删除末尾主流程自动执行代码（执行入口改由 PART B 的 run_simulation() 控制）
+# 算法逻辑、常量、赛道数据、I/O 函数定义全部保持原样。
+
 import time
-import hiwonder.ActionGroupControl as AGC  # 动作库，必须包含该库
 import subprocess  # 拍照
-import apriltag
-import cv2
 import numpy as np
-import hiwonder.ros_robot_controller_sdk as rrc
-from hiwonder.Controller import Controller
 
-board = rrc.Board()
-ctl = Controller(board)
+# 硬件/视觉库导入：在非机器人环境用 try/except 屏蔽，桩函数不调用真实硬件
+try:
+    import hiwonder.ActionGroupControl as AGC  # 动作库，必须包含该库
+except Exception:
+    AGC = None
+try:
+    import apriltag
+except Exception:
+    apriltag = None
+try:
+    import cv2
+except Exception:
+    cv2 = None
+try:
+    import hiwonder.ros_robot_controller_sdk as rrc
+    from hiwonder.Controller import Controller
+    board = rrc.Board()
+    ctl = Controller(board)
+except Exception:
+    rrc = None
+    ctl = None
+    board = None
 
 # |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-# 从这里开始放进测试器
+# 从这里开始可以更改
 # |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-
 
 # =====================================================================
 # 赛道数据
@@ -520,32 +557,373 @@ def navigate_to_target(target_id, poses, stop_time=STOP_TIME):
             print(f"===== 到达{phase} {target_id}，不停留 =====")
         return True
 
-# |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-# 可测试代码末尾
-# |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+# |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+# 可更改部分结尾
+# |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+
+# NOTE: goodluck.py 末尾的主流程自动执行代码已删除，
+#       执行入口改由 PART B 的 run_simulation() 控制。
+
 
 # =====================================================================
-# 主流程
+# ===== PART B: 模拟器 + 可视化（测试专用）===========================
 # =====================================================================
-run_action("stand")
-set_head(HEAD_CENTER)
 
-for tid in ["1", "2", "3", "4"]:
-    # 停靠阶段：到达 stand_poses，停留 3 秒
-    if not navigate_to_target(tid, stand_poses, STOP_TIME):
-        print(f"导航至停靠点 {tid} 失败，程序终止。")
+import os
+import matplotlib
+# 后端选择：尊重 MPLBACKEND 环境变量；否则优先交互式（TkAgg）支持动画
+if not os.environ.get("MPLBACKEND"):
+    try:
+        matplotlib.use("TkAgg")
+    except Exception:
+        matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+
+# 配置中文字体（Windows: Microsoft YaHei / SimHei；缺失则回退默认）
+for _font in ["Microsoft YaHei", "SimHei", "WenQuanYi Micro Hei", "Arial Unicode MS"]:
+    try:
+        matplotlib.rcParams["font.sans-serif"] = [_font] + matplotlib.rcParams["font.sans-serif"]
         break
-    print(f"已到达停靠点 {tid}。")
+    except Exception:
+        continue
+matplotlib.rcParams["axes.unicode_minus"] = False  # 负号显示
 
-    # 准备转向阶段：到达 target_poses，不停留
-    if not navigate_to_target(tid, target_poses, 0):
-        print(f"导航至转向点 {tid} 失败，程序终止。")
-        break
-    print(f"已到达转向点 {tid}。")
+# ---------------------------------------------------------------------
+# 模拟器配置（噪声开关，默认全 0 = 理想模式）
+# ---------------------------------------------------------------------
+LOCATE_NOISE_STD = 0.0          # 定位位置噪声标准差（cm），0=无噪声
+LOCATE_ANGLE_NOISE_STD = 0.0    # 定位朝向角噪声标准差（度），0=无噪声
+ACTION_ERROR_STD = 0.0          # 动作步长误差标准差（比例，0.1=±10%），0=无误差
+TURN_ERROR_STD = 0.0            # 转向角度误差标准差（度），0=无误差
+ANIM_PAUSE_SEC = 0.3            # 每步动画刷新间隔（秒）
+TRAJECTORY_PNG_PATH = "trajectory.png"  # 最终轨迹图保存路径
+MAX_SIM_STEPS = 500            # 模拟最大动作步数，防止算法不收敛时无限循环卡死
 
-# 第5点：开环走出出口
-print("\n===== 到达第4个转向点，准备开环走出出口 =====")
-run_action("turn_left", times=4)
-run_action("go_forward", times=3)
-run_action("stand")
-print("===== 全程完成 =====")
+# 机器人初始状态（入口附近，朝东）
+INITIAL_POS = np.array([2.0, 20.0], dtype=np.float64)
+INITIAL_ORIENTATION = np.array([1.0, 0.0], dtype=np.float64)
+
+
+class SimState:
+    """模拟器状态：维护机器人的真实位置/朝向/轨迹
+
+    所有 apply_* 方法按机体坐标系更新状态，并追加轨迹点。
+    """
+
+    def __init__(self, pos, orientation):
+        self.pos = np.array(pos, dtype=np.float64).copy()
+        self.orientation = np.array(orientation, dtype=np.float64).copy()
+        norm = np.linalg.norm(self.orientation)
+        if norm != 0:
+            self.orientation /= norm
+        self.head_pulse = HEAD_CENTER
+        self.trajectory = [self.pos.copy()]
+        self.last_action = "init"
+        self.step_count = 0
+
+    def _record(self, action_name):
+        self.last_action = action_name
+        self.trajectory.append(self.pos.copy())
+
+    def apply_forward(self, cm):
+        """沿当前朝向前进 cm 厘米"""
+        actual_cm = cm
+        if ACTION_ERROR_STD > 0:
+            actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
+        self.pos = self.pos + actual_cm * self.orientation
+        self._record("forward")
+
+    def apply_back(self, cm):
+        """沿当前朝向后退 cm 厘米"""
+        actual_cm = cm
+        if ACTION_ERROR_STD > 0:
+            actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
+        self.pos = self.pos - actual_cm * self.orientation
+        self._record("back")
+
+    def apply_left_move(self, cm):
+        """机体左侧横移 cm 厘米（左转为 [-oy[1], oy[0]]）"""
+        actual_cm = cm
+        if ACTION_ERROR_STD > 0:
+            actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
+        left_dir = np.array([-self.orientation[1], self.orientation[0]])
+        self.pos = self.pos + actual_cm * left_dir
+        self._record("left_move")
+
+    def apply_right_move(self, cm):
+        """机体右侧横移 cm 厘米（右转为 [oy[1], -oy[0]]）"""
+        actual_cm = cm
+        if ACTION_ERROR_STD > 0:
+            actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
+        right_dir = np.array([self.orientation[1], -self.orientation[0]])
+        self.pos = self.pos + actual_cm * right_dir
+        self._record("right_move")
+
+    def apply_turn(self, deg):
+        """原地转向 deg 度（正=左转，负=右转）"""
+        actual_deg = deg
+        if TURN_ERROR_STD > 0:
+            actual_deg = deg + np.random.normal(0, TURN_ERROR_STD)
+        theta = np.radians(actual_deg)
+        # 左转旋转矩阵 R(+θ) = [[cos, -sin], [sin, cos]]
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        R = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+        self.orientation = R @ self.orientation
+        norm = np.linalg.norm(self.orientation)
+        if norm != 0:
+            self.orientation /= norm
+        self._record("turn")
+
+
+# 全局模拟器实例（run_simulation 中重新初始化）
+sim = SimState(INITIAL_POS, INITIAL_ORIENTATION)
+
+
+class Visualizer:
+    """matplotlib 可视化：绘制赛道、目标点、机器人箭头、历史轨迹
+
+    静态层（赛道/墙壁/目标点）在 __init__ 绘制一次；
+    动态层（机器人箭头/轨迹/动作文字）在 update() 每步重绘。
+    """
+
+    def __init__(self):
+        self.fig, self.ax = plt.subplots(figsize=(8, 8))
+        self._draw_static()
+        # 动态层句柄
+        self.robot_arrow = None
+        self.traj_line = None
+        self.action_text = None
+        self.fig.canvas.manager.set_window_title("寻路算法模拟器")
+
+    def _draw_static(self):
+        ax = self.ax
+        ax.set_xlim(-5, 105)
+        ax.set_ylim(-5, 105)
+        ax.set_aspect("equal")
+        ax.set_title("RoboTrack 寻路算法模拟", fontsize=13)
+        ax.set_xlabel("x (cm)")
+        ax.set_ylabel("y (cm)")
+        ax.grid(True, linestyle="--", alpha=0.3)
+
+        # 外框
+        ax.add_patch(Rectangle((0, 0), 100, 100, fill=False, edgecolor="black", linewidth=2))
+
+        # 墙壁
+        for rect in WALLS:
+            x_min, x_max, y_min, y_max = rect
+            ax.add_patch(Rectangle(
+                (x_min, y_min), x_max - x_min, y_max - y_min,
+                facecolor="gray", edgecolor="black", alpha=0.5, hatch="//",
+            ))
+
+        # 停靠点（stand_poses）—— 蓝色方块
+        for tid, p in stand_poses.items():
+            ax.plot(p[0], p[1], "bs", markersize=9, markeredgecolor="black")
+            ax.annotate(f"停{tid}", (p[0], p[1]), textcoords="offset points",
+                        xytext=(6, 6), fontsize=8, color="blue")
+
+        # 转向点（target_poses）—— 红色圆点
+        for tid, p in target_poses.items():
+            ax.plot(p[0], p[1], "ro", markersize=8, markeredgecolor="black")
+            ax.annotate(f"转{tid}", (p[0], p[1]), textcoords="offset points",
+                        xytext=(6, -10), fontsize=8, color="red")
+
+        # AprilTag 位置（取各 tag 第一点近似）—— 绿色三角
+        for tid, pts in tag_poses.items():
+            p = pts[0][:2]
+            ax.plot(p[0], p[1], "g^", markersize=7)
+            ax.annotate(f"Tag{tid}", (p[0], p[1]), textcoords="offset points",
+                        xytext=(6, 6), fontsize=7, color="green")
+
+        # 入口/出口标注
+        ax.annotate("入口", (0, 20), textcoords="offset points",
+                    xytext=(-30, 0), fontsize=9, color="purple")
+        ax.annotate("出口", (100, 20), textcoords="offset points",
+                    xytext=(8, 0), fontsize=9, color="purple")
+
+    def update(self, sim_state, action_text=""):
+        """重绘动态层并刷新"""
+        ax = self.ax
+        # 移除旧的动态元素
+        for artist in [self.robot_arrow, self.traj_line, self.action_text]:
+            if artist is not None:
+                artist.remove()
+        # 历史轨迹
+        traj = np.array(sim_state.trajectory)
+        self.traj_line, = ax.plot(traj[:, 0], traj[:, 1], "c-", linewidth=1.5, alpha=0.7)
+        # 机器人位置箭头
+        pos = sim_state.pos
+        ori = sim_state.orientation
+        self.robot_arrow = ax.annotate(
+            "",
+            xy=(pos[0] + ori[0] * 4, pos[1] + ori[1] * 4),
+            xytext=(pos[0], pos[1]),
+            arrowprops=dict(arrowstyle="->", color="magenta", lw=2.5),
+        )
+        ax.plot(pos[0], pos[1], "mo", markersize=6)
+        # 动作文字
+        self.action_text = ax.text(
+            0.02, 0.98, action_text, transform=ax.transAxes,
+            fontsize=9, verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
+        )
+        # 交互后端用 pause 触发重绘；非交互后端用 draw
+        if ANIM_PAUSE_SEC > 0 and matplotlib.get_backend().lower() != "agg":
+            plt.pause(ANIM_PAUSE_SEC)
+        else:
+            self.fig.canvas.draw_idle()
+
+
+# 全局可视化实例
+viz = None
+
+
+# ---------------------------------------------------------------------
+# 桩函数（monkey-patch 目标）：替换 PART A 的 I/O 函数
+# ---------------------------------------------------------------------
+
+def sim_solve_pnp():
+    """桩：直接返回模拟器真实状态（可注入噪声），不拍照不检测"""
+    global current_position, current_orientation
+    pos = sim.pos.copy()
+    ori = sim.orientation.copy()
+    # 注入定位噪声
+    if LOCATE_NOISE_STD > 0:
+        pos = pos + np.random.normal(0, LOCATE_NOISE_STD, size=2)
+    if LOCATE_ANGLE_NOISE_STD > 0:
+        ang = np.radians(np.random.normal(0, LOCATE_ANGLE_NOISE_STD))
+        c, s = np.cos(ang), np.sin(ang)
+        R = np.array([[c, -s], [s, c]])
+        ori = R @ ori
+        n = np.linalg.norm(ori)
+        if n != 0:
+            ori /= n
+    current_position = pos
+    current_orientation = ori
+    return True
+
+
+def sim_set_head(pulse, move_time_ms=HEAD_MOVE_TIME_MS):
+    """桩：只更新头部脉宽记录，不调舵机"""
+    global current_head_pulse
+    sim.head_pulse = pulse
+    current_head_pulse = pulse
+
+
+def sim_run_action(name, times=1):
+    """桩：解析动作名，更新模拟器状态，并刷新可视化"""
+    for _ in range(times):
+        if sim.step_count >= MAX_SIM_STEPS:
+            raise RuntimeError(
+                f"模拟步数超限({MAX_SIM_STEPS})，算法可能不收敛。中止以防卡死。"
+            )
+        sim.step_count += 1
+        if name == "stand":
+            sim._record("stand")
+        elif name == "go_forward_one_step":
+            sim.apply_forward(FORWARD_ONE_STEP_CM)
+        elif name == "go_forward_one_small_step":
+            sim.apply_forward(FORWARD_ONE_SMALL_STEP_CM)
+        elif name == "go_forward":
+            # 连续前进：按一步常量模拟
+            sim.apply_forward(FORWARD_ONE_STEP_CM)
+        elif name == "back_one_step":
+            sim.apply_back(BACK_ONE_STEP_CM)
+        elif name == "back":
+            sim.apply_back(BACK_ONE_STEP_CM)
+        elif name == "left_move":
+            sim.apply_left_move(LEFT_MOVE_CM)
+        elif name == "right_move":
+            sim.apply_right_move(RIGHT_MOVE_CM)
+        elif name == "turn_left":
+            sim.apply_turn(TURN_LEFT_DEG)
+        elif name == "turn_left_small_step":
+            sim.apply_turn(TURN_LEFT_SMALL_STEP_DEG)
+        elif name == "turn_right":
+            sim.apply_turn(-TURN_RIGHT_DEG)
+        elif name == "turn_right_small_step":
+            sim.apply_turn(-TURN_RIGHT_SMALL_STEP_DEG)
+        else:
+            print(f"[sim] 未知动作，忽略: {name}")
+            sim._record(name)
+        if viz is not None:
+            viz.update(sim, f"动作: {name} (第{len(sim.trajectory)}步)\n"
+                            f"位置: ({sim.pos[0]:.1f}, {sim.pos[1]:.1f})  "
+                            f"朝向: ({sim.orientation[0]:.2f}, {sim.orientation[1]:.2f})")
+
+
+def save_trajectory_png(path=TRAJECTORY_PNG_PATH):
+    """保存当前 matplotlib 图为 PNG（含完整赛道+最终轨迹+终点姿态）"""
+    if viz is None:
+        print("[save_trajectory_png] 可视化未初始化，跳过保存。")
+        return
+    viz.fig.savefig(path, dpi=150, bbox_inches="tight")
+    print(f"[save_trajectory_png] 轨迹图已保存: {path}")
+
+
+def run_simulation():
+    """主模拟流程：初始化 → monkey-patch → 执行原主流程 → 保存轨迹图"""
+    global sim, viz
+
+    print("=" * 60)
+    print("寻路算法模拟器启动")
+    print(f"噪声配置: 定位位置σ={LOCATE_NOISE_STD}cm, 定位朝向σ={LOCATE_ANGLE_NOISE_STD}°, "
+          f"动作步长σ={ACTION_ERROR_STD}, 转向σ={TURN_ERROR_STD}°")
+    print("=" * 60)
+
+    # 1. 初始化模拟器状态与可视化
+    sim = SimState(INITIAL_POS, INITIAL_ORIENTATION)
+    viz = Visualizer()
+    viz.update(sim, "模拟器就绪\n等待启动...")
+
+    # 2. monkey-patch：用桩函数替换 PART A 的 I/O 函数
+    #    算法函数内部调用 run_action()/solve_pnp()/set_head() 时，
+    #    Python 按模块全局命名空间解析，命中此处赋值的桩函数。
+    g = globals()
+    g["run_action"] = sim_run_action
+    g["solve_pnp"] = sim_solve_pnp
+    g["set_head"] = sim_set_head
+    print("[patch] 已替换 I/O 函数: run_action / solve_pnp / set_head")
+
+    try:
+        # 3. 执行原主流程逻辑（与 goodluck.py 末尾一致）
+        run_action("stand")
+        set_head(HEAD_CENTER)
+
+        for tid in ["1", "2", "3", "4"]:
+            # 停靠阶段：到达 stand_poses，停留 3 秒
+            if not navigate_to_target(tid, stand_poses, STOP_TIME):
+                print(f"导航至停靠点 {tid} 失败，程序终止。")
+                break
+            print(f"已到达停靠点 {tid}。")
+
+            # 准备转向阶段：到达 target_poses，不停留
+            if not navigate_to_target(tid, target_poses, 0):
+                print(f"导航至转向点 {tid} 失败，程序终止。")
+                break
+            print(f"已到达转向点 {tid}。")
+
+        # 第5点：开环走出出口
+        print("\n===== 到达第4个转向点，准备开环走出出口 =====")
+        run_action("turn_left", times=4)
+        run_action("go_forward", times=3)
+        run_action("stand")
+        print("===== 全程完成 =====")
+
+    except Exception as e:
+        print(f"[run_simulation] 模拟过程异常: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # 4. 保存最终轨迹图
+        save_trajectory_png()
+        print("\n模拟结束。")
+        # 交互后端保持窗口；非交互后端直接退出
+        if matplotlib.get_backend().lower() != "agg":
+            print("关闭图形窗口退出。")
+            plt.show()
+
+
+if __name__ == "__main__":
+    run_simulation()
