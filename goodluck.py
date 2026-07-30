@@ -553,6 +553,7 @@ for tid in ["1", "2", "3", "4"]:
 
 # 第5点：开环走出出口
 print("\n===== 到达第4个转向点，准备开环走出出口 =====")
+run_action("go_forward", times=3)
 run_action("turn_left", times=3)
 run_action("go_forward", times=6)
 run_action("stand")
