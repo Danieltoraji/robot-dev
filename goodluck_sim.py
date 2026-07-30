@@ -52,10 +52,6 @@ except Exception:
 # 从这里开始可以更改
 # |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 
-# |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-# 从这里开始放进测试器
-# |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-
 
 # =====================================================================
 # 赛道数据
@@ -106,10 +102,10 @@ STOP_TIME = 3  # 到达目标点后停留时间，单位秒
 MAX_LOCATE_RETRIES = 5  # 定位失败最大重试次数
 PANNING_ANGLE_THRESHOLD = 30.0  # 朝向到目标点夹角阈值，单位度
 OBSTACLE_THRESHOLD = 15.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
-SAFE_MARGIN_CM = 1.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
+SAFE_MARGIN_CM = 3.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
 
 target_poses = {}
-target_poses["1"] = np.array([14.7, 21.3], dtype=np.float64)
+target_poses["1"] = np.array([20.0, 21.3], dtype=np.float64)
 target_poses["2"] = np.array([23.1, 70], dtype=np.float64)
 target_poses["3"] = np.array([65, 79.7], dtype=np.float64)
 target_poses["4"] = np.array([74, 30], dtype=np.float64)
@@ -134,7 +130,7 @@ TURN_RIGHT_SMALL_STEP_DEG = 21.0  # turn_right_small_step（待标定）
 TURN_LEFT_DEG = 30.0  # turn_left（估算值，待标定）
 TURN_RIGHT_DEG = 30.0  # turn_right（估算值，待标定）
 FORWARD_BIAS = 0.5  # 前进方向偏好权重，避免原地转圈
-CAMERA_FORWARD_OFFSET_CM = 5.0  # 摄像头中心相对旋转中心的前后偏移（旋转中心在后方，cm）
+CAMERA_FORWARD_OFFSET_CM = 2.0  # 摄像头中心相对旋转中心的前后偏移（旋转中心在后方，cm）
 TURN_LEFT_RADIUS_CM = 5.0  # 左转圆周运动半径（cm）
 TURN_RIGHT_RADIUS_CM = 5.0  # 右转圆周运动半径（cm）
 
@@ -143,7 +139,7 @@ TURN_RIGHT_RADIUS_CM = 5.0  # 右转圆周运动半径（cm）
 # =====================================================================
 HEAD_CENTER = 1500
 HEAD_RIGHT = 600
-HEAD_LEFT = 1700
+HEAD_LEFT = 2400
 HEAD_MOVE_TIME_MS = 500  # 头部舵机转动等待时间，单位ms，对应旋动90°的时间。
 HEAD_MOVE_TIME_MIN_MS = 100  # 小角度转头最小等待时间，单位ms
 # 舵机脉宽→角度线性映射：angle_deg = (pulse - 1500) * SERVO_DEG_PER_US
@@ -594,6 +590,7 @@ if not os.environ.get("MPLBACKEND"):
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.transforms import Affine2D
+from datetime import datetime
 
 # 配置中文字体（Windows: Microsoft YaHei / SimHei；缺失则回退默认）
 for _font in ["Microsoft YaHei", "SimHei", "WenQuanYi Micro Hei", "Arial Unicode MS"]:
@@ -607,21 +604,25 @@ matplotlib.rcParams["axes.unicode_minus"] = False  # 负号显示
 # ---------------------------------------------------------------------
 # 模拟器配置（噪声开关，默认全 0 = 理想模式）
 # ---------------------------------------------------------------------
-LOCATE_NOISE_STD = 0.0          # 定位位置噪声标准差（cm），0=无噪声
-LOCATE_ANGLE_NOISE_STD = 0.0    # 定位朝向角噪声标准差（度），0=无噪声
-ACTION_ERROR_STD = 0.0          # 动作步长误差标准差（比例，0.1=±10%），0=无误差
-TURN_ERROR_STD = 0.0            # 转向角度误差标准差（度），0=无误差
-ANIM_PAUSE_SEC = 0.3            # 每步动画刷新间隔（秒）
-TRAJECTORY_PNG_PATH = "trajectory.png"  # 最终轨迹图保存路径
+LOCATE_NOISE_STD = 1.0          # 定位位置噪声标准差（cm），0=无噪声
+LOCATE_ANGLE_NOISE_STD = 5.0    # 定位朝向角噪声标准差（度），0=无噪声
+ACTION_ERROR_STD = 0.1          # 动作步长误差标准差（比例，0.1=±10%），0=无误差
+TURN_ERROR_STD = 5.0            # 转向角度误差标准差（度），0=无误差
+ANIM_PAUSE_SEC = 1            # 每步动画刷新间隔（秒）
 MAX_SIM_STEPS = 500            # 模拟最大动作步数，防止算法不收敛时无限循环卡死
 
+# 输出目录与文件（result/ 子目录，文件名含日期时间）
+_RESULT_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+RESULT_DIR = "result"
+TRAJECTORY_PNG_PATH = os.path.join(RESULT_DIR, f"trajectory_{_RESULT_TIMESTAMP}.png")
+
 # 机器人边界框尺寸（以几何中心为中心）
-ROBOT_WIDTH_CM = 10.0          # 机器人边界框宽（cm）
-ROBOT_LENGTH_CM = 26.0         # 机器人边界框长（cm）
+ROBOT_WIDTH_CM = 26.0          # 机器人边界框宽（cm）
+ROBOT_LENGTH_CM = 10.0         # 机器人边界框长（cm）
 
 # 日志输出到文件
 LOG_TO_FILE = True             # 是否输出日志到文件
-LOG_FILE_PATH = "simulation_log.txt"  # 日志文件路径
+LOG_FILE_PATH = os.path.join(RESULT_DIR, f"simulation_log_{_RESULT_TIMESTAMP}.txt")
 
 # 各动作耗时（秒），用于实时累计完成时间
 ACTION_TIME_SEC = {
@@ -968,6 +969,9 @@ class TeeWriter:
 def run_simulation():
     """主模拟流程：初始化 → monkey-patch → 执行原主流程 → 保存轨迹图"""
     global sim, viz
+
+    # 确保输出目录存在
+    os.makedirs(RESULT_DIR, exist_ok=True)
 
     # 日志 tee：同时输出到终端和文件
     tee = None

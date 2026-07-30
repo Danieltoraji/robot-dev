@@ -64,10 +64,10 @@ STOP_TIME = 3  # 到达目标点后停留时间，单位秒
 MAX_LOCATE_RETRIES = 5  # 定位失败最大重试次数
 PANNING_ANGLE_THRESHOLD = 30.0  # 朝向到目标点夹角阈值，单位度
 OBSTACLE_THRESHOLD = 15.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
-SAFE_MARGIN_CM = 1.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
+SAFE_MARGIN_CM = 3.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
 
 target_poses = {}
-target_poses["1"] = np.array([14.7, 21.3], dtype=np.float64)
+target_poses["1"] = np.array([20.0, 21.3], dtype=np.float64)
 target_poses["2"] = np.array([23.1, 70], dtype=np.float64)
 target_poses["3"] = np.array([65, 79.7], dtype=np.float64)
 target_poses["4"] = np.array([74, 30], dtype=np.float64)
@@ -92,7 +92,7 @@ TURN_RIGHT_SMALL_STEP_DEG = 21.0  # turn_right_small_step（待标定）
 TURN_LEFT_DEG = 30.0  # turn_left（估算值，待标定）
 TURN_RIGHT_DEG = 30.0  # turn_right（估算值，待标定）
 FORWARD_BIAS = 0.5  # 前进方向偏好权重，避免原地转圈
-CAMERA_FORWARD_OFFSET_CM = 5.0  # 摄像头中心相对旋转中心的前后偏移（旋转中心在后方，cm）
+CAMERA_FORWARD_OFFSET_CM = 2.0  # 摄像头中心相对旋转中心的前后偏移（旋转中心在后方，cm）
 TURN_LEFT_RADIUS_CM = 5.0  # 左转圆周运动半径（cm）
 TURN_RIGHT_RADIUS_CM = 5.0  # 右转圆周运动半径（cm）
 
@@ -101,7 +101,7 @@ TURN_RIGHT_RADIUS_CM = 5.0  # 右转圆周运动半径（cm）
 # =====================================================================
 HEAD_CENTER = 1500
 HEAD_RIGHT = 600
-HEAD_LEFT = 1700
+HEAD_LEFT = 2400
 HEAD_MOVE_TIME_MS = 500  # 头部舵机转动等待时间，单位ms，对应旋动90°的时间。
 HEAD_MOVE_TIME_MIN_MS = 100  # 小角度转头最小等待时间，单位ms
 # 舵机脉宽→角度线性映射：angle_deg = (pulse - 1500) * SERVO_DEG_PER_US
