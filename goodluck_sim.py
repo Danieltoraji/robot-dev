@@ -583,6 +583,7 @@ def navigate_to_target(target_id, poses, stop_time=STOP_TIME):
 # =====================================================================
 
 import os
+import sys
 import matplotlib
 # 后端选择：尊重 MPLBACKEND 环境变量；否则优先交互式（TkAgg）支持动画
 if not os.environ.get("MPLBACKEND"):
@@ -592,6 +593,7 @@ if not os.environ.get("MPLBACKEND"):
         matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
+from matplotlib.transforms import Affine2D
 
 # 配置中文字体（Windows: Microsoft YaHei / SimHei；缺失则回退默认）
 for _font in ["Microsoft YaHei", "SimHei", "WenQuanYi Micro Hei", "Arial Unicode MS"]:
@@ -612,6 +614,30 @@ TURN_ERROR_STD = 0.0            # 转向角度误差标准差（度），0=无�
 ANIM_PAUSE_SEC = 0.3            # 每步动画刷新间隔（秒）
 TRAJECTORY_PNG_PATH = "trajectory.png"  # 最终轨迹图保存路径
 MAX_SIM_STEPS = 500            # 模拟最大动作步数，防止算法不收敛时无限循环卡死
+
+# 机器人边界框尺寸（以几何中心为中心）
+ROBOT_WIDTH_CM = 10.0          # 机器人边界框宽（cm）
+ROBOT_LENGTH_CM = 26.0         # 机器人边界框长（cm）
+
+# 日志输出到文件
+LOG_TO_FILE = True             # 是否输出日志到文件
+LOG_FILE_PATH = "simulation_log.txt"  # 日志文件路径
+
+# 各动作耗时（秒），用于实时累计完成时间
+ACTION_TIME_SEC = {
+    "stand": 1.0,
+    "go_forward_one_step": 1.0,
+    "go_forward_one_small_step": 0.8,
+    "go_forward": 1.0,
+    "back_one_step": 1.0,
+    "back": 1.0,
+    "left_move": 1.2,
+    "right_move": 1.2,
+    "turn_left": 1.5,
+    "turn_left_small_step": 0.8,
+    "turn_right": 1.5,
+    "turn_right_small_step": 0.8,
+}
 
 # 机器人初始状态（入口附近，朝东）
 INITIAL_POS = np.array([2.0, 20.0], dtype=np.float64)
@@ -635,6 +661,7 @@ class SimState:
         self.last_action = "init"
         self.step_count = 0
         self.locate_count = 0
+        self.elapsed_time = 0.0
 
     def _record(self, action_name):
         self.last_action = action_name
@@ -723,6 +750,7 @@ class Visualizer:
         self._draw_static()
         # 动态层句柄
         self.robot_arrow = None
+        self.robot_box = None
         self.traj_line = None
         self.action_text = None
         self.fig.canvas.manager.set_window_title("寻路算法模拟器")
@@ -777,7 +805,7 @@ class Visualizer:
         """重绘动态层并刷新"""
         ax = self.ax
         # 移除旧的动态元素
-        for artist in [self.robot_arrow, self.traj_line, self.action_text]:
+        for artist in [self.robot_arrow, self.robot_box, self.traj_line, self.action_text]:
             if artist is not None:
                 artist.remove()
         # 历史轨迹
@@ -786,6 +814,18 @@ class Visualizer:
         # 机器人位置箭头
         pos = sim_state.pos
         ori = sim_state.orientation
+        # 机器人边界框：以 pos 为中心，长边沿朝向旋转
+        angle_deg = np.degrees(np.arctan2(ori[1], ori[0]))
+        # 矩形左下角（未旋转时）：以中心为原点偏移
+        box_x = pos[0] - ROBOT_LENGTH_CM / 2
+        box_y = pos[1] - ROBOT_WIDTH_CM / 2
+        t = Affine2D().rotate_deg_around(pos[0], pos[1], angle_deg) + ax.transData
+        self.robot_box = Rectangle(
+            (box_x, box_y), ROBOT_LENGTH_CM, ROBOT_WIDTH_CM,
+            facecolor=(1.0, 0.6, 0.6, 0.3), edgecolor="red", linewidth=1.2,
+        )
+        self.robot_box.set_transform(t)
+        ax.add_patch(self.robot_box)
         self.robot_arrow = ax.annotate(
             "",
             xy=(pos[0] + ori[0] * 4, pos[1] + ori[1] * 4),
@@ -888,10 +928,13 @@ def sim_run_action(name, times=1):
         else:
             print(f"[sim] 未知动作，忽略: {name}")
             sim._record(name)
+        # 累加动作耗时
+        sim.elapsed_time += ACTION_TIME_SEC.get(name, 1.0)
         if viz is not None:
             viz.update(sim, f"动作: {name} (第{len(sim.trajectory)}步)\n"
                             f"位置: ({sim.pos[0]:.1f}, {sim.pos[1]:.1f})  "
-                            f"朝向: ({sim.orientation[0]:.2f}, {sim.orientation[1]:.2f})")
+                            f"朝向: ({sim.orientation[0]:.2f}, {sim.orientation[1]:.2f})\n"
+                            f"已用时间: {sim.elapsed_time:.1f}s")
 
 
 def save_trajectory_png(path=TRAJECTORY_PNG_PATH):
@@ -903,9 +946,36 @@ def save_trajectory_png(path=TRAJECTORY_PNG_PATH):
     print(f"[save_trajectory_png] 轨迹图已保存: {path}")
 
 
+class TeeWriter:
+    """将 stdout 同时写入终端和文件"""
+
+    def __init__(self, file_path, original_stdout):
+        self.file = open(file_path, "w", encoding="utf-8")
+        self.stdout = original_stdout
+
+    def write(self, data):
+        self.stdout.write(data)
+        self.file.write(data)
+
+    def flush(self):
+        self.stdout.flush()
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
+
+
 def run_simulation():
     """主模拟流程：初始化 → monkey-patch → 执行原主流程 → 保存轨迹图"""
     global sim, viz
+
+    # 日志 tee：同时输出到终端和文件
+    tee = None
+    original_stdout = sys.stdout
+    if LOG_TO_FILE:
+        tee = TeeWriter(LOG_FILE_PATH, original_stdout)
+        sys.stdout = tee
+        print(f"[log] 日志同时输出到文件: {LOG_FILE_PATH}")
 
     print("=" * 60)
     print("寻路算法模拟器启动")
@@ -960,7 +1030,13 @@ def run_simulation():
     finally:
         # 4. 保存最终轨迹图
         save_trajectory_png()
+        print(f"\n总耗时: {sim.elapsed_time:.1f}s  总动作步数: {sim.step_count}")
         print("\n模拟结束。")
+        # 恢复 stdout
+        if tee is not None:
+            sys.stdout = original_stdout
+            tee.close()
+            print(f"[log] 日志已保存: {LOG_FILE_PATH}")
         # 交互后端保持窗口；非交互后端直接退出
         if matplotlib.get_backend().lower() != "agg":
             print("关闭图形窗口退出。")
