@@ -64,6 +64,7 @@ STOP_TIME = 3  # 到达目标点后停留时间，单位秒
 MAX_LOCATE_RETRIES = 5  # 定位失败最大重试次数
 PANNING_ANGLE_THRESHOLD = 30.0  # 朝向到目标点夹角阈值，单位度
 OBSTACLE_THRESHOLD = 15.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
+SAFE_MARGIN_CM = 1.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
 
 target_poses = {}
 target_poses["1"] = np.array([14.7, 21.3], dtype=np.float64)
@@ -91,6 +92,9 @@ TURN_RIGHT_SMALL_STEP_DEG = 21.0  # turn_right_small_step（待标定）
 TURN_LEFT_DEG = 30.0  # turn_left（估算值，待标定）
 TURN_RIGHT_DEG = 30.0  # turn_right（估算值，待标定）
 FORWARD_BIAS = 0.5  # 前进方向偏好权重，避免原地转圈
+CAMERA_FORWARD_OFFSET_CM = 5.0  # 摄像头中心相对旋转中心的前后偏移（旋转中心在后方，cm）
+TURN_LEFT_RADIUS_CM = 5.0  # 左转圆周运动半径（cm）
+TURN_RIGHT_RADIUS_CM = 5.0  # 右转圆周运动半径（cm）
 
 # =====================================================================
 # 头部舵机参数常量
@@ -157,13 +161,17 @@ def distance_to_walls(pos):
     return min_dist
 
 def nearest_safe_point(pos):
-    """找离 pos 最近的安全点（distance_to_walls >= OBSTACLE_THRESHOLD）
+    """找离 pos 最近的安全点（distance_to_walls >= SAFE_THRESHOLD）
 
+    搜索阈值 SAFE_THRESHOLD = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，
+    确保返回的安全点离机器人足够远（> POSITION_THRESHOLD），必触发平移动作，
+    避免危险区边界处“需逃离但无需导航”的死循环。
     若 pos 本身安全直接返回；否则以 1cm 步长、16方向螺旋搜索，
     返回首个安全点；兜底返回搜索范围内 distance_to_walls 最大的点。
     """
+    SAFE_THRESHOLD = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM
     pos = np.array(pos, dtype=np.float64)
-    if distance_to_walls(pos) >= OBSTACLE_THRESHOLD:
+    if distance_to_walls(pos) >= SAFE_THRESHOLD:
         return pos
 
     # 16方向螺旋搜索，步长1cm，最大搜索半径100cm
@@ -174,7 +182,7 @@ def nearest_safe_point(pos):
         for a in angles:
             candidate = pos + step * np.array([np.cos(a), np.sin(a)])
             d = distance_to_walls(candidate)
-            if d >= OBSTACLE_THRESHOLD:
+            if d >= SAFE_THRESHOLD:
                 return candidate
             if d > best_dist:
                 best_dist = d
@@ -545,7 +553,7 @@ for tid in ["1", "2", "3", "4"]:
 
 # 第5点：开环走出出口
 print("\n===== 到达第4个转向点，准备开环走出出口 =====")
-run_action("turn_left", times=4)
-run_action("go_forward", times=3)
+run_action("turn_left", times=3)
+run_action("go_forward", times=6)
 run_action("stand")
 print("===== 全程完成 =====")

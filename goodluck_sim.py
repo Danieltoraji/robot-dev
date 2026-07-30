@@ -101,6 +101,7 @@ STOP_TIME = 3  # 到达目标点后停留时间，单位秒
 MAX_LOCATE_RETRIES = 5  # 定位失败最大重试次数
 PANNING_ANGLE_THRESHOLD = 30.0  # 朝向到目标点夹角阈值，单位度
 OBSTACLE_THRESHOLD = 15.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
+SAFE_MARGIN_CM = 1.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
 
 target_poses = {}
 target_poses["1"] = np.array([14.7, 21.3], dtype=np.float64)
@@ -128,6 +129,9 @@ TURN_RIGHT_SMALL_STEP_DEG = 21.0  # turn_right_small_step（待标定）
 TURN_LEFT_DEG = 30.0  # turn_left（估算值，待标定）
 TURN_RIGHT_DEG = 30.0  # turn_right（估算值，待标定）
 FORWARD_BIAS = 0.5  # 前进方向偏好权重，避免原地转圈
+CAMERA_FORWARD_OFFSET_CM = 5.0  # 摄像头中心相对旋转中心的前后偏移（旋转中心在后方，cm）
+TURN_LEFT_RADIUS_CM = 5.0  # 左转圆周运动半径（cm）
+TURN_RIGHT_RADIUS_CM = 5.0  # 右转圆周运动半径（cm）
 
 # =====================================================================
 # 头部舵机参数常量
@@ -194,13 +198,17 @@ def distance_to_walls(pos):
     return min_dist
 
 def nearest_safe_point(pos):
-    """找离 pos 最近的安全点（distance_to_walls >= OBSTACLE_THRESHOLD）
+    """找离 pos 最近的安全点（distance_to_walls >= SAFE_THRESHOLD）
 
+    搜索阈值 SAFE_THRESHOLD = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，
+    确保返回的安全点离机器人足够远（> POSITION_THRESHOLD），必触发平移动作，
+    避免危险区边界处“需逃离但无需导航”的死循环。
     若 pos 本身安全直接返回；否则以 1cm 步长、16方向螺旋搜索，
     返回首个安全点；兜底返回搜索范围内 distance_to_walls 最大的点。
     """
+    SAFE_THRESHOLD = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM
     pos = np.array(pos, dtype=np.float64)
-    if distance_to_walls(pos) >= OBSTACLE_THRESHOLD:
+    if distance_to_walls(pos) >= SAFE_THRESHOLD:
         return pos
 
     # 16方向螺旋搜索，步长1cm，最大搜索半径100cm
@@ -211,7 +219,7 @@ def nearest_safe_point(pos):
         for a in angles:
             candidate = pos + step * np.array([np.cos(a), np.sin(a)])
             d = distance_to_walls(candidate)
-            if d >= OBSTACLE_THRESHOLD:
+            if d >= SAFE_THRESHOLD:
                 return candidate
             if d > best_dist:
                 best_dist = d
@@ -621,6 +629,7 @@ class SimState:
         self.trajectory = [self.pos.copy()]
         self.last_action = "init"
         self.step_count = 0
+        self.locate_count = 0
 
     def _record(self, action_name):
         self.last_action = action_name
@@ -661,14 +670,31 @@ class SimState:
         self._record("right_move")
 
     def apply_turn(self, deg):
-        """原地转向 deg 度（正=左转，负=右转）"""
+        """圆周运动转向：机体绕旋转中心做圆弧运动（正=左转，负=右转）
+
+        旋转中心 = 机体位置 - d·朝向 + R·侧向方向
+          左转：侧向 = left_dir = [-oy, ox]，圆心在左后方
+          右转：侧向 = right_dir = [oy, -ox]，圆心在右后方
+        机体绕圆心旋转 α 度（左转正、右转负），位置和朝向同步更新。
+        """
         actual_deg = deg
         if TURN_ERROR_STD > 0:
             actual_deg = deg + np.random.normal(0, TURN_ERROR_STD)
-        theta = np.radians(actual_deg)
-        # 左转旋转矩阵 R(+θ) = [[cos, -sin], [sin, cos]]
-        cos_t, sin_t = np.cos(theta), np.sin(theta)
-        R = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+        alpha = np.radians(actual_deg)
+        oy = self.orientation
+        # 旋转中心：先向后退 d·O，再侧向偏移 R
+        base = self.pos - CAMERA_FORWARD_OFFSET_CM * oy
+        if actual_deg >= 0:  # 左转
+            left_dir = np.array([-oy[1], oy[0]])
+            center = base + TURN_LEFT_RADIUS_CM * left_dir
+        else:  # 右转
+            right_dir = np.array([oy[1], -oy[0]])
+            center = base + TURN_RIGHT_RADIUS_CM * right_dir
+        # 旋转矩阵 R(α) = [[cos, -sin], [sin, cos]]
+        cos_a, sin_a = np.cos(alpha), np.sin(alpha)
+        R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        # P' = K + R·(P - K)，O' = R·O
+        self.pos = center + R @ (self.pos - center)
         self.orientation = R @ self.orientation
         norm = np.linalg.norm(self.orientation)
         if norm != 0:
@@ -784,8 +810,18 @@ viz = None
 # ---------------------------------------------------------------------
 
 def sim_solve_pnp():
-    """桩：直接返回模拟器真实状态（可注入噪声），不拍照不检测"""
+    """桩：直接返回模拟器真实状态（可注入噪声），不拍照不检测
+
+    同时兼作死循环检测点：每次 navigate_to_target 循环都会调用定位，
+    若定位次数超限则抛异常中止，防止算法逻辑死循环（不执行动作时
+    MAX_SIM_STEPS 无法触发）。
+    """
     global current_position, current_orientation
+    sim.locate_count += 1
+    if sim.locate_count > MAX_SIM_STEPS * 3:
+        raise RuntimeError(
+            f"定位次数超限({sim.locate_count})，算法可能陷入死循环。中止以防卡死。"
+        )
     pos = sim.pos.copy()
     ori = sim.orientation.copy()
     # 注入定位噪声
