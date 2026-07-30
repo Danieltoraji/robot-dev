@@ -77,7 +77,7 @@ target_orientations["4"] = np.array([0, -1], dtype=np.float64)
 # 动作组参数常量（所有的数值都需要重新标定！！！）
 # =====================================================================
 FORWARD_ONE_STEP_CM = 4.0  # go_forward_one_step（待标定）
-FORWARD_ONE_SMALL_STEP_CM = 0.375  # go_forward_one_small_step（待标定）
+FORWARD_ONE_SMALL_STEP_CM = 2.0  # go_forward_one_small_step（待标定）
 BACK_ONE_STEP_CM = 4.0  # back_one_step（待标定）
 LEFT_MOVE_CM = 2.9  # left_move（待标定）
 RIGHT_MOVE_CM = 2.1  # right_move（待标定）
@@ -93,7 +93,8 @@ FORWARD_BIAS = 0.5  # 前进方向偏好权重，避免原地转圈
 HEAD_CENTER = 1500
 HEAD_RIGHT = 600
 HEAD_LEFT = 1700
-HEAD_MOVE_TIME_MS = 500
+HEAD_MOVE_TIME_MS = 500  # 头部舵机转动等待时间，单位ms，对应旋动90°的时间。
+HEAD_MOVE_TIME_MIN_MS = 100  # 小角度转头最小等待时间，单位ms
 # 舵机脉宽→角度线性映射：angle_deg = (pulse - 1500) * SERVO_DEG_PER_US
 # 标准500-2500μs对应±90°，即 90°/1000μs = 0.09
 SERVO_DEG_PER_US = 0.09
@@ -102,6 +103,7 @@ SERVO_DEG_PER_US = 0.09
 current_position = None
 current_orientation = None
 next_stop = "0"
+current_head_pulse = HEAD_CENTER  # 头部当前位置，初始中位
 
 def run_action(name, times=1):
     """执行动作组"""
@@ -205,9 +207,19 @@ def detect_apriltag(filename):
     return results
 
 def set_head(pulse, move_time_ms=HEAD_MOVE_TIME_MS):
-    """转动头部舵机并等待到位"""
-    ctl.set_pwm_servo_pulse(2, pulse, move_time_ms)
-    time.sleep(move_time_ms / 1000.0 + 0.2)
+    """转动头部舵机并等待到位；
+    目标与当前位置相同则跳过。
+    需要旋转时，按脉宽差（角度差）动态缩放等待时间。900μs≈90°为满量程，最小 HEAD_MOVE_TIME_MIN_MS。
+    """
+    global current_head_pulse
+    if pulse == current_head_pulse:
+        return  # 已在目标位置，无需等待
+    # 按角度差动态调整等待时间，最小 HEAD_MOVE_TIME_MIN_MS
+    delta = abs(pulse - current_head_pulse)
+    dynamic_time = max(HEAD_MOVE_TIME_MIN_MS, int(move_time_ms * delta / 900))
+    ctl.set_pwm_servo_pulse(2, pulse, dynamic_time)
+    time.sleep(dynamic_time / 1000.0 + 0.2)
+    current_head_pulse = pulse
 
 def pulse_to_angle(pulse):
     """舵机脉宽→角度（度），右转为负，左转为正"""
