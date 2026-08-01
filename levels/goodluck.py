@@ -54,7 +54,7 @@ stand_poses["1"] = np.array([14.7, 21.3], dtype=np.float64)
 stand_poses["2"] = np.array([23.1, 70], dtype=np.float64)
 stand_poses["3"] = np.array([65, 79.7], dtype=np.float64)
 stand_poses["4"] = np.array([74, 30], dtype=np.float64)
-
+stand_poses["5"] = np.array([100, 20], dtype=np.float64)
 
 # =====================================================================
 # 决策算法常量
@@ -67,16 +67,17 @@ SAFE_MARGIN_CM = 3.0  # 安全点额外余量。实际安全点距离 = OBSTACLE
 
 target_poses = {}
 target_poses["1"] = np.array([20.0, 21.3], dtype=np.float64)
-target_poses["2"] = np.array([23.1, 70], dtype=np.float64)
-target_poses["3"] = np.array([65, 79.7], dtype=np.float64)
+target_poses["2"] = np.array([23.1, 75.0], dtype=np.float64)
+target_poses["3"] = np.array([70, 79.7], dtype=np.float64)
 target_poses["4"] = np.array([74, 30], dtype=np.float64)
+target_poses["5"] = np.array([100, 20], dtype=np.float64)
 
 target_orientations = {}
 target_orientations["1"] = np.array([1, 0], dtype=np.float64)
 target_orientations["2"] = np.array([0, 1], dtype=np.float64)
 target_orientations["3"] = np.array([1, 0], dtype=np.float64)
 target_orientations["4"] = np.array([0, -1], dtype=np.float64)
-
+target_orientations["5"] = np.array([1, 0], dtype=np.float64)
 
 # =====================================================================
 # 动作组参数常量（所有的数值都需要重新标定！！！）
@@ -336,7 +337,7 @@ def run_level(state):
     state.run_action("stand")
     state.set_head(HEAD_CENTER)
 
-    for tid in ["1", "2", "3", "4"]:
+    for tid in ["1", "2", "3", "4", "5"]:
         # 停靠阶段：到达 stand_poses，停留 3 秒
         if not navigate_to_target(state, tid, stand_poses, STOP_TIME):
             print(f"导航至停靠点 {tid} 失败，程序终止。")
@@ -349,11 +350,5 @@ def run_level(state):
             return False
         print(f"已到达转向点 {tid}。")
 
-    # 第5点：开环走出出口
-    print("\n===== 到达第4个转向点，准备开环走出出口 =====")
-    state.run_action("go_forward", times=3)
-    state.run_action("turn_left", times=3)
-    state.run_action("go_forward", times=6)
-    state.run_action("stand")
     print("===== 全程完成 =====")
     return True
