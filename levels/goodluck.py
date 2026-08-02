@@ -59,7 +59,7 @@ stand_poses["5"] = np.array([100, 20], dtype=np.float64)
 # =====================================================================
 # 决策算法常量
 # =====================================================================
-ORIENTATION_THRESHOLD = 0.19  # 朝向差异模长阈值，约11°，是2sin(11°/2)的值
+ORIENTATION_THRESHOLD = 0.26  # 朝向差异模长阈值，约11°，是2sin(11°/2)的值
 POSITION_THRESHOLD = 3.0  # 位置差异模长阈值，单位cm
 STOP_TIME = 3  # 到达目标点后停留时间，单位秒
 OBSTACLE_THRESHOLD = 15.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
@@ -87,11 +87,11 @@ FORWARD_ONE_SMALL_STEP_CM = 2.0  # go_forward_one_small_step（待标定）
 BACK_ONE_STEP_CM = 4.0  # back_one_step（待标定）
 LEFT_MOVE_CM = 2.9  # left_move（待标定）
 RIGHT_MOVE_CM = 2.1  # right_move（待标定）
-TURN_LEFT_SMALL_STEP_DEG = 21.0  # turn_left_small_step（待标定）
-TURN_RIGHT_SMALL_STEP_DEG = 21.0  # turn_right_small_step（待标定）
-TURN_LEFT_DEG = 30.0  # turn_left（估算值，待标定）
+TURN_LEFT_SMALL_STEP_DEG = 15.0  # turn_left_small_step（待标定）
+TURN_RIGHT_SMALL_STEP_DEG = 15.0  # turn_right_small_step（待标定）
+TURN_LEFT_DEG = 22.0  # turn_left（估算值，待标定）
 TURN_RIGHT_DEG = 30.0  # turn_right（估算值，待标定）
-FORWARD_BIAS = 0.5  # 前进方向偏好权重，避免原地转圈
+FORWARD_BIAS = 0.0  # 前进方向偏好权重，避免原地转圈
 CAMERA_FORWARD_OFFSET_CM = 2.0  # 摄像头中心相对旋转中心的前后偏移（旋转中心在后方，cm）
 TURN_LEFT_RADIUS_CM = 5.0  # 左转圆周运动半径（cm）
 TURN_RIGHT_RADIUS_CM = 5.0  # 右转圆周运动半径（cm）
@@ -244,12 +244,12 @@ def decide_rotation_action(state, orientation_diff):
         print(f"需右转 {angle_deg:.1f}°")
 
     if direction == "left":
-        if angle_deg > TURN_LEFT_DEG:
+        if abs(angle_deg - TURN_LEFT_SMALL_STEP_DEG) > abs(angle_deg - TURN_LEFT_DEG):
             return "turn_left", 1
         else:
             return "turn_left_small_step", 1
     else:
-        if angle_deg > TURN_RIGHT_DEG:
+        if abs(angle_deg - TURN_RIGHT_SMALL_STEP_DEG) > abs(angle_deg - TURN_RIGHT_DEG):
             return "turn_right", 1
         else:
             return "turn_right_small_step", 1

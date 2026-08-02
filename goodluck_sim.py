@@ -105,10 +105,19 @@ class SimState:
         self.step_count = 0
         self.locate_count = 0
         self.elapsed_time = 0.0
+        # 记录每步动作信息（序号、动作名、位置、朝向），用于日志和可视化
+        self.step_actions = []
 
     def _record(self, action_name):
         self.last_action = action_name
         self.trajectory.append(self.pos.copy())
+        self.step_actions.append({
+            "step": self.step_count,
+            "action": action_name,
+            "pos": self.pos.copy(),
+            "orientation": self.orientation.copy(),
+            "time": self.elapsed_time,
+        })
 
     def apply_forward(self, cm):
         """沿当前朝向前进 cm 厘米"""
@@ -197,6 +206,7 @@ class Visualizer:
         self.robot_box = None
         self.traj_line = None
         self.action_text = None
+        self.step_markers = []  # 步骤序号标记列表
         self.fig.canvas.manager.set_window_title("寻路算法模拟器")
 
     def _draw_static(self):
@@ -249,12 +259,35 @@ class Visualizer:
         """重绘动态层并刷新"""
         ax = self.ax
         # 移除旧的动态元素
-        for artist in [self.robot_arrow, self.robot_box, self.traj_line, self.action_text]:
+        for artist in [self.robot_arrow, self.robot_box, self.traj_line, self.action_text] + self.step_markers:
             if artist is not None:
                 artist.remove()
+        self.step_markers = []
         # 历史轨迹
         traj = np.array(sim_state.trajectory)
         self.traj_line, = ax.plot(traj[:, 0], traj[:, 1], "c-", linewidth=1.5, alpha=0.7)
+        # 步骤序号标记：在每个轨迹点旁标注序号
+        for i, point in enumerate(sim_state.trajectory):
+            if i == 0:
+                label = "S"  # 起点
+            else:
+                # 从 step_actions 获取动作名缩写
+                if i - 1 < len(sim_state.step_actions):
+                    sa = sim_state.step_actions[i - 1]
+                    label = f"#{sa['step']}"
+                else:
+                    label = f"#{i}"
+            marker = ax.annotate(
+                label,
+                (point[0], point[1]),
+                textcoords="offset points",
+                xytext=(5, 5),
+                fontsize=6,
+                color="darkblue",
+                fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.1", facecolor="yellow", alpha=0.7, edgecolor="none"),
+            )
+            self.step_markers.append(marker)
         # 机器人位置箭头
         pos = sim_state.pos
         ori = sim_state.orientation
@@ -316,6 +349,10 @@ class SimRobotState(RobotState):
                     f"模拟步数超限({MAX_SIM_STEPS})，算法可能不收敛。中止以防卡死。"
                 )
             self._sim.step_count += 1
+            step_num = self._sim.step_count
+            print(f"\n{'='*50}")
+            print(f"  ▶ 动作 #{step_num}: {name}")
+            print(f"{'='*50}")
             if name == "stand":
                 self._sim._record("stand")
             elif name == "go_forward_one_step":
@@ -346,11 +383,15 @@ class SimRobotState(RobotState):
                 self._sim._record(name)
             # 累加动作耗时
             self._sim.elapsed_time += ACTION_TIME_SEC.get(name, 1.0)
+            print(f"  ✦ 动作 #{step_num} 完成: {name}  "
+                  f"位置=({self._sim.pos[0]:.1f}, {self._sim.pos[1]:.1f})  "
+                  f"朝向=({self._sim.orientation[0]:.2f}, {self._sim.orientation[1]:.2f})  "
+                  f"累计时间={self._sim.elapsed_time:.1f}s")
             if self._viz is not None:
-                self._viz.update(self._sim, f"动作: {name} (第{len(self._sim.trajectory)}步)\n"
+                self._viz.update(self._sim, f"▶ 动作 #{step_num}: {name}\n"
                                 f"位置: ({self._sim.pos[0]:.1f}, {self._sim.pos[1]:.1f})  "
                                 f"朝向: ({self._sim.orientation[0]:.2f}, {self._sim.orientation[1]:.2f})\n"
-                                f"已用时间: {self._sim.elapsed_time:.1f}s")
+                                f"已用时间: {self._sim.elapsed_time:.1f}s  总步数: {step_num}")
 
     def solve_pnp(self):
         """桩：直接返回模拟器真实状态（可注入噪声），不拍照不检测
@@ -392,6 +433,9 @@ def save_trajectory_png(path=TRAJECTORY_PNG_PATH):
     if viz is None:
         print("[save_trajectory_png] 可视化未初始化，跳过保存。")
         return
+    # 保存前刷新最终画面，确保所有步骤序号标记都已绘制
+    if sim is not None:
+        viz.update(sim, f"模拟完成\n总步数: {sim.step_count}  总耗时: {sim.elapsed_time:.1f}s")
     viz.fig.savefig(path, dpi=150, bbox_inches="tight")
     print(f"[save_trajectory_png] 轨迹图已保存: {path}")
 
@@ -458,6 +502,16 @@ def run_simulation():
         # 4. 保存最终轨迹图
         save_trajectory_png()
         print(f"\n总耗时: {sim.elapsed_time:.1f}s  总动作步数: {sim.step_count}")
+        # 打印完整动作步骤摘要
+        if sim.step_actions:
+            print(f"\n{'='*60}")
+            print(f"  动作步骤摘要（共 {len(sim.step_actions)} 步）")
+            print(f"{'='*60}")
+            for sa in sim.step_actions:
+                print(f"  #{sa['step']:>3d}  {sa['action']:<28s}  "
+                      f"位置=({sa['pos'][0]:6.1f}, {sa['pos'][1]:6.1f})  "
+                      f"时间={sa['time']:.1f}s")
+            print(f"{'='*60}")
         print("\n模拟结束。")
         # 恢复 stdout
         if tee is not None:
