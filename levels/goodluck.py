@@ -346,9 +346,9 @@ def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0
         if dist > POSITION_THRESHOLD:
             action = decide_panning_action(state, state.current_position, target, state.current_orientation)
             if action is None:
-                # 极端兜底：所有动作被排除，强制后退尝试离开危险区
-                print("警告：无安全平移动作可选，强制后退尝试脱离危险区。")
-                state.run_action("back_one_step")
+                # 极端兜底：所有动作被排除
+                print("警告：无安全平移动作可选，按兵不动。")
+                # state.run_action("back_one_step")
             else:
                 state.run_action(action)
             continue
