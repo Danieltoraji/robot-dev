@@ -11,6 +11,7 @@ goodluck 关卡（levels/goodluck.py）
 """
 
 import time
+from collections import namedtuple
 import numpy as np
 
 from robot_core import RobotState, distance_point_to_rect, HEAD_CENTER
@@ -48,36 +49,42 @@ WALLS = [
     [95, 100, 40, 100], # 右墙
 ]
 
-# 以下定义机器人定点站立课目的目标点坐标和朝向。
-stand_poses = {}
-stand_poses["1"] = np.array([14.7, 21.3], dtype=np.float64)
-stand_poses["2"] = np.array([23.1, 70], dtype=np.float64)
-stand_poses["3"] = np.array([65, 79.7], dtype=np.float64)
-stand_poses["4"] = np.array([74, 30], dtype=np.float64)
-stand_poses["5"] = np.array([100, 20], dtype=np.float64)
-
 # =====================================================================
 # 决策算法常量
 # =====================================================================
-ORIENTATION_THRESHOLD = 0.26  # 朝向差异模长阈值，约11°，是2sin(11°/2)的值
+ORIENTATION_THRESHOLD = 0.40  # 朝向差异模长阈值，约20°
 POSITION_THRESHOLD = 3.0  # 位置差异模长阈值，单位cm
-STOP_TIME = 3  # 到达目标点后停留时间，单位秒
+STOP_TIME = 0.1  # 到达目标点后停留时间，单位秒
 OBSTACLE_THRESHOLD = 15.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
 SAFE_MARGIN_CM = 3.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
+CORRIDOR_CLEAR_CM = OBSTACLE_THRESHOLD + 3.0  # 走廊净空校验阈值（路点串沿线离墙最小距离）
+ORIENT_FREEZE_DIST_CM = 6.0  # 动态朝向冻结距离阈值（cm）：距目标 > 此值时用连线方向，≤ 此值时切指定朝向或冻结连线方向（防震荡）。调大防震荡，调小扩大连线方向范围，但需 > POSITION_THRESHOLD
 
-target_poses = {}
-target_poses["1"] = np.array([20.0, 21.3], dtype=np.float64)
-target_poses["2"] = np.array([23.1, 75.0], dtype=np.float64)
-target_poses["3"] = np.array([70, 79.7], dtype=np.float64)
-target_poses["4"] = np.array([74, 30], dtype=np.float64)
-target_poses["5"] = np.array([100, 20], dtype=np.float64)
+# =====================================================================
+# 统一路点模型与整条赛道路点表
+# =====================================================================
+# Waypoint(pos, stop, orientation)：
+#   pos         目标位置 [x, y]（cm）
+#   stop        到达后停留秒数；>0 = 停靠评分点，0 = 经过（转向点/中间走廊路点）
+#   orientation 目标朝向 [dx, dy]（单位向量）；None = 不强制朝向（走廊内顺向路点，
+#               沿当前朝向继续走，不额外转向）
+#
+# 路点表说明：
+#  - 停靠点/转向点是比赛要求经过的点（编号1~5）。
+#  - 中间走廊路点（orientation=None、stop=0）用于长程规划：把机器人提前引入
+#    开阔走廊，避开贴墙角的危险走廊（见各段注释），坐标建议用 assert_corridor_clear 校验。
+Waypoint = namedtuple("Waypoint", ["pos", "stop", "orientation"])
 
-target_orientations = {}
-target_orientations["1"] = np.array([1, 0], dtype=np.float64)
-target_orientations["2"] = np.array([0, 1], dtype=np.float64)
-target_orientations["3"] = np.array([1, 0], dtype=np.float64)
-target_orientations["4"] = np.array([0, -1], dtype=np.float64)
-target_orientations["5"] = np.array([1, 0], dtype=np.float64)
+ROUTE = [
+    Waypoint([14.7, 21.3], STOP_TIME, [1, 0]),   # 停靠点1
+    Waypoint([23.1, 30.0], 0.0, None),            # 中间路点①：先横移到x≈23，避开左墙底角
+    Waypoint([23.1, 70.0], STOP_TIME, [0, 1]),   # 停靠点2
+    Waypoint([40.0, 80.0], 0.0, None),            # 中间路点②：先上行到y≈80，绕过中墙上方
+    Waypoint([65.0, 79.7], STOP_TIME, [1, 0]),   # 停靠点3
+    Waypoint([74.0, 75.0], 0.0, None),            # 中间路点③：先东移到x≈74，远离中墙后下行
+    Waypoint([74.0, 30.0], STOP_TIME, [0, -1]),  # 停靠点4
+    Waypoint([100.0, 20.0], STOP_TIME, [1, 0]),  # 停靠点5
+]
 
 # =====================================================================
 # 动作组参数常量（所有的数值都需要重新标定！！！）
@@ -150,19 +157,6 @@ def nearest_safe_point(pos):
 # =====================================================================
 # 导航算法
 # =====================================================================
-
-def calculate_diff(state, target_pos, target_id):
-    """计算当前位置/朝向与目标点的差异
-
-    state: RobotState 实例。
-    target_pos: 目标位置坐标数组（2D）。
-    target_id: 目标编号，用于查 target_orientations。
-    """
-    position_diff = np.array(state.current_position) - np.array(target_pos)
-    orientation_diff = np.array(state.current_orientation) - np.array(
-        target_orientations[target_id]
-    )
-    return position_diff, orientation_diff
 
 def calc_distance(position_diff):
     """计算水平距离"""
@@ -254,23 +248,43 @@ def decide_rotation_action(state, orientation_diff):
         else:
             return "turn_right_small_step", 1
 
-def navigate_to_target(state, target_id, poses, stop_time=STOP_TIME):
-    """通用导航函数：定位→对准朝向→平移接近→到达检查→按需停留
+def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0):
+    """统一路点导航原语：定位 → 危险检测 → 动态朝向修正 → 平移接近 → 到达检查 → 按需停留
 
     state: RobotState 实例。
-    poses: 目标位置字典（stand_poses 或 target_poses）。
-    stop_time: 到达后停留秒数；0 表示不停留（转向起止点）。
+    target_pos: 目标位置 [x, y]（cm）。
+    target_orientation: 目标朝向 [dx, dy]（单位向量）；None 表示不强制朝向。
+    stop_time: 到达后停留秒数；0 表示不停留（转向点/中间路点）。
+
+    动态朝向策略：
+      - 距目标 > ORIENT_FREEZE_DIST_CM：目标朝向 = 当前位置→目标连线方向（动态更新），
+        使转弯段更平滑（斜切接近）。
+      - 距目标 ≤ ORIENT_FREEZE_DIST_CM：
+        · 有指定朝向 → 切换到指定朝向（确保停靠点评分朝向精确）。
+        · 无指定朝向(None) → 冻结进入近距离时的连线方向，之后固定不变（防震荡）。
+      - 逃离危险区时跳过朝向修正（effective_orient=None），优先平移离开。
     """
-    phase = "停靠点" if stop_time > 0 else "转向点"
-    print(f"\n===== 开始导航至{phase} {target_id} =====")
-    print(
-        f"目标坐标：{poses[target_id]}，目标朝向：{target_orientations[target_id]}"
-    )
+    target_pos = np.asarray(target_pos, dtype=np.float64)
+    if target_orientation is not None:
+        target_orientation = np.asarray(target_orientation, dtype=np.float64)
+        target_orientation = target_orientation / np.linalg.norm(target_orientation)
+
+    if stop_time > 0:
+        phase = "停靠点"
+    elif target_orientation is not None:
+        phase = "转向点"
+    else:
+        phase = "中间路点"
+    print(f"\n===== 开始导航至{phase}：{target_pos} =====")
+    if target_orientation is not None:
+        print(f"指定朝向：{target_orientation}")
+
+    frozen_orient = None  # 冻结的连线方向（走廊点近距离时使用，防震荡）
 
     while True:
         # 1. 定位（含头部扫描+身体转动重试）
         if not state.locate_with_retry():
-            print(f"无法定位，导航至{phase} {target_id} 失败。")
+            print(f"无法定位，导航至{phase} {target_pos} 失败。")
             return False
 
         print("当前机体位置：", state.current_position)
@@ -286,22 +300,50 @@ def navigate_to_target(state, target_id, poses, stop_time=STOP_TIME):
                 f"临时导航至安全点 {target}"
             )
         else:
-            target = poses[target_id]
+            target = target_pos
             escaping = False
 
-        # 3. 计算差异
-        pd, od = calculate_diff(state, target, target_id)
+        # 3. 计算位置差异
+        pd = np.array(state.current_position) - np.array(target)
+        dist = np.linalg.norm(pd)
         print("位置差异pd：", pd)
-        print("朝向差异od：", od)
 
-        # 4. 朝向优先：od 模 > 阈值 → 旋转修正（逃离时跳过，优先平移离开）
-        if not escaping and np.linalg.norm(od) > ORIENTATION_THRESHOLD:
+        # 4. 动态计算有效目标朝向
+        if escaping:
+            effective_orient = None  # 逃离时跳过朝向修正
+            orient_source = "无（逃离）"
+        elif dist > ORIENT_FREEZE_DIST_CM:
+            # 远距离：连线方向（指向目标），动态更新
+            effective_orient = -pd / dist
+            frozen_orient = None  # 重置冻结（回到远距离）
+            orient_source = "连线方向"
+        else:
+            # 近距离：有指定朝向则用指定，无则冻结连线方向
+            if target_orientation is not None:
+                effective_orient = target_orientation
+                orient_source = "指定朝向"
+            else:
+                if frozen_orient is None:
+                    frozen_orient = -pd / dist if dist > 0 else state.current_orientation.copy()
+                    print(f"  冻结连线方向：{frozen_orient}")
+                effective_orient = frozen_orient
+                orient_source = "冻结方向"
+
+        # 5. 计算朝向差异
+        od = None
+        if effective_orient is not None:
+            od = np.array(state.current_orientation) - effective_orient
+            print(f"目标朝向（{orient_source}）：{effective_orient}  朝向差异od：{od}")
+
+        # 6. 朝向优先：非逃离且朝向差异超阈值时修正
+        if (not escaping and od is not None
+                and np.linalg.norm(od) > ORIENTATION_THRESHOLD):
             action, times = decide_rotation_action(state, od)
             state.run_action(action, times)
             continue
 
-        # 5. 平移接近：pd 模 > 阈值 → 贪心选最优方向
-        if np.linalg.norm(pd) > POSITION_THRESHOLD:
+        # 7. 平移接近：pd 模 > 阈值 → 贪心选最优方向
+        if dist > POSITION_THRESHOLD:
             action = decide_panning_action(state, state.current_position, target, state.current_orientation)
             if action is None:
                 # 极端兜底：所有动作被排除，强制后退尝试离开危险区
@@ -311,17 +353,37 @@ def navigate_to_target(state, target_id, poses, stop_time=STOP_TIME):
                 state.run_action(action)
             continue
 
-        # 6. 到达
+        # 8. 到达
         if escaping:
             print(f"===== 已到达安全点 {target}，恢复原目标导航 =====")
             continue
         if stop_time > 0:
-            print(f"===== 到达{phase} {target_id}，停留 {stop_time} 秒 =====")
+            print(f"===== 到达{phase} {target_pos}，停留 {stop_time} 秒 =====")
             state.run_action("stand")
             time.sleep(stop_time)
         else:
-            print(f"===== 到达{phase} {target_id}，不停留 =====")
+            print(f"===== 到达{phase} {target_pos}，不停留 =====")
         return True
+
+def assert_corridor_clear(polyline, min_dist=CORRIDOR_CLEAR_CM):
+    """校验一串路点折线走廊的净空：沿线每 1cm 采样 distance_to_walls
+
+    任一采样点离墙 < min_dist 打印警告并返回 False（用于排查路点是否贴墙）。
+    """
+    pts = [np.asarray(p, dtype=np.float64) for p in polyline]
+    ok = True
+    for i in range(len(pts) - 1):
+        a, b = pts[i], pts[i + 1]
+        seg_len = np.linalg.norm(b - a)
+        n = max(int(seg_len), 2)
+        for k in range(n + 1):
+            sample = a + (b - a) * (k / n)
+            d = distance_to_walls(sample)
+            if d < min_dist:
+                print(f"  [走廊警告] 段 {a}→{b} 采样 {sample} 离墙 {d:.2f}cm < {min_dist}cm")
+                ok = False
+    print(f"  [走廊校验] {'通过，全部净空 >= %.1fcm' % min_dist if ok else '存在贴墙段，请调整路点'}")
+    return ok
 
 
 # =====================================================================
@@ -329,26 +391,21 @@ def navigate_to_target(state, target_id, poses, stop_time=STOP_TIME):
 # =====================================================================
 
 def run_level(state):
-    """goodluck 关卡主流程
+    """goodluck 关卡主流程：沿 ROUTE 路点串依次导航
 
     state: RobotState 实例（需已用 tag_poses 初始化）。
-    流程：站立→头部回正→依次导航4个停靠点/转向点→开环走出出口。
     """
+    # 上线前校验路点走廊净空
+    assert_corridor_clear([wp.pos for wp in ROUTE])
+
     state.run_action("stand")
     state.set_head(HEAD_CENTER)
 
-    for tid in ["1", "2", "3", "4", "5"]:
-        # 停靠阶段：到达 stand_poses，停留 3 秒
-        if not navigate_to_target(state, tid, stand_poses, STOP_TIME):
-            print(f"导航至停靠点 {tid} 失败，程序终止。")
+    for i, wp in enumerate(ROUTE, 1):
+        if not navigate_to_target(state, wp.pos, wp.orientation, wp.stop):
+            print(f"导航至路点 {i}（{wp.pos}）失败，程序终止。")
             return False
-        print(f"已到达停靠点 {tid}。")
-
-        # 准备转向阶段：到达 target_poses，不停留
-        if not navigate_to_target(state, tid, target_poses, 0):
-            print(f"导航至转向点 {tid} 失败，程序终止。")
-            return False
-        print(f"已到达转向点 {tid}。")
+        print(f"已{'到达停靠点' if wp.stop > 0 else '通过路点'} {i}：{wp.pos}")
 
     print("===== 全程完成 =====")
     return True

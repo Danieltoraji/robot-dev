@@ -227,18 +227,24 @@ for step in 1..100:
 while True:
     1. 定位（locate_with_retry）
     2. 危险检测
-       ├─ 离墙 < OBSTACLE_THRESHOLD → 临时目标 = nearest_safe_point()
-       └─ 安全 → 临时目标 = poses[target_id]
-    3. 计算差异
+       ├─ 离墙 < OBSTACLE_THRESHOLD → 临时目标 = nearest_safe_point()，escaping=True
+       └─ 安全 → 临时目标 = target_pos，escaping=False
+    3. 计算位置差异
        pd = current_position - target
-       od = current_orientation - target_orientation
-    4. 朝向优先（非逃离时）
-       ├─ |od| > ORIENTATION_THRESHOLD → decide_rotation_action() → 旋转
+       dist = |pd|
+    4. 动态计算有效目标朝向 effective_orient
+       ├─ escaping → None（跳过朝向修正）
+       ├─ dist > ORIENT_FREEZE_DIST_CM → 连线方向（动态更新），重置 frozen
+       └─ dist ≤ ORIENT_FREEZE_DIST_CM →
+          ├─ 有指定朝向 → 指定朝向
+          └─ 无指定(None) → 冻结进入近距离时的连线方向
+    5. 朝向优先（非逃离且 |od| > ORIENTATION_THRESHOLD）
+       ├─ decide_rotation_action() → 旋转
        └─ |od| ≤ 阈值 → 继续
-    5. 平移接近
-       ├─ |pd| > POSITION_THRESHOLD → decide_panning_action() → 平移
-       └─ |pd| ≤ 阈值 → 继续
-    6. 到达检查
+    6. 平移接近
+       ├─ dist > POSITION_THRESHOLD → decide_panning_action() → 平移
+       └─ dist ≤ 阈值 → 继续
+    7. 到达检查
        ├─ 逃离中 → 恢复原目标导航
        ├─ stop_time > 0 → 停留 stop_time 秒
        └─ stop_time = 0 → 不停留
@@ -249,6 +255,7 @@ while True:
 - **朝向优先于平移**：先对准朝向再平移，避免斜向移动偏离赛道
 - **逃离时跳过朝向修正**：在危险区中优先平移离开，不浪费时间转向
 - **两阶段共用同一函数**：停靠点（`stop_time=3`）和转向点（`stop_time=0`）逻辑统一
+- **动态朝向策略**：远距离用连线方向平滑接近，近距离切指定朝向或冻结防震荡（详见 5.4）
 
 ### 5.2 贪心平移决策
 
@@ -290,13 +297,27 @@ while True:
    - $\theta > \text{TURN\_DEG}$（30°）→ 大步转向（`turn_left` / `turn_right`）
    - $\theta \leq \text{TURN\_DEG}$ → 小步转向（`turn_left_small_step` / `turn_right_small_step`）
 
-### 5.4 朝向差异表示
+### 5.4 朝向差异表示与动态朝向策略
 
 朝向差异使用**向量差**而非角度差：
 
 $$\mathbf{O}_{\text{diff}} = \mathbf{O}_{\text{current}} - \mathbf{O}_{\text{target}}$$
 
-阈值 `ORIENTATION_THRESHOLD = 0.19` 对应约 11°（$2\sin(11°/2) \approx 0.19$），即向量差的模长。
+阈值 `ORIENTATION_THRESHOLD = 0.26` 对应约 15°（$2\sin(15°/2) \approx 0.26$），即向量差的模长。
+
+#### 动态朝向策略
+
+目标朝向不再是纯静态指定，而是根据机器人到目标的距离动态计算：
+
+| 距离 | 有效目标朝向 | 说明 |
+|------|-------------|------|
+| `dist > ORIENT_FREEZE_DIST_CM` | 连线方向 $-\mathbf{pd}/|\mathbf{pd}|$ | 动态更新，使转弯段斜切接近更平滑 |
+| `dist ≤ ORIENT_FREEZE_DIST_CM` 且有指定朝向 | 指定朝向 | 确保停靠点评分朝向精确 |
+| `dist ≤ ORIENT_FREEZE_DIST_CM` 且无指定(None) | 冻结连线方向 | 首次进入近距离时记录，之后固定不变，防震荡 |
+| 逃离危险区 | None | 跳过朝向修正，优先平移离开 |
+
+- **`ORIENT_FREEZE_DIST_CM = 6.0`**（独立常量）：冻结距离阈值。调大增强防震荡，调小扩大连线方向范围，但需 > `POSITION_THRESHOLD`(3cm)。
+- **防震荡原理**：接近目标时定位噪声导致连线方向抖动（1cm 噪声在 3cm 处约 18°），冻结后方向不再随位置噪声变化，消除“定位→转向→位置不变→再定位”的循环。
 
 ---
 

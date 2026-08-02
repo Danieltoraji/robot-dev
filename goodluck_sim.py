@@ -46,11 +46,11 @@ from levels import goodluck as gl
 # =====================================================================
 # 模拟器配置（噪声开关，默认全 0 = 理想模式）
 # =====================================================================
-LOCATE_NOISE_STD = 1.0          # 定位位置噪声标准差（cm），0=无噪声
-LOCATE_ANGLE_NOISE_STD = 5.0    # 定位朝向角噪声标准差（度），0=无噪声
+LOCATE_NOISE_STD = 0.5          # 定位位置噪声标准差（cm），0=无噪声
+LOCATE_ANGLE_NOISE_STD = 1.0    # 定位朝向角噪声标准差（度），0=无噪声
 ACTION_ERROR_STD = 0.1          # 动作步长误差标准差（比例，0.1=±10%），0=无误差
 TURN_ERROR_STD = 5.0            # 转向角度误差标准差（度），0=无误差
-ANIM_PAUSE_SEC = 1            # 每步动画刷新间隔（秒）
+ANIM_PAUSE_SEC = 0.01            # 每步动画刷新间隔（秒）
 MAX_SIM_STEPS = 500            # 模拟最大动作步数，防止算法不收敛时无限循环卡死
 
 # 输出目录与文件（result/ 子目录，文件名含日期时间）
@@ -230,17 +230,18 @@ class Visualizer:
                 facecolor="gray", edgecolor="black", alpha=0.5, hatch="//",
             ))
 
-        # 停靠点（stand_poses）—— 蓝色方块
-        for tid, p in gl.stand_poses.items():
-            ax.plot(p[0], p[1], "bs", markersize=9, markeredgecolor="black")
-            ax.annotate(f"停{tid}", (p[0], p[1]), textcoords="offset points",
-                        xytext=(6, 6), fontsize=8, color="blue")
-
-        # 转向点（target_poses）—— 红色圆点
-        for tid, p in gl.target_poses.items():
-            ax.plot(p[0], p[1], "ro", markersize=8, markeredgecolor="black")
-            ax.annotate(f"转{tid}", (p[0], p[1]), textcoords="offset points",
-                        xytext=(6, -10), fontsize=8, color="red")
+        # 路点（ROUTE）—— 停靠点=蓝色方块，转向点=红色圆点，中间走廊路点=绿色小点
+        for i, wp in enumerate(gl.ROUTE, 1):
+            if wp.stop > 0:
+                ax.plot(wp.pos[0], wp.pos[1], "bs", markersize=9, markeredgecolor="black")
+                ax.annotate(f"停{i}", (wp.pos[0], wp.pos[1]), textcoords="offset points",
+                            xytext=(6, 6), fontsize=8, color="blue")
+            elif wp.orientation is not None:
+                ax.plot(wp.pos[0], wp.pos[1], "ro", markersize=8, markeredgecolor="black")
+                ax.annotate(f"转{i}", (wp.pos[0], wp.pos[1]), textcoords="offset points",
+                            xytext=(6, -10), fontsize=8, color="red")
+            else:
+                ax.plot(wp.pos[0], wp.pos[1], "g.", markersize=5)
 
         # AprilTag 位置（取各 tag 第一点近似）—— 绿色三角
         for tid, pts in gl.tag_poses.items():
