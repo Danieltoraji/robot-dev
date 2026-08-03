@@ -47,15 +47,15 @@ from levels import goodluck as gl
 # 模拟器配置（噪声开关，默认全 0 = 理想模式）
 # =====================================================================
 
-LOCATE_NOISE_STD = 0.0          # 定位位置噪声标准差（cm），0=无噪声
-LOCATE_ANGLE_NOISE_STD = 0.0    # 定位朝向角噪声标准差（度），0=无噪声
-ACTION_ERROR_STD = 0.0          # 动作步长误差标准差（比例，0.1=±10%），0=无误差
-TURN_ERROR_STD = 0.0            # 转向角度误差标准差（度），0=无误差
+LOCATE_NOISE_STD = 2.4          # 定位位置噪声标准差（cm），0=无噪声
+LOCATE_ANGLE_NOISE_STD = 5.0    # 定位朝向角噪声标准差（度），0=无噪声
+ACTION_ERROR_STD = 0.1          # 动作步长误差标准差（比例，0.1=±10%），0=无误差
+TURN_ERROR_STD = 8.0            # 转向角度误差标准差（度），0=无误差
 ANIM_PAUSE_SEC = 0.01            # 每步动画刷新间隔（秒）
 MAX_SIM_STEPS = 500            # 模拟最大动作步数，防止算法不收敛时无限循环卡死
 
 '''压测模式
-LOCATE_NOISE_STD = 3.0          # 定位位置噪声标准差（cm），0=无噪声
+LOCATE_NOISE_STD = 2.4          # 定位位置噪声标准差（cm），0=无噪声
 LOCATE_ANGLE_NOISE_STD = 5.0    # 定位朝向角噪声标准差（度），0=无噪声
 ACTION_ERROR_STD = 0.1          # 动作步长误差标准差（比例，0.1=±10%），0=无误差
 TURN_ERROR_STD = 8.0            # 转向角度误差标准差（度），0=无误差
@@ -118,6 +118,8 @@ ACTION_TIME_SEC = {
     "turn_right": 1.5,
     "turn_right_small_step": 0.8,
 }
+BATCH_FORWARD_MAX_ANGLE_DEG = 15.0 # 批量直行允许的最大朝向偏差（度）；偏差越大允许步数越少，超过此值不批量
+LOCATE_TIME_SEC = 0.5  # 每次定位耗时（秒），可调。真实硬件拍照+检测+PnP约数秒
 
 # 机器人初始状态（入口附近，朝东）
 INITIAL_POS = np.array([2.0, 20.0], dtype=np.float64)
@@ -197,18 +199,26 @@ class SimState:
           左转：侧向 = left_dir = [-oy, ox]，圆心在左后方
           右转：侧向 = right_dir = [oy, -ox]，圆心在右后方
         机体绕圆心旋转 α 度（左转正、右转负），位置和朝向同步更新。
+
+        噪声模型（方向锁定）：旋转方向由命令角度 deg 锁定，噪声只改变旋转
+        幅度（不足/过冲），永不变号——模拟真实舵机转向"过头或不足"而非反向。
         """
         actual_deg = deg
         if TURN_ERROR_STD > 0:
-            actual_deg = deg + np.random.normal(0, TURN_ERROR_STD)
+            noise = np.random.normal(0, TURN_ERROR_STD)
+            # 方向由命令锁定，噪声只作用于幅度：左转只转 [0,+∞)，右转只转 (-∞,0]
+            if deg >= 0:
+                actual_deg = abs(deg + noise)
+            else:
+                actual_deg = -abs(deg + noise)
         alpha = np.radians(actual_deg)
         oy = self.orientation
-        # 旋转中心：先向后退 d·O，再侧向偏移 R
+        # 旋转中心：先向后退 d·O，再侧向偏移 R。圆心方向由命令角度决定（与旋转方向一致）
         base = self.pos - gl.CAMERA_FORWARD_OFFSET_CM * oy
-        if actual_deg >= 0:  # 左转
+        if deg >= 0:  # 左转（命令）
             left_dir = np.array([-oy[1], oy[0]])
             center = base + gl.TURN_LEFT_RADIUS_CM * left_dir
-        else:  # 右转
+        else:  # 右转（命令）
             right_dir = np.array([oy[1], -oy[0]])
             center = base + gl.TURN_RIGHT_RADIUS_CM * right_dir
         # 旋转矩阵 R(α) = [[cos, -sin], [sin, cos]]
@@ -380,7 +390,17 @@ class SimRobotState(RobotState):
         self._viz = viz_instance
 
     def run_action(self, name, times=1):
-        """桩：解析动作名，更新模拟器状态，并刷新可视化"""
+        """桩：解析动作名，更新模拟器状态，并刷新可视化
+
+        每次行动打印统一日志块，直观对比"实际状态"与"算法感知（带噪声）状态"：
+          ==================第N次行动开始===================
+            动作名、实际位置/朝向、带噪声位置/带输出朝向、执行结果
+          ==================第N次行动结束===================
+        """
+        if times > 1:
+            print(f"\n{'='*50}")
+            print(f"  ★ 连续直行: {name} × {times} 步（跳过中间定位）")
+            print(f"{'='*50}")
         for _ in range(times):
             if self._sim.step_count >= MAX_SIM_STEPS:
                 raise RuntimeError(
@@ -388,9 +408,24 @@ class SimRobotState(RobotState):
                 )
             self._sim.step_count += 1
             step_num = self._sim.step_count
-            print(f"\n{'='*50}")
-            print(f"  ▶ 动作 #{step_num}: {name}")
-            print(f"{'='*50}")
+
+            # ===== 行动开始：实际状态 vs 感知（带噪声）状态 =====
+            print(f"\n{'='*18}第{step_num}次行动开始{'='*18}")
+            real_pos = self._sim.pos
+            real_ori = self._sim.orientation
+            if self.current_position is not None:
+                noisy_pos_str = f"({self.current_position[0]:.2f}, {self.current_position[1]:.2f})"
+            else:
+                noisy_pos_str = "未定位"
+            if self.current_orientation is not None:
+                noisy_ori_str = f"({self.current_orientation[0]:.2f}, {self.current_orientation[1]:.2f})"
+            else:
+                noisy_ori_str = "未定位"
+            print(f"  动作: {name}")
+            print(f"  实际位置=({real_pos[0]:.2f}, {real_pos[1]:.2f})，带噪声位置={noisy_pos_str}")
+            print(f"  实际朝向=({real_ori[0]:.2f}, {real_ori[1]:.2f})，带输出朝向={noisy_ori_str}")
+
+            # ===== 执行动作 =====
             if name == "stand":
                 self._sim._record("stand")
             elif name == "go_forward_one_step":
@@ -421,15 +456,22 @@ class SimRobotState(RobotState):
                 self._sim._record(name)
             # 累加动作耗时
             self._sim.elapsed_time += ACTION_TIME_SEC.get(name, 1.0)
-            print(f"  ✦ 动作 #{step_num} 完成: {name}  "
-                  f"位置=({self._sim.pos[0]:.1f}, {self._sim.pos[1]:.1f})  "
+            print(f"  ✦ 执行后: 位置=({self._sim.pos[0]:.2f}, {self._sim.pos[1]:.2f})  "
                   f"朝向=({self._sim.orientation[0]:.2f}, {self._sim.orientation[1]:.2f})  "
                   f"累计时间={self._sim.elapsed_time:.1f}s")
+
+            # ===== 可视化刷新 =====
             if self._viz is not None:
-                self._viz.update(self._sim, f"▶ 动作 #{step_num}: {name}\n"
-                                f"位置: ({self._sim.pos[0]:.1f}, {self._sim.pos[1]:.1f})  "
-                                f"朝向: ({self._sim.orientation[0]:.2f}, {self._sim.orientation[1]:.2f})\n"
-                                f"已用时间: {self._sim.elapsed_time:.1f}s  总步数: {step_num}")
+                batch_tag = f" × {times} 步（连续直行）" if times > 1 else ""
+                self._viz.update(self._sim, f"第{step_num}次行动: {name}{batch_tag}\n"
+                                f"实际位置: ({real_pos[0]:.1f}, {real_pos[1]:.1f})\n"
+                                f"带噪声位置: {noisy_pos_str}\n"
+                                f"实际朝向: ({real_ori[0]:.1f}, {real_ori[1]:.1f})\n"
+                                f"带输出朝向: {noisy_ori_str}\n"
+                                f"已用时间: {self._sim.elapsed_time:.1f}s  动作: {step_num}步  定位: {self._sim.locate_count}次")
+
+            # ===== 行动结束 =====
+            print(f"{'='*18}第{step_num}次行动结束{'='*18}")
 
     def solve_pnp(self):
         """桩：直接返回模拟器真实状态（可注入噪声），不拍照不检测
@@ -443,8 +485,12 @@ class SimRobotState(RobotState):
             raise RuntimeError(
                 f"定位次数超限({self._sim.locate_count})，算法可能陷入死循环。中止以防卡死。"
             )
+        # 累加定位耗时（真实硬件拍照+检测+PnP耗时显著）
+        self._sim.elapsed_time += LOCATE_TIME_SEC
+        print(f"  📍 定位 #{self._sim.locate_count}（耗时 {LOCATE_TIME_SEC}s，累计 {self._sim.elapsed_time:.1f}s）")
         pos = self._sim.pos.copy()
         ori = self._sim.orientation.copy()
+        print(f"触发定位。真实位置为 ({pos[0]:.1f}, {pos[1]:.1f})，朝向为 ({ori[0]:.2f}, {ori[1]:.2f})")
         # 注入定位噪声
         if LOCATE_NOISE_STD > 0:
             pos = pos + np.random.normal(0, LOCATE_NOISE_STD, size=2)
@@ -458,6 +504,12 @@ class SimRobotState(RobotState):
                 ori /= n
         self.current_position = pos
         self.current_orientation = ori
+        if self._viz is not None:
+            self._viz.update(self._sim, f"📍 定位 #{self._sim.locate_count}\n"
+                            f"位置: ({self._sim.pos[0]:.1f}, {self._sim.pos[1]:.1f})  "
+                            f"朝向: ({self._sim.orientation[0]:.2f}, {self._sim.orientation[1]:.2f})\n"
+                            f"已用时间: {self._sim.elapsed_time:.1f}s  动作: {self._sim.step_count}步  定位: {self._sim.locate_count}次")
+        print(f"返回定位结果（带噪声）: 位置=({pos[0]:.2f}, {pos[1]:.2f})  朝向=({ori[0]:.2f}, {ori[1]:.2f}) ")
         return True
 
     def set_head(self, pulse, move_time_ms=HEAD_MOVE_TIME_MS):
@@ -473,7 +525,7 @@ def save_trajectory_png(path=TRAJECTORY_PNG_PATH):
         return
     # 保存前刷新最终画面，确保所有步骤序号标记都已绘制
     if sim is not None:
-        viz.update(sim, f"模拟完成\n总步数: {sim.step_count}  总耗时: {sim.elapsed_time:.1f}s")
+        viz.update(sim, f"模拟完成\n总步数: {sim.step_count}  定位次数: {sim.locate_count}  总耗时: {sim.elapsed_time:.1f}s")
     viz.fig.savefig(path, dpi=150, bbox_inches="tight")
     print(f"[save_trajectory_png] 轨迹图已保存: {path}")
 
@@ -516,6 +568,7 @@ def run_simulation():
     print("寻路算法模拟器启动")
     print(f"噪声配置: 定位位置σ={LOCATE_NOISE_STD}cm, 定位朝向σ={LOCATE_ANGLE_NOISE_STD}°, "
           f"动作步长σ={ACTION_ERROR_STD}, 转向σ={TURN_ERROR_STD}°")
+    print(f"耗时配置: 定位={LOCATE_TIME_SEC}s/次")
     print("=" * 60)
 
     # 1. 初始化模拟器状态与可视化
@@ -539,7 +592,11 @@ def run_simulation():
     finally:
         # 4. 保存最终轨迹图
         save_trajectory_png()
-        print(f"\n总耗时: {sim.elapsed_time:.1f}s  总动作步数: {sim.step_count}")
+        print(f"\n总耗时: {sim.elapsed_time:.1f}s  总动作步数: {sim.step_count}  定位次数: {sim.locate_count}")
+        locate_time = sim.locate_count * LOCATE_TIME_SEC
+        action_time = sim.elapsed_time - locate_time
+        print(f"  其中: 定位耗时 {locate_time:.1f}s ({sim.locate_count}次 × {LOCATE_TIME_SEC}s), "
+              f"动作耗时 {action_time:.1f}s ({sim.step_count}步)")
         # 打印完整动作步骤摘要
         if sim.step_actions:
             print(f"\n{'='*60}")
