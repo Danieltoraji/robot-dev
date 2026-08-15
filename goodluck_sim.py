@@ -517,6 +517,14 @@ class SimRobotState(RobotState):
         self._sim.head_pulse = pulse
         self.current_head_pulse = pulse
 
+    def capture_frame(self):
+        """桩：返回合成帧，供视觉检测器在无相机环境下运行。
+
+        当前返回纯黑空白帧（各检测器应返回「无目标」）；后续接入视觉关卡时，
+        按模拟场景渲染线 / 球体 / 数字等合成画面替换此处。
+        """
+        return np.zeros((480, 640, 3), dtype=np.uint8)
+
 
 def save_trajectory_png(path=TRAJECTORY_PNG_PATH):
     """保存当前 matplotlib 图为 PNG（含完整赛道+最终轨迹+终点姿态）"""

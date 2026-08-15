@@ -179,6 +179,21 @@ class RobotState:
         print(f"照片已保存: {filename}")
         return filename
 
+    def capture_frame(self):
+        """拍照并读取为内存帧（BGR ndarray），供视觉识别使用；失败返回 None
+
+        复用 capture_image() 的拍照链路，多一步 cv2.imread 得到图像数组。
+        注：本方法与 capture_image 走同一 fswebcam 命令，视觉识别每次调用
+        同样会保存一张照片到 Pictures 目录（与现有定位流程一致）。
+        """
+        filename = self.capture_image()
+        if filename is None:
+            return None
+        frame = cv2.imread(filename)
+        if frame is None:
+            print("读图失败：", filename)
+        return frame
+
     def detect_apriltag(self, filename):
         """检测图片中的 AprilTag，返回检测结果列表"""
         print("[INFO] loading image...")
