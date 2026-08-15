@@ -31,15 +31,31 @@ def load_templates(template_dir):
     return templates
 
 
-def draw_line(frame, result, roi_ratio):
+_ORI_COLOR = {"follow": (0, 255, 0), "cross": (0, 0, 255), "corner": (0, 255, 255)}
+
+
+def draw_line_result(frame, det, result):
+    """把 LineResult 的中心线画回原图（工作分辨率坐标缩放到原图）。"""
     h, w = frame.shape[:2]
-    cy = int(h * (1.0 - roi_ratio / 2.0))
-    cv2.line(frame, (0, cy), (w, cy), (255, 255, 0), 1)
-    if result.exists:
-        cx = int(result.offset_x + w / 2.0)
-        cv2.circle(frame, (cx, cy), 6, (0, 0, 255), 2)
-        cv2.putText(frame, f"offset={result.offset_x:.1f} conf={result.confidence:.2f}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    y0 = int(h * (1.0 - det.roi_ratio))
+    scale = det.work_width / w if w > det.work_width else 1.0
+    cv2.line(frame, (0, y0), (w, y0), (255, 255, 0), 1)
+
+    def draw_seg(seg, color, radius):
+        for (x, y) in seg.points:
+            fx = int(x / scale)
+            fy = int(y0 + y / scale)
+            cv2.circle(frame, (fx, fy), radius, color, -1)
+
+    if result.exists and result.primary:
+        p = result.primary
+        color = _ORI_COLOR.get(p.orientation, (255, 255, 255))
+        draw_seg(p, color, 2)
+        for o in result.others:
+            draw_seg(o, (255, 0, 255), 1)
+        txt = (f"{p.orientation} off={p.lateral_offset:.1f} look={p.lookahead_x:.1f} "
+               f"head={p.heading_deg:.1f} curv={p.curvature:.4f} str={p.straightness:.2f}")
+        cv2.putText(frame, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
     else:
         cv2.putText(frame, "no line", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
@@ -63,14 +79,23 @@ def _show_or_save(frame, out_path):
         cv2.destroyAllWindows()
 
 
+def _parse_hsv(s):
+    v = [int(x) for x in s.split(",")]
+    return (v[:3], v[3:])
+
+
 def main():
     ap = argparse.ArgumentParser(description="视觉检测器离线调试")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("line")
     p.add_argument("--image", required=True)
-    p.add_argument("--thresh", type=int, default=None)
+    p.add_argument("--thresh", type=int, default=None, help="灰度模式阈值；--hsv 时忽略")
     p.add_argument("--roi", type=float, default=0.5)
+    p.add_argument("--hsv", default=None, help="h_min,s_min,v_min,h_max,s_max,v_max（颜色模式）")
+    p.add_argument("--min-area", type=int, default=80)
+    p.add_argument("--lookahead", type=float, default=0.5)
+    p.add_argument("--straightness", type=float, default=0.85)
     p.add_argument("--out", default=None)
 
     p = sub.add_parser("color")
@@ -102,14 +127,18 @@ def main():
     out = frame.copy()
 
     if args.cmd == "line":
-        det = LineDetector(thresh=args.thresh, roi_ratio=args.roi)
-        r = det.detect(out)
-        draw_line(out, r, args.roi)
+        det = LineDetector(
+            thresh=args.thresh, roi_ratio=args.roi,
+            hsv_range=_parse_hsv(args.hsv) if args.hsv else None,
+            min_area=args.min_area, lookahead_ratio=args.lookahead,
+            straightness_thresh=args.straightness,
+        )
+        r = det.detect(frame)
+        draw_line_result(out, det, r)
         print(r)
 
     elif args.cmd == "color":
-        hsv = [int(v) for v in args.hsv.split(",")]
-        det = ColorBlobDetector((hsv[:3], hsv[3:]), label=args.label, min_area=args.min_area)
+        det = ColorBlobDetector(_parse_hsv(args.hsv), label=args.label, min_area=args.min_area)
         rs = det.detect(out)
         draw_boxes(out, rs)
         print(rs)

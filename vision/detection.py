@@ -9,8 +9,8 @@
   - world_xy：可选，世界坐标 (x, y) cm，需配合 PnP / 地面标定投影，未投影为 None。
 """
 
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, List
 
 
 @dataclass
@@ -31,15 +31,36 @@ class Detection:
 
 
 @dataclass
-class LineResult:
-    """巡线检测结果。
+class LineSegment:
+    """一条中心线（一个连通组件）的几何描述。
 
-    offset_x   线质心相对画面中心的横向偏移（像素，右正左负），用于转向误差。
-    heading    可选，线方向角（弧度），弯道判断用。
+    orientation    : "follow" 顺线(可跟随) / "cross" 横线(停止线等) / "corner" 拐角
+    heading_deg    : 切线方向角（相对前向，右正左负，度）；cross 时为 ±90
+    curvature      : follow 时为拟合曲率（正=向右弯）；corner 时为转向方向（+1 右 / -1 左）
+    straightness   : 直线度 0~1（1=完全直线，趋近 0=拐角 / 急弧）
+    lateral_offset : follow 时机器人处横向偏移（像素，右正左负）
+    lookahead_x    : follow 时前视点横向偏移（纯追踪转向量）
+    points         : 中心线像素点列 [(x, y), ...]，调试可视化用
     """
-    exists: bool
-    offset_x: float = 0.0
-    heading: Optional[float] = None
+    orientation: str = "none"
+    heading_deg: float = 0.0
+    curvature: float = 0.0
+    straightness: float = 0.0
+    lateral_offset: float = 0.0
+    lookahead_x: float = 0.0
+    points: List[Tuple[float, float]] = field(default_factory=list)
+
+
+@dataclass
+class LineResult:
+    """巡线检测结果（可能含多条线）。
+
+    primary : 主目标线（离机器人最近、且优先取 follow 线）
+    others  : 其余线（双线 / 横线 / 拐角等，交给关卡决定怎么用）
+    """
+    exists: bool = False
+    primary: Optional[LineSegment] = None
+    others: List[LineSegment] = field(default_factory=list)
     confidence: float = 0.0
 
 
