@@ -54,7 +54,7 @@ WALLS = [
 # =====================================================================
 ORIENTATION_THRESHOLD = 0.26  # 朝向差异模长阈值，约15°
 POSITION_THRESHOLD = 3.0  # 位置差异模长阈值，单位cm
-STOP_TIME = 0.1  # 到达目标点后停留时间，单位秒
+STOP_TIME = 3  # 到达目标点后停留时间，单位秒（比赛规则要求停靠 3 秒）
 OBSTACLE_THRESHOLD = 15.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
 SAFE_MARGIN_CM = 3.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
 CORRIDOR_CLEAR_CM = OBSTACLE_THRESHOLD + 3.0  # 走廊净空校验阈值（路点串沿线离墙最小距离）
@@ -103,7 +103,7 @@ ROUTE = [
     Waypoint([65.0, 79.7], STOP_TIME, [1, 0], None, None),   # 停靠点3
     Waypoint([74.0, 75.0], 0.0, None, 74.0, "y-"),            # 中间路点③：先东移到x≈74，远离中墙后下行
     Waypoint([74.0, 30.0], STOP_TIME, [0, -1], None, None),  # 停靠点4
-    Waypoint([74.0, 25.0], 0.0, None, 25.0, "y-"),
+    Waypoint([82.0, 20.0], 0.0, None, 82.0, "x+"),
     Waypoint([100.0, 20.0], STOP_TIME, [1, 0], None, None),  # 停靠点5
 ]
 

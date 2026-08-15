@@ -47,10 +47,10 @@ from levels import goodluck as gl
 # 模拟器配置（噪声开关，默认全 0 = 理想模式）
 # =====================================================================
 
-LOCATE_NOISE_STD = 2.4          # 定位位置噪声标准差（cm），0=无噪声
-LOCATE_ANGLE_NOISE_STD = 5.0    # 定位朝向角噪声标准差（度），0=无噪声
+LOCATE_NOISE_STD = 0.5          # 定位位置噪声标准差（cm），0=无噪声
+LOCATE_ANGLE_NOISE_STD = 1.0    # 定位朝向角噪声标准差（度），0=无噪声
 ACTION_ERROR_STD = 0.1          # 动作步长误差标准差（比例，0.1=±10%），0=无误差
-TURN_ERROR_STD = 8.0            # 转向角度误差标准差（度），0=无误差
+TURN_ERROR_STD = 5.0            # 转向角度误差标准差（度），0=无误差
 ANIM_PAUSE_SEC = 0.01            # 每步动画刷新间隔（秒）
 MAX_SIM_STEPS = 500            # 模拟最大动作步数，防止算法不收敛时无限循环卡死
 

@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>robot-dev 分层方法与引用说明</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --panel-2: #273449; --border: #334155;
+    --text: #e2e8f0; --muted: #94a3b8;
+    --accent: #38bdf8; --accent-2: #22d3ee;
+    --green: #34d399; --yellow: #fbbf24; --red: #f87171; --purple: #c084fc;
+    --code-bg: #0b1220;
+    /* 各层主题色 */
+    --c-entry: #c084fc;   /* main.py 入口层 */
+    --c-core: #38bdf8;    /* robot_core 核心层 */
+    --c-level: #34d399;   /* goodluck 关卡层 */
+    --c-sim: #fbbf24;     /* goodluck_sim 模拟层 */
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin:0; font-family:"Segoe UI","Microsoft YaHei","PingFang SC",-apple-system,sans-serif; background:var(--bg); color:var(--text); line-height:1.7; }
+  a { color:var(--accent); text-decoration:none; } a:hover{text-decoration:underline; }
+
+  .hero { padding:52px 40px 36px; background:linear-gradient(135deg,#0ea5e9,#6366f1 50%,#8b5cf6); color:#fff; }
+  .hero h1 { margin:0 0 6px; font-size:2rem; }
+  .hero p { margin:3px 0; opacity:.95; }
+  .badges { margin-top:14px; display:flex; flex-wrap:wrap; gap:8px; }
+  .badge { background:rgba(255,255,255,.16); border:1px solid rgba(255,255,255,.3); padding:3px 12px; border-radius:999px; font-size:.8rem; }
+
+  .layout { display:flex; max-width:1280px; margin:0 auto; }
+  nav.toc { position:sticky; top:0; align-self:flex-start; width:264px; min-width:264px; padding:24px 12px; height:100vh; overflow-y:auto; border-right:1px solid var(--border); }
+  nav.toc h2 { font-size:.78rem; text-transform:uppercase; letter-spacing:1px; color:var(--muted); margin:0 0 8px; }
+  nav.toc ol { list-style:none; margin:0; padding:0; }
+  nav.toc li { margin:2px 0; }
+  nav.toc a { display:block; padding:5px 10px; border-radius:6px; color:var(--muted); font-size:.88rem; }
+  nav.toc a:hover { background:var(--panel); color:var(--text); }
+
+  main { flex:1; padding:32px 40px 80px; max-width:960px; }
+  section { margin-bottom:52px; }
+  h2.sec { font-size:1.45rem; padding-bottom:8px; margin:0 0 20px; border-bottom:2px solid var(--accent); display:inline-block; }
+  h3 { font-size:1.1rem; margin:28px 0 10px; }
+  h4 { font-size:.98rem; margin:20px 0 8px; color:var(--muted); }
+  .muted { color:var(--muted); font-size:.9rem; }
+
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px 20px; margin:16px 0; }
+  .callout { border-left:4px solid var(--yellow); background:var(--panel); border-radius:8px; padding:12px 16px; margin:16px 0; font-size:.94rem; }
+  .callout.blue { border-color:var(--accent); }
+  .callout.green { border-color:var(--green); }
+  .callout.red { border-color:var(--red); }
+  .callout b { color:#fff; }
+
+  table { border-collapse:collapse; width:100%; margin:12px 0; font-size:.87rem; }
+  th,td { border:1px solid var(--border); padding:7px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--panel-2); color:#fff; font-weight:600; }
+  tr:nth-child(even) td { background:rgba(255,255,255,.02); }
+  td code, th code { background:rgba(56,189,248,.12); padding:1px 5px; border-radius:4px; color:var(--accent-2); font-size:.85em; }
+
+  pre { background:var(--code-bg); border:1px solid var(--border); border-radius:10px; padding:14px 16px; overflow-x:auto; font-family:"Cascadia Code","JetBrains Mono",Consolas,monospace; font-size:.82rem; line-height:1.55; }
+  code { font-family:"Cascadia Code",Consolas,monospace; }
+
+  /* 层色标签 */
+  .layer-badge { display:inline-block; padding:1px 9px; border-radius:5px; font-size:.72rem; font-weight:600; letter-spacing:.5px; }
+  .l-entry { background:rgba(192,132,252,.15); color:var(--c-entry); border:1px solid rgba(192,132,252,.5); }
+  .l-core  { background:rgba(56,189,248,.15); color:var(--c-core);  border:1px solid rgba(56,189,248,.5); }
+  .l-level { background:rgba(52,211,153,.15); color:var(--c-level); border:1px solid rgba(52,211,153,.5); }
+  .l-sim   { background:rgba(251,191,36,.15); color:var(--c-sim);   border:1px solid rgba(251,191,36,.5); }
+
+  .ref-out { color:var(--accent); }     /* 引用 → */
+  .ref-in  { color:var(--green); }      /* ← 被引用 */
+
+  .svg-wrap { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px; margin:16px 0; }
+  .legend { display:flex; flex-wrap:wrap; gap:12px; font-size:.82rem; margin-top:8px; color:var(--muted); }
+  .legend span { display:inline-flex; align-items:center; gap:5px; }
+  .legend .dot { width:10px; height:10px; border-radius:3px; display:inline-block; }
+
+  .flow { display:flex; flex-direction:column; gap:5px; margin:14px 0; }
+  .flow .step { background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:7px 12px; font-size:.88rem; }
+  .flow .arrow { text-align:center; color:var(--accent); font-size:1rem; line-height:1; }
+  .flow .step b { color:var(--accent-2); }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>🧩 robot-dev 分层方法与引用说明</h1>
+  <p>逐层列出每个类 / 方法 / 函数，标注「引用 →（它用了谁）」与「← 被引用（谁用了它）」</p>
+  <div class="badges">
+    <span class="badge" style="border-color:#c084fc">main.py 入口层</span>
+    <span class="badge" style="border-color:#38bdf8">robot_core.py 核心层</span>
+    <span class="badge" style="border-color:#34d399">levels/goodluck.py 关卡层</span>
+    <span class="badge" style="border-color:#fbbf24">goodluck_sim.py 模拟层</span>
+  </div>
+</div>
+
+<div class="layout">
+  <nav class="toc">
+    <h2>目录</h2>
+    <ol>
+      <li><a href="#overview">1. 分层总览与依赖图</a></li>
+      <li><a href="#runtime">2. 运行时调用链（override 机制）</a></li>
+      <li><a href="#main">3. main.py 入口层</a></li>
+      <li><a href="#core">4. robot_core.py 核心层</a></li>
+      <li><a href="#level">5. levels/goodluck.py 关卡层</a></li>
+      <li><a href="#sim">6. goodluck_sim.py 模拟层</a></li>
+      <li><a href="#matrix">7. 跨层引用矩阵</a></li>
+      <li><a href="#trace">8. 一次导航的完整调用链</a></li>
+    </ol>
+  </nav>
+
+  <main>
+
+    <!-- 1 总览 -->
+    <section id="overview">
+      <h2 class="sec">1. 分层总览与依赖图</h2>
+      <p>
+        项目由 4 个文件构成 4 层，依赖方向为 <code>main → level → core</code>、<code>sim → level + core</code>。
+        其中 <code>core</code> 是唯一「不依赖任何关卡」的层，其它层都依赖它。
+      </p>
+      <div class="svg-wrap">
+        <svg viewBox="0 0 880 400" width="100%" style="max-width:820px; margin:0 auto; display:block;">
+          <defs>
+            <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
+            </marker>
+          </defs>
+          <!-- 节点 -->
+          <rect x="320" y="20" width="240" height="72" rx="10" fill="#1e293b" stroke="#c084fc" stroke-width="2"/>
+          <text x="440" y="50" text-anchor="middle" fill="#c084fc" font-size="14" font-weight="bold">main.py</text>
+          <text x="440" y="70" text-anchor="middle" fill="#94a3b8" font-size="11">入口层 · LEVELS 注册表</text>
+
+          <rect x="40" y="170" width="270" height="84" rx="10" fill="#1e293b" stroke="#34d399" stroke-width="2"/>
+          <text x="175" y="200" text-anchor="middle" fill="#34d399" font-size="14" font-weight="bold">levels/goodluck.py</text>
+          <text x="175" y="220" text-anchor="middle" fill="#94a3b8" font-size="11">关卡层 · 赛道数据 + 导航算法</text>
+          <text x="175" y="240" text-anchor="middle" fill="#94a3b8" font-size="11">tag_poses / WALLS / ROUTE / run_level</text>
+
+          <rect x="570" y="170" width="270" height="84" rx="10" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
+          <text x="705" y="200" text-anchor="middle" fill="#38bdf8" font-size="14" font-weight="bold">robot_core.py</text>
+          <text x="705" y="220" text-anchor="middle" fill="#94a3b8" font-size="11">核心层 · RobotState 基础能力</text>
+          <text x="705" y="240" text-anchor="middle" fill="#94a3b8" font-size="11">定位 / 动作 / 头部舵机 / 几何</text>
+
+          <rect x="320" y="320" width="240" height="72" rx="10" fill="#1e293b" stroke="#fbbf24" stroke-width="2"/>
+          <text x="440" y="350" text-anchor="middle" fill="#fbbf24" font-size="14" font-weight="bold">goodluck_sim.py</text>
+          <text x="440" y="370" text-anchor="middle" fill="#94a3b8" font-size="11">模拟层 · 继承重写 I/O + 可视化</text>
+
+          <!-- 箭头 -->
+          <line x1="400" y1="92" x2="205" y2="168" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="230" y="120" fill="#94a3b8" font-size="10.5">import + 调 run_level</text>
+
+          <line x1="480" y1="92" x2="675" y2="168" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="530" y="118" fill="#94a3b8" font-size="10.5">import RobotState</text>
+
+          <line x1="310" y1="212" x2="568" y2="212" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="360" y="204" fill="#94a3b8" font-size="10.5">import RobotState / 几何 / HEAD_CENTER</text>
+
+          <line x1="490" y1="320" x2="655" y2="256" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="585" y="300" fill="#94a3b8" font-size="10.5">import + 继承重写</text>
+
+          <line x1="390" y1="320" x2="230" y2="256" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="210" y="300" fill="#94a3b8" font-size="10.5">import gl + 调 run_level</text>
+        </svg>
+        <div class="legend">
+          <span><span class="dot" style="background:#c084fc"></span>入口层</span>
+          <span><span class="dot" style="background:#38bdf8"></span>核心层</span>
+          <span><span class="dot" style="background:#34d399"></span>关卡层</span>
+          <span><span class="dot" style="background:#fbbf24"></span>模拟层</span>
+          <span><span class="dot" style="background:#94a3b8"></span>import / 调用方向</span>
+        </div>
+      </div>
+
+      <table>
+        <tr><th>层</th><th>文件</th><th>依赖（import / 调用）</th><th>角色</th></tr>
+        <tr><td><span class="layer-badge l-entry">入口</span></td><td><code>main.py</code></td><td><code>robot_core</code>、<code>levels.goodluck</code></td><td>关卡注册与分发</td></tr>
+        <tr><td><span class="layer-badge l-core">核心</span></td><td><code>robot_core.py</code></td><td>仅硬件库（hiwonder / apriltag / cv2）</td><td>基础能力，关卡无关</td></tr>
+        <tr><td><span class="layer-badge l-level">关卡</span></td><td><code>levels/goodluck.py</code></td><td><code>robot_core</code>（RobotState、distance_point_to_rect、HEAD_CENTER）</td><td>本关卡数据 + 算法</td></tr>
+        <tr><td><span class="layer-badge l-sim">模拟</span></td><td><code>goodluck_sim.py</code></td><td><code>robot_core</code>、<code>levels.goodluck</code></td><td>算法验证环境</td></tr>
+      </table>
+    </section>
+
+    <!-- 2 override 机制 -->
+    <section id="runtime">
+      <h2 class="sec">2. 运行时调用链与 override 机制</h2>
+      <p>
+        这是理解整个系统最关键的一点：<b>算法（关卡层）只通过 <code>state.xxx()</code> 调用「身体接口」</b>，
+        而 <code>state</code> 在真机上是 <code>RobotState</code>（core），在模拟器上是 <code>SimRobotState</code>（重写了 3 个 I/O 方法）。
+        由于 core 的 <code>locate_with_retry()</code> 内部是用 <code>self.solve_pnp()</code> / <code>self.run_action()</code> 调用，
+        当 <code>self</code> 是 <code>SimRobotState</code> 时，这些调用会<b>自动命中模拟器的桩方法</b>，无需 monkey-patch。
+      </p>
+      <table>
+        <tr><th>方法</th><th>真机（RobotState）</th><th>模拟器（SimRobotState）</th><th>是否被 core 内部调用</th></tr>
+        <tr><td><code>run_action</code></td><td>AGC.runActionGroup() 跑 .d6a</td><td>更新 SimState 位置/朝向 + 刷新可视化</td><td>✅ locate_with_retry 中调用</td></tr>
+        <tr><td><code>solve_pnp</code></td><td>拍照 + AprilTag + cv2.solvePnP</td><td>直接返回真实状态 + 注入噪声</td><td>✅ locate_with_scan 中调用</td></tr>
+        <tr><td><code>set_head</code></td><td>ctl.set_pwm_servo_pulse() 转舵机</td><td>仅记录脉宽，不转舵机</td><td>✅ locate_with_scan 中调用</td></tr>
+      </table>
+      <div class="callout blue">
+        <b>为什么只有 3 个方法需要重写：</b>core 里真正「触碰硬件」的入口只有 <code>run_action</code>（动作）、
+        <code>solve_pnp</code>（视觉）、<code>set_head</code>（舵机）。其余方法（<code>locate_with_scan</code>、<code>locate_with_retry</code>、
+        <code>compensate_head_offset</code> 等）都是纯逻辑，它们通过 <code>self</code> 间接调用上面三个，所以只需重写这三个即可完成仿真替换。
+      </div>
+    </section>
+
+    <!-- 3 main.py -->
+    <section id="main">
+      <h2 class="sec">3. main.py —— 入口层</h2>
+      <table>
+        <tr><th>符号</th><th>职责</th><th><span class="ref-out">引用 →</span></th><th><span class="ref-in">← 被引用</span></th></tr>
+        <tr>
+          <td><code>LEVELS</code>（dict）</td>
+          <td>关卡注册表：关卡名 → {tag_poses, run_level}</td>
+          <td class="ref-out"><code>level_goodluck.tag_poses</code>、<code>level_goodluck.run_level</code>（来自 <code>levels.goodluck</code>）</td>
+          <td class="ref-in"><code>main()</code> 读取；未来模拟器可复用</td>
+        </tr>
+        <tr>
+          <td><code>main()</code></td>
+          <td>解析 argv 关卡名 → 查 LEVELS → 构造 <code>RobotState</code> → 执行 <code>run_level</code></td>
+          <td class="ref-out"><code>RobotState</code>（core）、<code>level["tag_poses"]</code>、<code>level["run_level"]</code></td>
+          <td class="ref-in"><code>__main__</code></td>
+        </tr>
+      </table>
+    </section>
+
+    <!-- 4 core -->
+    <section id="core">
+      <h2 class="sec">4. robot_core.py —— 核心层</h2>
+
+      <h3>4.1 模块级常量</h3>
+      <table>
+        <tr><th>常量</th><th>值</th><th><span class="ref-in">← 被引用</span></th></tr>
+        <tr><td><code>HEAD_CENTER / HEAD_RIGHT / HEAD_LEFT</code></td><td>1500 / 600 / 2400</td><td class="ref-in">core 的 <code>set_head</code>、<code>locate_with_scan</code>；level 导入 <code>HEAD_CENTER</code>；sim 导入全部</td></tr>
+        <tr><td><code>HEAD_MOVE_TIME_MS / HEAD_MOVE_TIME_MIN_MS</code></td><td>500 / 100</td><td class="ref-in">core 的 <code>set_head</code></td></tr>
+        <tr><td><code>SERVO_DEG_PER_US</code></td><td>0.09</td><td class="ref-in">core 的 <code>pulse_to_angle</code></td></tr>
+        <tr><td><code>MAX_LOCATE_RETRIES</code></td><td>5</td><td class="ref-in">core 的 <code>locate_with_retry</code></td></tr>
+        <tr><td><code>CAMERA_INTRINSIC / CAMERA_DISTORTION</code></td><td>内参矩阵 / 畸变</td><td class="ref-in">core 的 <code>solve_pnp</code></td></tr>
+        <tr><td style="color:var(--red)"><code>ORIENTATION_THRESHOLD / POSITION_THRESHOLD / STOP_TIME / OBSTACLE_THRESHOLD / SAFE_MARGIN_CM</code></td><td>（死常量）</td><td class="ref-in" style="color:var(--red)">❌ core 内无引用；level 各自重复定义（见 5.x）</td></tr>
+      </table>
+
+      <h3>4.2 模块级函数</h3>
+      <table>
+        <tr><th>符号</th><th>职责</th><th><span class="ref-in">← 被引用</span></th></tr>
+        <tr><td><code>distance_point_to_rect(pos, rect)</code></td><td>点到矩形最短距离（纯几何）</td><td class="ref-in">level 的 <code>distance_to_walls</code></td></tr>
+      </table>
+
+      <h3>4.3 类 RobotState —— 方法索引</h3>
+      <table>
+        <tr><th>方法</th><th>职责</th><th><span class="ref-out">引用 →</span></th><th><span class="ref-in">← 被引用</span></th></tr>
+        <tr>
+          <td><code>__init__(tag_poses)</code></td><td>初始化位置/朝向/头部脉宽/标签字典</td>
+          <td class="ref-out"><code>HEAD_CENTER</code></td>
+          <td class="ref-in">main.py 的 <code>main()</code>；sim 的 <code>SimRobotState.__init__</code>（super）</td>
+        </tr>
+        <tr>
+          <td><code>run_action(name, times)</code></td><td>执行动作组</td>
+          <td class="ref-out"><code>AGC.runActionGroup()</code></td>
+          <td class="ref-in">level 的 <code>navigate_to_target</code> / <code>run_level</code>；core 的 <code>locate_with_retry</code>；<b>被 sim 重写</b></td>
+        </tr>
+        <tr>
+          <td><code>set_head(pulse, move_time)</code></td><td>转头部舵机 + 动态等待</td>
+          <td class="ref-out"><code>ctl.set_pwm_servo_pulse()</code>、<code>time.sleep</code>、<code>HEAD_MOVE_TIME_*</code></td>
+          <td class="ref-in">level 的 <code>run_level</code>；core 的 <code>locate_with_scan</code>；<b>被 sim 重写</b></td>
+        </tr>
+        <tr>
+          <td><code>pulse_to_angle(pulse)</code></td><td>脉宽 → 角度（右负左正）</td>
+          <td class="ref-out"><code>HEAD_CENTER</code>、<code>SERVO_DEG_PER_US</code></td>
+          <td class="ref-in">core 的 <code>compensate_head_offset</code></td>
+        </tr>
+        <tr>
+          <td><code>compensate_head_offset(head_pulse)</code></td><td>相机朝向 → 机体朝向补偿</td>
+          <td class="ref-out"><code>pulse_to_angle</code>、<code>current_orientation</code></td>
+          <td class="ref-in">core 的 <code>locate_with_scan</code></td>
+        </tr>
+        <tr>
+          <td><code>capture_image()</code></td><td>fswebcam 拍照，返回路径</td>
+          <td class="ref-out"><code>subprocess.run</code>（fswebcam）</td>
+          <td class="ref-in">core 的 <code>solve_pnp</code></td>
+        </tr>
+        <tr>
+          <td><code>detect_apriltag(filename)</code></td><td>AprilTag 检测（tag36h11）</td>
+          <td class="ref-out"><code>cv2</code>、<code>apriltag</code></td>
+          <td class="ref-in">core 的 <code>solve_pnp</code></td>
+        </tr>
+        <tr>
+          <td><code>solve_pnp()</code></td><td>PnP 位姿求解 → 位置/朝向</td>
+          <td class="ref-out"><code>capture_image</code>、<code>detect_apriltag</code>、<code>CAMERA_INTRINSIC/DISTORTION</code>、<code>cv2.solvePnP</code></td>
+          <td class="ref-in">core 的 <code>locate_with_scan</code>；<b>被 sim 重写</b></td>
+        </tr>
+        <tr>
+          <td><code>locate_with_scan()</code></td><td>三级头部扫描定位（回正→右→左）</td>
+          <td class="ref-out"><code>set_head</code>、<code>solve_pnp</code>、<code>compensate_head_offset</code>、<code>HEAD_*</code></td>
+          <td class="ref-in">core 的 <code>locate_with_retry</code></td>
+        </tr>
+        <tr>
+          <td><code>locate_with_retry()</code></td><td>扫描失败后身体小步转动重试</td>
+          <td class="ref-out"><code>locate_with_scan</code>、<code>run_action</code>（turn_left/right_small_step）、<code>MAX_LOCATE_RETRIES</code></td>
+          <td class="ref-in">level 的 <code>navigate_to_target</code></td>
+        </tr>
+      </table>
+      <div class="callout red">
+        <b>核心层遗留问题：</b>常量区 5 个决策常量（<code>ORIENTATION_THRESHOLD</code> 等）在 core 内<b>无任何引用</b>，
+        属于死代码，且在 level 层被重复定义（详见《架构分析报告.md》P1）。
+      </div>
+    </section>
+
+    <!-- 5 level -->
+    <section id="level">
+      <h2 class="sec">5. levels/goodluck.py —— 关卡层</h2>
+
+      <h3>5.1 赛道数据</h3>
+      <table>
+        <tr><th>符号</th><th>内容</th><th><span class="ref-in">← 被引用</span></th></tr>
+        <tr><td><code>tag_poses</code></td><td>4 张 AprilTag 世界坐标（dict）</td><td class="ref-in">main.py（注册）；sim 的 <code>run_simulation</code>、<code>Visualizer</code></td></tr>
+        <tr><td><code>WALLS</code></td><td>3 堵矩形墙 [xmin,xmax,ymin,ymax]</td><td class="ref-in"><code>distance_to_walls</code>；sim 的 <code>Visualizer</code></td></tr>
+        <tr><td><code>Waypoint</code></td><td>路点 namedtuple 结构</td><td class="ref-in"><code>ROUTE</code></td></tr>
+        <tr><td><code>ROUTE</code></td><td>9 个路点（5 停靠 + 4 中间）</td><td class="ref-in"><code>run_level</code>；sim 的 <code>Visualizer</code></td></tr>
+      </table>
+
+      <h3>5.2 决策 / 动作常量</h3>
+      <table>
+        <tr><th>常量</th><th>值</th><th><span class="ref-in">← 被引用</span></th></tr>
+        <tr><td><code>ORIENTATION_THRESHOLD</code></td><td>0.26</td><td class="ref-in"><code>navigate_to_target</code></td></tr>
+        <tr><td><code>POSITION_THRESHOLD</code></td><td>3.0</td><td class="ref-in"><code>navigate_to_target</code>、<code>nearest_safe_point</code></td></tr>
+        <tr><td><code>STOP_TIME</code></td><td>0.1 ⚠️</td><td class="ref-in"><code>ROUTE</code>、<code>navigate_to_target</code></td></tr>
+        <tr><td><code>OBSTACLE_THRESHOLD</code></td><td>15.0</td><td class="ref-in"><code>navigate_to_target</code>、<code>decide_panning_action</code>、<code>nearest_safe_point</code></td></tr>
+        <tr><td><code>SAFE_MARGIN_CM</code></td><td>3.0</td><td class="ref-in"><code>nearest_safe_point</code></td></tr>
+        <tr><td><code>CORRIDOR_CLEAR_CM</code></td><td>18.0</td><td class="ref-in"><code>assert_corridor_clear</code></td></tr>
+        <tr><td><code>ORIENT_FREEZE_DIST_CM</code></td><td>10.0</td><td class="ref-in"><code>navigate_to_target</code></td></tr>
+        <tr><td><code>BATCH_FORWARD_*</code>（4 个）</td><td>见源码</td><td class="ref-in"><code>navigate_to_target</code>、<code>check_segment_clear</code></td></tr>
+        <tr><td>动作参数（<code>FORWARD_ONE_STEP_CM</code> 等 11 个）</td><td>见源码</td><td class="ref-in"><code>decide_panning_action</code>、<code>decide_rotation_action</code>、<code>navigate_to_target</code>；sim 的 <code>SimState.apply_turn</code>、<code>SimRobotState.run_action</code></td></tr>
+      </table>
+
+      <h3>5.3 函数索引</h3>
+      <table>
+        <tr><th>函数</th><th>职责</th><th><span class="ref-out">引用 →</span></th><th><span class="ref-in">← 被引用</span></th></tr>
+        <tr>
+          <td><code>distance_to_walls(pos)</code></td><td>到最近墙距离</td>
+          <td class="ref-out"><code>WALLS</code>、<code>distance_point_to_rect</code>（core）</td>
+          <td class="ref-in"><code>nearest_safe_point</code>、<code>decide_panning_action</code>、<code>navigate_to_target</code>、<code>check_segment_clear</code>、<code>assert_corridor_clear</code></td>
+        </tr>
+        <tr>
+          <td><code>nearest_safe_point(pos)</code></td><td>16 方向螺旋搜索安全点</td>
+          <td class="ref-out"><code>distance_to_walls</code>、<code>OBSTACLE/POSITION/SAFE_MARGIN</code></td>
+          <td class="ref-in"><code>navigate_to_target</code></td>
+        </tr>
+        <tr>
+          <td><code>calc_distance(pd)</code></td><td>向量模长</td>
+          <td class="ref-out"><code>np.linalg.norm</code></td>
+          <td class="ref-in"><code>decide_panning_action</code></td>
+        </tr>
+        <tr>
+          <td><code>decide_panning_action(state, ...)</code></td><td>贪心平移决策</td>
+          <td class="ref-out"><code>distance_to_walls</code>、<code>calc_distance</code>、动作常量</td>
+          <td class="ref-in"><code>navigate_to_target</code></td>
+        </tr>
+        <tr>
+          <td><code>decide_rotation_action(state, target)</code></td><td>转向方向 + 步长选择</td>
+          <td class="ref-out"><code>state.current_orientation</code>、转角常量</td>
+          <td class="ref-in"><code>navigate_to_target</code></td>
+        </tr>
+        <tr>
+          <td><code>navigate_to_target(state, ...)</code></td><td>导航主循环（核心原语）</td>
+          <td class="ref-out"><code>state.locate_with_retry</code>、<code>state.current_position/orientation</code>、<code>distance_to_walls</code>、<code>nearest_safe_point</code>、<code>decide_rotation_action</code>、<code>state.run_action</code>、<code>decide_panning_action</code>、<code>check_segment_clear</code></td>
+          <td class="ref-in"><code>run_level</code></td>
+        </tr>
+        <tr>
+          <td><code>check_segment_clear(...)</code></td><td>批量直行路径预检</td>
+          <td class="ref-out"><code>distance_to_walls</code></td>
+          <td class="ref-in"><code>navigate_to_target</code></td>
+        </tr>
+        <tr>
+          <td><code>assert_corridor_clear(polyline, ...)</code></td><td>路点走廊净空校验</td>
+          <td class="ref-out"><code>distance_to_walls</code>、<code>CORRIDOR_CLEAR_CM</code></td>
+          <td class="ref-in"><code>run_level</code></td>
+        </tr>
+        <tr>
+          <td><code>run_level(state)</code></td><td>关卡入口：站立→回正→逐路点导航</td>
+          <td class="ref-out"><code>assert_corridor_clear</code>、<code>state.run_action</code>、<code>state.set_head</code>、<code>HEAD_CENTER</code>（core）、<code>navigate_to_target</code>、<code>ROUTE</code></td>
+          <td class="ref-in">main.py 的 <code>main()</code>；sim 的 <code>run_simulation</code></td>
+        </tr>
+      </table>
+    </section>
+
+    <!-- 6 sim -->
+    <section id="sim">
+      <h2 class="sec">6. goodluck_sim.py —— 模拟层</h2>
+
+      <h3>6.1 类 SimState（运动模型）</h3>
+      <table>
+        <tr><th>方法</th><th>职责</th><th><span class="ref-out">引用 →</span></th><th><span class="ref-in">← 被引用</span></th></tr>
+        <tr><td><code>__init__(pos, orientation)</code></td><td>初始化真实状态 + 轨迹</td><td class="ref-out">——</td><td class="ref-in"><code>run_simulation</code></td></tr>
+        <tr><td><code>_record(action_name)</code></td><td>记录一步动作到轨迹/摘要</td><td class="ref-out">——</td><td class="ref-in"><code>apply_*</code>、<code>SimRobotState.run_action</code></td></tr>
+        <tr><td><code>apply_forward(cm)</code></td><td>前进（含动作噪声）</td><td class="ref-out"><code>ACTION_ERROR_STD</code></td><td class="ref-in"><code>SimRobotState.run_action</code></td></tr>
+        <tr><td><code>apply_back(cm)</code></td><td>后退</td><td class="ref-out"><code>ACTION_ERROR_STD</code></td><td class="ref-in"><code>SimRobotState.run_action</code></td></tr>
+        <tr><td><code>apply_left_move(cm)</code></td><td>左横移</td><td class="ref-out"><code>ACTION_ERROR_STD</code></td><td class="ref-in"><code>SimRobotState.run_action</code></td></tr>
+        <tr><td><code>apply_right_move(cm)</code></td><td>右横移</td><td class="ref-out"><code>ACTION_ERROR_STD</code></td><td class="ref-in"><code>SimRobotState.run_action</code></td></tr>
+        <tr><td><code>apply_turn(deg)</code></td><td>圆周转向（圆心后偏）</td><td class="ref-out"><code>gl.CAMERA_FORWARD_OFFSET_CM</code>、<code>gl.TURN_LEFT/RIGHT_RADIUS_CM</code>、<code>TURN_ERROR_STD</code></td><td class="ref-in"><code>SimRobotState.run_action</code></td></tr>
+      </table>
+
+      <h3>6.2 类 Visualizer（可视化）</h3>
+      <table>
+        <tr><th>方法</th><th>职责</th><th><span class="ref-out">引用 →</span></th><th><span class="ref-in">← 被引用</span></th></tr>
+        <tr><td><code>__init__()</code></td><td>建图 + 画静态层</td><td class="ref-out"><code>_draw_static</code></td><td class="ref-in"><code>run_simulation</code></td></tr>
+        <tr><td><code>_draw_static()</code></td><td>画赛道/墙壁/路点/Tag</td><td class="ref-out"><code>gl.WALLS</code>、<code>gl.ROUTE</code>、<code>gl.tag_poses</code></td><td class="ref-in"><code>__init__</code></td></tr>
+        <tr><td><code>update(sim_state, text)</code></td><td>重绘动态层</td><td class="ref-out">sim 状态、轨迹</td><td class="ref-in"><code>SimRobotState.run_action</code>、<code>SimRobotState.solve_pnp</code>、<code>save_trajectory_png</code>、<code>run_simulation</code></td></tr>
+      </table>
+
+      <h3>6.3 类 SimRobotState(RobotState) —— 桩</h3>
+      <table>
+        <tr><th>方法</th><th>职责</th><th><span class="ref-out">引用 →</span></th><th><span class="ref-in">← 被引用</span></th></tr>
+        <tr>
+          <td><code>__init__(tag_poses)</code></td><td>继承 core，附加 sim/viz 引用</td>
+          <td class="ref-out"><code>super().__init__</code>（core）</td>
+          <td class="ref-in"><code>run_simulation</code></td>
+        </tr>
+        <tr>
+          <td><code>attach_sim(sim, viz)</code></td><td>注入模拟器状态与可视化</td>
+          <td class="ref-out">——</td>
+          <td class="ref-in"><code>run_simulation</code></td>
+        </tr>
+        <tr>
+          <td><code>run_action(name, times)</code> <span class="layer-badge l-sim">重写</span></td>
+          <td>按动作名更新 SimState + 刷新可视化</td>
+          <td class="ref-out"><code>SimState.apply_*</code>、<code>gl.FORWARD_*/BACK/LEFT/RIGHT/TURN_*</code>、<code>MAX_SIM_STEPS</code>、<code>ACTION_TIME_SEC</code>、<code>viz.update</code></td>
+          <td class="ref-in">level 的算法 + core 的 <code>locate_with_retry</code>（经 <code>state.run_action</code>）</td>
+        </tr>
+        <tr>
+          <td><code>solve_pnp()</code> <span class="layer-badge l-sim">重写</span></td>
+          <td>返回真实状态 + 注入噪声，不拍照</td>
+          <td class="ref-out"><code>SimState.pos/orientation</code>、<code>LOCATE_NOISE_STD</code>、<code>LOCATE_ANGLE_NOISE_STD</code>、<code>LOCATE_TIME_SEC</code>、<code>viz.update</code></td>
+          <td class="ref-in">core 的 <code>locate_with_scan</code>（经 <code>state.solve_pnp</code>）</td>
+        </tr>
+        <tr>
+          <td><code>set_head(pulse, move_time)</code> <span class="layer-badge l-sim">重写</span></td>
+          <td>仅记录头部脉宽，不转舵机</td>
+          <td class="ref-out"><code>SimState.head_pulse</code></td>
+          <td class="ref-in">core 的 <code>locate_with_scan</code>、level 的 <code>run_level</code>（经 <code>state.set_head</code>）</td>
+        </tr>
+      </table>
+
+      <h3>6.4 模块级函数 / 类</h3>
+      <table>
+        <tr><th>符号</th><th>职责</th><th><span class="ref-out">引用 →</span></th><th><span class="ref-in">← 被引用</span></th></tr>
+        <tr><td><code>save_trajectory_png(path)</code></td><td>保存最终轨迹图</td><td class="ref-out"><code>viz.update</code>、<code>viz.fig.savefig</code></td><td class="ref-in"><code>run_simulation</code></td></tr>
+        <tr><td><code>TeeWriter</code></td><td>stdout 双写（终端 + 文件）</td><td class="ref-out">——</td><td class="ref-in"><code>run_simulation</code></td></tr>
+        <tr><td><code>run_simulation()</code></td><td>模拟主流程</td><td class="ref-out"><code>SimState</code>、<code>Visualizer</code>、<code>SimRobotState</code>、<code>attach_sim</code>、<code>gl.tag_poses</code>、<code>gl.run_level</code>、<code>save_trajectory_png</code></td><td class="ref-in"><code>__main__</code></td></tr>
+      </table>
+      <div class="callout red">
+        <b>模拟层遗留问题：</b><code>run_simulation()</code> 通过 <code>from levels import goodluck as gl</code> 硬编码关卡，
+        全文 <code>gl.*</code> 引用 20+ 处。新增关卡时模拟器无法按名选择关卡（详见《架构分析报告.md》P2）。
+      </div>
+    </section>
+
+    <!-- 7 matrix -->
+    <section id="matrix">
+      <h2 class="sec">7. 跨层引用矩阵</h2>
+      <p>从「调用方 → 被调用方」视角汇总跨层引用（✔ 表示存在该方向的 import / 调用）。</p>
+      <table>
+        <tr><th>被引用方 ↓ / 调用方 →</th><th>main.py</th><th>robot_core.py</th><th>levels/goodluck.py</th><th>goodluck_sim.py</th></tr>
+        <tr><td><b>robot_core.py</b></td><td>✔ import RobotState</td><td>（内部 self 调用）</td><td>✔ import RobotState / distance_point_to_rect / HEAD_CENTER；✔ 调 state.locate_with_retry / run_action / set_head</td><td>✔ import RobotState / HEAD_*；✔ 继承重写 3 方法</td></tr>
+        <tr><td><b>levels/goodluck.py</b></td><td>✔ import + 调 run_level</td><td>✘（core 不依赖关卡）</td><td>（内部函数互调）</td><td>✔ import gl + 调 run_level / tag_poses / WALLS / ROUTE / 动作常量</td></tr>
+        <tr><td><b>main.py</b></td><td>——</td><td>✘</td><td>✘</td><td>✘（未复用 LEVELS）</td></tr>
+      </table>
+      <div class="callout blue">
+        <b>关键结论：</b><code>robot_core.py</code> 对关卡层<b>零依赖</b>（✔ 只在「被依赖」方向出现），说明 core 的方向正确；
+        但 <code>goodluck_sim.py</code> 对关卡层有大量 <code>gl.*</code> 依赖，且未复用 <code>main.py</code> 的 <code>LEVELS</code> 注册表，是当前最大的跨层耦合点。
+      </div>
+    </section>
+
+    <!-- 8 trace -->
+    <section id="trace">
+      <h2 class="sec">8. 一次导航的完整调用链</h2>
+      <p>以「到达停靠点 1」为例，展示一次从入口到执行动作的完整调用链（真机路径，模拟器用 <span class="layer-badge l-sim">重写</span> 标记分支）。</p>
+      <div class="flow">
+        <div class="step"><span class="layer-badge l-entry">main</span> <code>main()</code> → 构造 <code>RobotState</code> → 调 <code>run_level(state)</code></div>
+        <div class="arrow">▼</div>
+        <div class="step"><span class="layer-badge l-level">level</span> <code>run_level()</code> → <code>assert_corridor_clear()</code> → <code>state.run_action("stand")</code> → <code>state.set_head(HEAD_CENTER)</code></div>
+        <div class="arrow">▼</div>
+        <div class="step"><span class="layer-badge l-level">level</span> <code>navigate_to_target(停靠点1)</code> 主循环开始</div>
+        <div class="arrow">▼</div>
+        <div class="step"><span class="layer-badge l-core">core</span> <code>state.locate_with_retry()</code> → <code>locate_with_scan()</code> → <code>set_head()</code> + <code>solve_pnp()</code> <span class="layer-badge l-sim">sim 重写</span></div>
+        <div class="arrow">▼</div>
+        <div class="step"><span class="layer-badge l-core">core</span> <code>solve_pnp()</code> → <code>capture_image()</code> → <code>detect_apriltag()</code> → <code>cv2.solvePnP()</code>（真机）/ 直接返回 + 噪声（<span class="layer-badge l-sim">sim</span>）</div>
+        <div class="arrow">▼</div>
+        <div class="step"><span class="layer-badge l-level">level</span> 读 <code>state.current_position / current_orientation</code> → 计算 <code>pd / dist / od</code></div>
+        <div class="arrow">▼</div>
+        <div class="step"><span class="layer-badge l-level">level</span> 朝向差超阈值 → <code>decide_rotation_action()</code> → <code>state.run_action("turn_left")</code></div>
+        <div class="arrow">▼</div>
+        <div class="step"><span class="layer-badge l-level">level</span> 位置差超阈值 → <code>decide_panning_action()</code>（内部 <code>distance_to_walls()</code> → <code>distance_point_to_rect()</code><span class="layer-badge l-core">core</span>）→ <code>state.run_action("go_forward_one_step")</code></div>
+        <div class="arrow">▼</div>
+        <div class="step"><span class="layer-badge l-core">core / sim</span> <code>run_action()</code> → AGC 跑 .d6a（真机）/ <code>SimState.apply_forward()</code> + <code>viz.update()</code>（<span class="layer-badge l-sim">sim</span>）→ 回到循环顶部重新定位</div>
+      </div>
+      <p class="muted">
+        要点：level 层<b>从不直接</b>调用 <code>capture_image / detect_apriltag / solve_pnp</code>，
+        而是统一走 <code>state.locate_with_retry()</code> 这个「定位入口」；动作则统一走 <code>state.run_action()</code>。
+        这两个入口 + <code>state.set_head()</code> 就是 core 暴露给关卡的全部「身体接口」，也是模拟器唯一需要重写的 3 个点。
+      </p>
+    </section>
+
+    <section>
+      <div class="card" style="text-align:center; color:var(--muted);">
+        <p style="margin:0;">robot-dev 分层方法与引用说明 — 基于对 main.py / robot_core.py / levels/goodluck.py / goodluck_sim.py 的逐行梳理生成。</p>
+      </div>
+    </section>
+
+  </main>
+</div>
+</body>
+</html>
