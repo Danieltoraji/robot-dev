@@ -317,10 +317,10 @@ def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0
 
         # 1.5 跳过该点的条件
         if bypass_condition is not None and bypass_position is not None:
-            if (bypass_condition == "x+" and state.current_position[0] > bypass_position[0]) or \
-               (bypass_condition == "x-" and state.current_position[0] < bypass_position[0]) or \
-               (bypass_condition == "y+" and state.current_position[1] > bypass_position[1]) or \
-               (bypass_condition == "y-" and state.current_position[1] < bypass_position[1]):
+            if (bypass_condition == "x+" and state.current_position[0] > bypass_position) or \
+               (bypass_condition == "x-" and state.current_position[0] < bypass_position) or \
+               (bypass_condition == "y+" and state.current_position[1] > bypass_position) or \
+               (bypass_condition == "y-" and state.current_position[1] < bypass_position):
                 print(f"满足跳过条件 {bypass_condition} > {bypass_position}, 跳过该路点导航。")
                 print("\n=== 本轮导航循环结束 ===")
                 return True
@@ -487,7 +487,7 @@ def run_level(state):
     state.set_head(HEAD_CENTER)
 
     for i, wp in enumerate(ROUTE, 1):
-        if not navigate_to_target(state, wp.pos, wp.orientation, wp.stop, wp.bypass_condition, wp.bypass_position):
+        if not navigate_to_target(state, wp.pos, wp.orientation, wp.stop, wp.bypass_position, wp.bypass_condition):
             print(f"导航至路点 {i}（{wp.pos}）失败，程序终止。")
             return False
         print(f"已{'到达停靠点' if wp.stop > 0 else '通过路点'} {i}：{wp.pos}")
