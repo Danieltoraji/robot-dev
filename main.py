@@ -20,11 +20,22 @@ from levels import goodluck as level_goodluck
 
 
 # =====================================================================
+# 真机调试输出开关
+# =====================================================================
+# True 时，直接运行 python main.py goodluck 也会：
+#   - 把详细日志输出到 result/real_trace_*.txt
+#   - 把定位轨迹保存为 result/real_trajectory_*.png
+# False 时保持原有真机行为，不引入额外依赖。
+TRACE_ENABLED = False
+
+
+# =====================================================================
 # 关卡注册表
 # =====================================================================
 # 每个关卡提供：tag_poses（AprilTag 世界坐标）和 run_level（关卡入口函数）
 LEVELS = {
     "goodluck": {
+        "module": level_goodluck,
         "tag_poses": level_goodluck.tag_poses,
         "run_level": level_goodluck.run_level,
     },
@@ -47,10 +58,42 @@ def main():
 
     # 创建机器人状态实例，传入关卡的 tag_poses
     level = LEVELS[level_name]
-    state = RobotState(tag_poses=level["tag_poses"])
 
-    # 执行关卡
-    success = level["run_level"](state)
+    original_stdout = sys.stdout
+    tee = None
+    trace_recorder = None
+
+    if TRACE_ENABLED:
+        from trace import TraceRecorder, TraceRobotState, TeeWriter, save_trajectory_png
+
+        trace_recorder = TraceRecorder(output_dir="result")
+        state = TraceRobotState(tag_poses=level["tag_poses"], recorder=trace_recorder)
+        tee = TeeWriter(trace_recorder.log_path, original_stdout)
+        sys.stdout = tee
+        print(f"[trace] 真机日志将写入: {trace_recorder.log_path}")
+        print(f"[trace] 轨迹图将保存为: {trace_recorder.png_path}")
+    else:
+        state = RobotState(tag_poses=level["tag_poses"])
+
+    try:
+        # 执行关卡
+        success = level["run_level"](state)
+    finally:
+        if TRACE_ENABLED:
+            try:
+                if trace_recorder is not None:
+                    print(f"[trace] 动作次数: {trace_recorder.action_count}, "
+                          f"定位次数: {trace_recorder.locate_count}")
+                    try:
+                        save_trajectory_png(trace_recorder, level["module"])
+                    except Exception as e:
+                        print(f"[trace] 保存轨迹图失败: {e}")
+            finally:
+                if tee is not None:
+                    sys.stdout = original_stdout
+                    tee.close()
+                    print(f"[trace] 日志已保存: {trace_recorder.log_path}")
+
     if success:
         print(f"===== 关卡 {level_name} 完成 =====")
     else:

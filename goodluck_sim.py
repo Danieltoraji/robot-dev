@@ -158,41 +158,41 @@ class SimState:
             "time": self.elapsed_time,
         })
 
-    def apply_forward(self, cm):
+    def apply_forward(self, cm, action_name="forward"):
         """沿当前朝向前进 cm 厘米"""
         actual_cm = cm
         if ACTION_ERROR_STD > 0:
             actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
         self.pos = self.pos + actual_cm * self.orientation
-        self._record("forward")
+        self._record(action_name)
 
-    def apply_back(self, cm):
+    def apply_back(self, cm, action_name="back"):
         """沿当前朝向后退 cm 厘米"""
         actual_cm = cm
         if ACTION_ERROR_STD > 0:
             actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
         self.pos = self.pos - actual_cm * self.orientation
-        self._record("back")
+        self._record(action_name)
 
-    def apply_left_move(self, cm):
+    def apply_left_move(self, cm, action_name="left_move"):
         """机体左侧横移 cm 厘米（左转为 [-oy[1], oy[0]]）"""
         actual_cm = cm
         if ACTION_ERROR_STD > 0:
             actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
         left_dir = np.array([-self.orientation[1], self.orientation[0]])
         self.pos = self.pos + actual_cm * left_dir
-        self._record("left_move")
+        self._record(action_name)
 
-    def apply_right_move(self, cm):
+    def apply_right_move(self, cm, action_name="right_move"):
         """机体右侧横移 cm 厘米（右转为 [oy[1], -oy[0]]）"""
         actual_cm = cm
         if ACTION_ERROR_STD > 0:
             actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
         right_dir = np.array([self.orientation[1], -self.orientation[0]])
         self.pos = self.pos + actual_cm * right_dir
-        self._record("right_move")
+        self._record(action_name)
 
-    def apply_turn(self, deg):
+    def apply_turn(self, deg, action_name="turn"):
         """圆周运动转向：机体绕旋转中心做圆弧运动（正=左转，负=右转）
 
         旋转中心 = 机体位置 - d·朝向 + R·侧向方向
@@ -230,7 +230,7 @@ class SimState:
         norm = np.linalg.norm(self.orientation)
         if norm != 0:
             self.orientation /= norm
-        self._record("turn")
+        self._record(action_name)
 
 
 # 全局模拟器实例与可视化实例（run_simulation 中重新初始化）
@@ -429,28 +429,28 @@ class SimRobotState(RobotState):
             if name == "stand":
                 self._sim._record("stand")
             elif name == "go_forward_one_step":
-                self._sim.apply_forward(gl.FORWARD_ONE_STEP_CM)
+                self._sim.apply_forward(gl.FORWARD_ONE_STEP_CM, name)
             elif name == "go_forward_one_small_step":
-                self._sim.apply_forward(gl.FORWARD_ONE_SMALL_STEP_CM)
+                self._sim.apply_forward(gl.FORWARD_ONE_SMALL_STEP_CM, name)
             elif name == "go_forward":
                 # 连续前进：按一步常量模拟
-                self._sim.apply_forward(gl.FORWARD_ONE_STEP_CM)
+                self._sim.apply_forward(gl.FORWARD_ONE_STEP_CM, name)
             elif name == "back_one_step":
-                self._sim.apply_back(gl.BACK_ONE_STEP_CM)
+                self._sim.apply_back(gl.BACK_ONE_STEP_CM, name)
             elif name == "back":
-                self._sim.apply_back(gl.BACK_ONE_STEP_CM)
+                self._sim.apply_back(gl.BACK_ONE_STEP_CM, name)
             elif name == "left_move":
-                self._sim.apply_left_move(gl.LEFT_MOVE_CM)
+                self._sim.apply_left_move(gl.LEFT_MOVE_CM, name)
             elif name == "right_move":
-                self._sim.apply_right_move(gl.RIGHT_MOVE_CM)
+                self._sim.apply_right_move(gl.RIGHT_MOVE_CM, name)
             elif name == "turn_left":
-                self._sim.apply_turn(gl.TURN_LEFT_DEG)
+                self._sim.apply_turn(gl.TURN_LEFT_DEG, name)
             elif name == "turn_left_small_step":
-                self._sim.apply_turn(gl.TURN_LEFT_SMALL_STEP_DEG)
+                self._sim.apply_turn(gl.TURN_LEFT_SMALL_STEP_DEG, name)
             elif name == "turn_right":
-                self._sim.apply_turn(-gl.TURN_RIGHT_DEG)
+                self._sim.apply_turn(-gl.TURN_RIGHT_DEG, name)
             elif name == "turn_right_small_step":
-                self._sim.apply_turn(-gl.TURN_RIGHT_SMALL_STEP_DEG)
+                self._sim.apply_turn(-gl.TURN_RIGHT_SMALL_STEP_DEG, name)
             else:
                 print(f"[sim] 未知动作，忽略: {name}")
                 self._sim._record(name)
