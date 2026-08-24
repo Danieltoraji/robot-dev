@@ -45,8 +45,8 @@ except Exception:
 # 头部舵机参数常量
 # =====================================================================
 HEAD_CENTER = 1500
-HEAD_RIGHT = 600
-HEAD_LEFT = 2400
+HEAD_RIGHT = 1050
+HEAD_LEFT = 1950
 HEAD_MOVE_TIME_MS = 500  # 头部舵机转动等待时间，单位ms，对应旋动90°的时间。
 HEAD_MOVE_TIME_MIN_MS = 100  # 小角度转头最小等待时间，单位ms
 # 舵机脉宽→角度线性映射：angle_deg = (pulse - 1500) * SERVO_DEG_PER_US
