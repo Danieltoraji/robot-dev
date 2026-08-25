@@ -411,3 +411,8 @@ def run_level(state):
 
     print("===== 全程完成 =====")
     return True
+
+state = RobotState(tag_poses)
+
+run_level(state)
+

@@ -74,6 +74,30 @@ CAMERA_INTRINSIC = np.array(
 )
 CAMERA_DISTORTION = np.array([-0.384402275498781, 0.284681889150075, 0, 0])
 
+# =====================================================================
+# AprilTag 角点顺序（P0 修复 · 真机实测确认）
+# =====================================================================
+# tag_poses 世界坐标顺序约定（levels/goodluck.py）：左上→右上→右下→左下。
+# 2026-08-24 真机实测（verify_corner_order.py，标签 36/37/38/39 共 6 组观测，
+# 含正对与斜视角）确认：apriltag 库返回的 r.corners 顺序与 tag_poses 完全一致，
+# 即恒等映射。此常量把该事实显式化，防止换库/换版本/重贴标签后再次踩坑；
+# 若未来顺序变化，只需修改此常量并重跑 verify_corner_order.py 验证。
+TAG_CORNER_PERM = np.array([0, 1, 2, 3], dtype=np.int64)
+
+# =====================================================================
+# PnP 位姿合理性门控（P0 修复）
+# =====================================================================
+# solvePnP 对错误角点顺序也能给出「重投影误差≈0」的假位姿（正方形标签的
+# 旋转/镜像歧义）。定位结果必须通过以下物理合理性检查，否则视为定位失败
+# （由 locate_with_scan/locate_with_retry 重试或安全终止），绝不输出假位姿。
+# 阈值依据：2026-08-24 实测——正确解重投影误差 <1px、斜仰视角朝向 z 分量
+# 可达 ±0.32；错误（镜像/旋转）解位置均跑出场地、高度超界或 z 分量 ≥0.64。
+PNP_FIELD_MIN, PNP_FIELD_MAX = -10.0, 110.0   # 相机位置须在场地范围内（cm，含余量）
+PNP_CAM_Z_MIN, PNP_CAM_Z_MAX = 5.0, 80.0      # 相机高度合理范围（cm）
+PNP_ORI_Z_MAX = 0.4                           # 相机朝向 z 分量上限（近水平；实测斜视角可达 ±0.32）
+PNP_ORI_XY_MIN = 0.1                          # 相机朝向 XY 分量下限（防垂直朝下/朝上）
+PNP_REPROJ_ERR_MAX_PX = 20.0                  # 平均重投影误差上限（px，正确解实测 <1px）
+
 
 # =====================================================================
 # 纯几何工具函数（模块级，不依赖任何关卡数据）
@@ -89,6 +113,48 @@ def distance_point_to_rect(pos, rect):
     dx = max(x_min - x, 0, x - x_max)
     dy = max(y_min - y, 0, y - y_max)
     return float(np.sqrt(dx * dx + dy * dy))
+
+
+def solve_pnp_pose(objlist, imglist):
+    """solvePnP + 提取相机位姿 + 平均重投影误差
+
+    返回 (pos_3d, ori_3d, reproj_err) 或 None（求解失败）。
+    pos_3d/ori_3d 为世界坐标系下的相机位置 / 光轴单位向量。
+    """
+    obj = np.asarray(objlist, dtype=np.float64)
+    img = np.asarray(imglist, dtype=np.float64)
+    ifsuccess, rvec, tvec = cv2.solvePnP(obj, img, CAMERA_INTRINSIC, CAMERA_DISTORTION)
+    if not ifsuccess:
+        return None
+    proj, _ = cv2.projectPoints(obj, rvec, tvec, CAMERA_INTRINSIC, CAMERA_DISTORTION)
+    reproj_err = float(np.mean(np.linalg.norm(proj[:, 0, :] - img, axis=1)))
+    rotateMatrix = cv2.Rodrigues(rvec)[0]
+    pos_3d = (-np.linalg.inv(rotateMatrix) @ tvec).flatten()
+    ori_3d = (np.linalg.inv(rotateMatrix) @ (np.array([[0.0], [0.0], [1.0]]) - tvec)).flatten() - pos_3d
+    norm = np.linalg.norm(ori_3d)
+    if norm != 0:
+        ori_3d = ori_3d / norm
+    return pos_3d, ori_3d, reproj_err
+
+
+def pnp_pose_problems(pos_3d, ori_3d, reproj_err):
+    """PnP 位姿合理性检查，返回问题列表（空列表 = 通过）
+
+    拦截角点顺序错误/镜像等「重投影误差小但物理不合理」的假位姿。
+    """
+    problems = []
+    x, y, z = pos_3d
+    if not (PNP_FIELD_MIN <= x <= PNP_FIELD_MAX and PNP_FIELD_MIN <= y <= PNP_FIELD_MAX):
+        problems.append(f"相机位置({x:.1f},{y:.1f})超出场地范围")
+    if not (PNP_CAM_Z_MIN <= z <= PNP_CAM_Z_MAX):
+        problems.append(f"相机高度z={z:.1f}cm不合理")
+    if abs(ori_3d[2]) > PNP_ORI_Z_MAX:
+        problems.append(f"相机朝向不水平(z分量{ori_3d[2]:.2f})")
+    if np.linalg.norm(ori_3d[:2]) < PNP_ORI_XY_MIN:
+        problems.append("相机朝向接近垂直")
+    if reproj_err > PNP_REPROJ_ERR_MAX_PX:
+        problems.append(f"重投影误差{reproj_err:.1f}px过大")
+    return problems
 
 
 # =====================================================================
@@ -215,6 +281,11 @@ class RobotState:
         """拍照并执行 AprilTag 检测 + PnP 求解，成功返回 True
 
         成功时设置 self.current_position 和 self.current_orientation（相机坐标系）。
+        P0 修复：
+          - 角点按 TAG_CORNER_PERM 显式重排后与 tag_poses 配对（真机实测为恒等映射）；
+          - 位姿须通过物理合理性门控（pnp_pose_problems），假位姿一律返回 False，
+            由上层定位重试或安全终止，绝不输出错误位姿；
+          - 未知 tag id 跳过，不再 KeyError 崩溃。
         """
         objlist = []
         imglist = []
@@ -222,28 +293,32 @@ class RobotState:
         if filename is None:
             return False
         for r in self.detect_apriltag(filename):
-            print("[INFO] Detected AprilTag ID: {}".format(r.tag_id))
-            objlist.extend(self.tag_poses[str(r.tag_id)])
-            imglist.extend(r.corners)
+            tid = str(r.tag_id)
+            if tid not in self.tag_poses:
+                print(f"[WARN] 检测到未知 AprilTag ID {tid}（tag_poses 无此标签），跳过。")
+                continue
+            print("[INFO] Detected AprilTag ID: {}".format(tid))
+            objlist.extend(self.tag_poses[tid])
+            imglist.extend(np.asarray(r.corners, dtype=np.float64)[TAG_CORNER_PERM])
 
-        if len(objlist) < 1:
-            print("检测到的AprilTag数量不足，无法计算相机位姿。")
+        if len(objlist) < 4 or len(objlist) % 4 != 0:
+            print("检测到的AprilTag角点不足一组(4点)，无法计算相机位姿。")
             return False
-        ifsuccess, rvec, tvec = cv2.solvePnP(
-            np.array(objlist, dtype=np.float64),
-            np.array(imglist, dtype=np.float64),
-            CAMERA_INTRINSIC,
-            CAMERA_DISTORTION,
-        )
-        if not ifsuccess:
+
+        result = solve_pnp_pose(objlist, imglist)
+        if result is None:
             print("PnP求解失败，无法计算相机位姿。")
             return False
+        pos_3d, ori_3d, reproj_err = result
 
-        rotateMatrix = cv2.Rodrigues(rvec)[0]
-        pos_3d = -np.linalg.inv(rotateMatrix) @ tvec
-        ori_3d = np.linalg.inv(rotateMatrix) @ (np.array([[0], [0], [1]]) - tvec) - pos_3d
-        self.current_position = pos_3d[:2].flatten()
-        self.current_orientation = ori_3d[:2].flatten()
+        problems = pnp_pose_problems(pos_3d, ori_3d, reproj_err)
+        if problems:
+            print(f"PnP结果未通过合理性门控（{'；'.join(problems)}），本次定位失败。")
+            print("提示：若频繁出现，请检查标签粘贴/角点顺序（TAG_CORNER_PERM）或相机内参。")
+            return False
+
+        self.current_position = pos_3d[:2]
+        self.current_orientation = ori_3d[:2]
         norm = np.linalg.norm(self.current_orientation)
         if norm != 0:
             self.current_orientation /= norm
