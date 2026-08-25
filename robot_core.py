@@ -92,11 +92,12 @@ TAG_CORNER_PERM = np.array([0, 1, 2, 3], dtype=np.int64)
 # （由 locate_with_scan/locate_with_retry 重试或安全终止），绝不输出假位姿。
 # 阈值依据：2026-08-24 实测——正确解重投影误差 <1px、斜仰视角朝向 z 分量
 # 可达 ±0.32；错误（镜像/旋转）解位置均跑出场地、高度超界或 z 分量 ≥0.64。
+# 2026-08-25 转头实测——好解 ≤0.92px、坏解（位置错 20~30cm）≥2.79px，2.0px 可分隔。
 PNP_FIELD_MIN, PNP_FIELD_MAX = -10.0, 110.0   # 相机位置须在场地范围内（cm，含余量）
 PNP_CAM_Z_MIN, PNP_CAM_Z_MAX = 5.0, 80.0      # 相机高度合理范围（cm）
 PNP_ORI_Z_MAX = 0.4                           # 相机朝向 z 分量上限（近水平；实测斜视角可达 ±0.32）
 PNP_ORI_XY_MIN = 0.1                          # 相机朝向 XY 分量下限（防垂直朝下/朝上）
-PNP_REPROJ_ERR_MAX_PX = 20.0                  # 平均重投影误差上限（px，正确解实测 <1px）
+PNP_REPROJ_ERR_MAX_PX = 2.0                   # 平均重投影误差上限（px，正确解实测 <1px）
 
 
 # =====================================================================
@@ -381,12 +382,13 @@ class RobotState:
             print(f"--- 定位尝试 {attempt + 1}/{MAX_LOCATE_RETRIES} ---")
             if self.locate_with_scan():
                 return True
-            # 头部扫描全失败 → 身体小幅转动改变视角
+            # 头部扫描全失败 → 身体转动改变视角
+            # 2026-08-25 实机标定：小步转向不可靠，改用实测可靠的大步转向（见 levels 动作常量）
             if attempt % 2 == 0:
                 print("头部扫描失败，身体左转小步尝试重新定位。")
-                self.run_action("turn_left_small_step")
+                self.run_action("turn_left")
             else:
                 print("头部扫描失败，身体右转小步尝试重新定位。")
-                self.run_action("turn_right_small_step")
+                self.run_action("turn_right")
         print("定位重试超限，程序终止。")
         return False

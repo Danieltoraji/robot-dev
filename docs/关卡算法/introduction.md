@@ -439,7 +439,7 @@ stand            → 站立结束
 |------|-----|------|
 | `FORWARD_ONE_STEP_CM` | 4.0 cm | 单步前进距离 |
 | `FORWARD_ONE_SMALL_STEP_CM` | 2.0 cm | 小步前进距离 |
-| `BACK_ONE_STEP_CM` | 4.0 cm | 单步后退距离 |
+| `BACK_FAST_CM` | 4.0 cm | 单步后退距离 |
 | `LEFT_MOVE_CM` | 2.9 cm | 左移距离 |
 | `RIGHT_MOVE_CM` | 2.1 cm | 右移距离 |
 | `TURN_LEFT_DEG` | 30.0° | 左转角度 |
@@ -576,34 +576,34 @@ python goodluck.py
 
 这些常量在 `goodluck.py` 顶部定义，复制到 PART A 后模拟器自动生效：
 
-| 常量 | 默认值 | 作用 | 调参建议 |
+| 常量 | 当前值 | 作用 | 调参建议 |
 |------|--------|------|---------|
-| `ORIENTATION_THRESHOLD` | 0.19 | 朝向对齐容差（≈11°） | 值越小精度越高但步数越多 |
+| `ORIENTATION_THRESHOLD` | 0.26（≈15°） | 朝向对齐容差 | 值越小精度越高但步数越多 |
 | `POSITION_THRESHOLD` | 3.0 cm | 位置到达容差 | 值越小越精确但可能震荡 |
-| `OBSTACLE_THRESHOLD` | 15.0 cm | 避障安全距离 | 赛道窄处需调小，宽处可调大 |
+| `OBSTACLE_THRESHOLD` | 8.0 cm | 避障安全距离 | 赛道窄处需调小，宽处可调大 |
 | `SAFE_MARGIN_CM` | 3.0 cm | 安全点额外余量 | 防死循环，一般不改 |
-| `FORWARD_BIAS` | 0.5 | 前进方向偏好权重 | 值越大越倾向前进 |
+| `FORWARD_BIAS` | 0.0 | 前进方向偏好权重 | 值越大越倾向前进 |
 | `MAX_LOCATE_RETRIES` | 5 | 定位失败重试次数 | 视环境光照调整 |
 | `STOP_TIME` | 3 s | 停靠点停留时间 | 比赛规则要求 3 秒 |
+| `GO_FORWARD_BATCH_MAX_ANGLE_DEG` | 3.0° | go_forward 大步批量最大朝向偏差 | 偏差越小批量越安全 |
+| `BATCH_FORWARD_STEPS_BY_ANGLE` | {15°:4, 30°:3} | one_step 批量步数表（步长 2cm） | 按横向偏移 ≤3cm 约束 |
 
-#### ② 动作参数常量（`goodluck.py`，需实机标定）
+#### ② 动作参数常量（`goodluck.py`，2026-08-25 实机标定完成）
 
-这些常量描述每个动作执行后的实际位移/角度，**必须实机标定**后填入：
+这些常量描述每个动作执行后的实际位移/角度，为实机标定实测值，**决策算法只采用下表动作**：
 
-| 常量 | 默认值 | 对应动作 | 标定方法 |
-|------|--------|---------|---------|
-| `FORWARD_ONE_STEP_CM` | 4.0 cm | `go_forward_one_step` | 标记起止点量距 |
-| `FORWARD_ONE_SMALL_STEP_CM` | 2.0 cm | `go_forward_one_small_step` | 标记起止点量距 |
-| `BACK_ONE_STEP_CM` | 4.0 cm | `back_one_step` | 标记起止点量距 |
-| `LEFT_MOVE_CM` | 2.9 cm | `left_move` | 标记起止点量距 |
-| `RIGHT_MOVE_CM` | 2.1 cm | `right_move` | 标记起止点量距 |
-| `TURN_LEFT_DEG` | 30.0° | `turn_left` | 量角器测转角 |
-| `TURN_RIGHT_DEG` | 30.0° | `turn_right` | 量角器测转角 |
-| `TURN_LEFT_SMALL_STEP_DEG` | 21.0° | `turn_left_small_step` | 量角器测转角 |
-| `TURN_RIGHT_SMALL_STEP_DEG` | 21.0° | `turn_right_small_step` | 量角器测转角 |
-| `CAMERA_FORWARD_OFFSET_CM` | 2.0 cm | 转向模型：旋转中心后偏 | 观察转弯轨迹反推 |
-| `TURN_LEFT_RADIUS_CM` | 5.0 cm | 转向模型：左转半径 | 观察转弯轨迹反推 |
-| `TURN_RIGHT_RADIUS_CM` | 5.0 cm | 转向模型：右转半径 | 观察转弯轨迹反推 |
+| 常量 | 标定值 | 对应动作 | 备注 |
+|------|--------|---------|------|
+| `FORWARD_CM` | 5.0 cm | `go_forward` | 实测；直道大步批量 |
+| `FORWARD_ONE_STEP_CM` | 2.0 cm | `go_forward_one_step` | 实测；闭环精修主动作 |
+| `BACK_FAST_CM` | 3.2 cm | `back_one_step` | 实测 |
+| `LEFT_MOVE_CM` | 1.9 cm | `left_move` | 实测 |
+| `RIGHT_MOVE_CM` | 2.2 cm | `right_move` | 实测 |
+| `TURN_LEFT_DEG` | 22.0° | `turn_left` | 实测；左转每次 22° |
+| `TURN_RIGHT_DEG` | 25.7° | `turn_right` | 实测；右转每次 25.7° |
+| `FORWARD_BIAS` | 0.0 | — | 前进方向偏好权重 |
+
+**已弃用（实机标定不可靠，决策不再采用）**：`go_forward_one_small_step`、`turn_left_small_step`、`turn_right_small_step`（常量已删除）。模拟器转弯弧线参数（`CAMERA_FORWARD_OFFSET_CM`、`TURN_*_RADIUS_CM`）为估算值，仅模拟器使用，已移至 `goodluck_sim.py`。
 
 #### ③ 模拟器配置常量（仅 `goodluck_sim.py` PART B）
 
@@ -712,15 +712,17 @@ TURN_ERROR_STD = 5.0            # 转向误差：实际角度 + N(0, 5.0)°
 
 **修复**：将 `nearest_safe_point` 的搜索阈值从 `OBSTACLE_THRESHOLD` 提高到 `OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM = 21.0cm`，确保安全点足够远，必触发平移动作。
 
-### 11.3 动作参数待标定
+### 11.3 动作参数标定（2026-08-25 实机完成）
 
-以下参数为估算值，需实机标定：
+实机标定结论：以下动作实测可靠，决策算法只采用它们（数值见 §10.2 ②）：
 
-- `FORWARD_ONE_STEP_CM`、`FORWARD_ONE_SMALL_STEP_CM`：实际前进距离
-- `LEFT_MOVE_CM`、`RIGHT_MOVE_CM`：实际横移距离
-- `TURN_LEFT_DEG`、`TURN_RIGHT_DEG`：实际转向角度
-- `CAMERA_FORWARD_OFFSET_CM`：旋转中心偏移
-- `TURN_LEFT_RADIUS_CM`、`TURN_RIGHT_RADIUS_CM`：转弯半径
+- `go_forward`（5.0cm）、`go_forward_one_step`（2.0cm）、`back_one_step`（3.2cm）
+- `left_move`（1.9cm）、`right_move`（2.2cm）
+- `turn_left`（22.0°）、`turn_right`（25.7°）
+
+**弃用**：`go_forward_one_small_step`、`turn_left_small_step`、`turn_right_small_step`
+实机表现不可靠，已从决策算法（平移候选集 / 转向决策 / 定位重试）中移除，常量一并删除。
+转向因此只能大步闭环逼近（每轮重新定位收敛，无小步精修），停靠朝向误差上限约半大步（±11~13°）。
 
 ---
 

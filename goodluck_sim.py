@@ -104,26 +104,30 @@ LOG_TO_FILE = True             # 是否输出日志到文件
 LOG_FILE_PATH = os.path.join(RESULT_DIR, f"simulation_log_{_RESULT_TIMESTAMP}.txt")
 
 # 各动作耗时（秒），用于实时累计完成时间
+# 2026-08-25 标定后决策算法只采用可靠动作集，小步动作耗时表项已移除
 ACTION_TIME_SEC = {
     "stand": 1.0,
     "go_forward_one_step": 1.0,
-    "go_forward_one_small_step": 0.8,
     "go_forward": 1.0,
     "back_one_step": 1.0,
     "back": 1.0,
     "left_move": 1.2,
     "right_move": 1.2,
     "turn_left": 1.5,
-    "turn_left_small_step": 0.8,
     "turn_right": 1.5,
-    "turn_right_small_step": 0.8,
 }
-BATCH_FORWARD_MAX_ANGLE_DEG = 15.0 # 批量直行允许的最大朝向偏差（度）；偏差越大允许步数越少，超过此值不批量
 LOCATE_TIME_SEC = 0.5  # 每次定位耗时（秒），可调。真实硬件拍照+检测+PnP约数秒
 
 # 机器人初始状态（入口附近，朝东）
 INITIAL_POS = np.array([2.0, 20.0], dtype=np.float64)
 INITIAL_ORIENTATION = np.array([1.0, 0.0], dtype=np.float64)
+
+# 转弯弧线模型参数（仅模拟器使用，估算值未实机标定）：
+# 实机 turn_left/right 是"边走边转"，模拟为绕旋转中心的圆弧运动；
+# 决策算法将转向视为纯旋转，这两个参数只影响模拟器轨迹保真度。
+CAMERA_FORWARD_OFFSET_CM = 2.0  # 旋转中心相对机体中心的后偏距离（cm）
+TURN_LEFT_RADIUS_CM = 5.0       # 左转圆弧半径（cm）
+TURN_RIGHT_RADIUS_CM = 5.0      # 右转圆弧半径（cm）
 
 
 class SimState:
@@ -214,13 +218,13 @@ class SimState:
         alpha = np.radians(actual_deg)
         oy = self.orientation
         # 旋转中心：先向后退 d·O，再侧向偏移 R。圆心方向由命令角度决定（与旋转方向一致）
-        base = self.pos - gl.CAMERA_FORWARD_OFFSET_CM * oy
+        base = self.pos - CAMERA_FORWARD_OFFSET_CM * oy
         if deg >= 0:  # 左转（命令）
             left_dir = np.array([-oy[1], oy[0]])
-            center = base + gl.TURN_LEFT_RADIUS_CM * left_dir
+            center = base + TURN_LEFT_RADIUS_CM * left_dir
         else:  # 右转（命令）
             right_dir = np.array([oy[1], -oy[0]])
-            center = base + gl.TURN_RIGHT_RADIUS_CM * right_dir
+            center = base + TURN_RIGHT_RADIUS_CM * right_dir
         # 旋转矩阵 R(α) = [[cos, -sin], [sin, cos]]
         cos_a, sin_a = np.cos(alpha), np.sin(alpha)
         R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
@@ -430,27 +434,21 @@ class SimRobotState(RobotState):
                 self._sim._record("stand")
             elif name == "go_forward_one_step":
                 self._sim.apply_forward(gl.FORWARD_ONE_STEP_CM, name)
-            elif name == "go_forward_one_small_step":
-                self._sim.apply_forward(gl.FORWARD_ONE_SMALL_STEP_CM, name)
             elif name == "go_forward":
-                # 连续前进：按一步常量模拟
-                self._sim.apply_forward(gl.FORWARD_ONE_STEP_CM, name)
+                # 连续前进：按标定步长模拟（2026-08-25 实测 5.0cm/次）
+                self._sim.apply_forward(gl.FORWARD_CM, name)
             elif name == "back_one_step":
-                self._sim.apply_back(gl.BACK_ONE_STEP_CM, name)
+                self._sim.apply_back(gl.BACK_FAST_CM, name)
             elif name == "back":
-                self._sim.apply_back(gl.BACK_ONE_STEP_CM, name)
+                self._sim.apply_back(gl.BACK_FAST_CM, name)
             elif name == "left_move":
                 self._sim.apply_left_move(gl.LEFT_MOVE_CM, name)
             elif name == "right_move":
                 self._sim.apply_right_move(gl.RIGHT_MOVE_CM, name)
             elif name == "turn_left":
                 self._sim.apply_turn(gl.TURN_LEFT_DEG, name)
-            elif name == "turn_left_small_step":
-                self._sim.apply_turn(gl.TURN_LEFT_SMALL_STEP_DEG, name)
             elif name == "turn_right":
                 self._sim.apply_turn(-gl.TURN_RIGHT_DEG, name)
-            elif name == "turn_right_small_step":
-                self._sim.apply_turn(-gl.TURN_RIGHT_SMALL_STEP_DEG, name)
             else:
                 print(f"[sim] 未知动作，忽略: {name}")
                 self._sim._record(name)

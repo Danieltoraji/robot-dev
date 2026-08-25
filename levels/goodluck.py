@@ -68,16 +68,16 @@ ORIENT_FREEZE_DIST_CM = 10.0  # 动态朝向冻结距离阈值（cm）：距目�
 BATCH_FORWARD_MAX_STEPS = 4        # 单次批量直行上限步数
 BATCH_FORWARD_MIN_WALL_DIST = 18.0 # 批量直行要求的最小离墙距离（cm），需 > OBSTACLE_THRESHOLD
 BATCH_FORWARD_MIN_DIST = 12.0      # 距目标 > 此值才启用批量（cm），确保远离精确停靠区
-# 朝向偏差→允许批量步数映射表（手动可调）
+# go_forward(5cm) 大步批量允许的最大朝向偏差（度）：
+# 4 步行程 20cm，横向偏移 = 20·sinθ ≤ 1.1cm，需 < POSITION_THRESHOLD(3cm)
+GO_FORWARD_BATCH_MAX_ANGLE_DEG = 3.0
+# 朝向偏差→one_step 批量步数映射表（手动可调）
 # key = 朝向偏差上限（度），value = 该偏差范围内允许的最大批量步数
-# 从小偏差到大偏差递减；偏差超过最后一个 key 则不批量（回退单步）
-# 推荐值依据：4步×4cm=16cm行程，横向偏移=16×sin(θ)，需 < POSITION_THRESHOLD(3cm)
-#   θ≤3° → 偏移≤0.8cm → 4步；θ≤7° → 偏移≤1.9cm → 3步；
-#   θ≤11° → 偏移≤3.0cm → 2步；θ>11° → 不批量
+# 标定后步长 2cm/步：N 步行程 = 2N cm，横向偏移 = 2N·sinθ，需 < POSITION_THRESHOLD(3cm)
+#   N=4(8cm)：θ≤15° → 偏移≤2.1cm；N=3(6cm)：θ≤30° → 偏移≤3.0cm
 BATCH_FORWARD_STEPS_BY_ANGLE = {
-    3.0: 4,   # θ ≤ 3°：允许 4 步（横向偏移 ≤ 0.8cm）
-    7.0: 3,   # θ ≤ 7°：允许 3 步（横向偏移 ≤ 1.9cm）
-    11.0: 2,  # θ ≤ 11°：允许 2 步（横向偏移 ≤ 3.0cm）
+    15.0: 4,  # θ ≤ 15°（对准阈值内）：4 步（横向偏移 ≤ 2.1cm）
+    30.0: 3,  # θ ≤ 30°：3 步（横向偏移 ≤ 3.0cm，边界）
 }
 
 # =====================================================================
@@ -108,19 +108,19 @@ ROUTE = [
 ]
 
 # =====================================================================
-# 动作组参数常量（所有的数值都需要重新标定！！！）
+# 动作组参数常量（2026-08-25 实机标定完成）
 # =====================================================================
-FORWARD_CM = 5.0  # go_forward
-FORWARD_ONE_STEP_CM = 2.0  # go_forward_one_step
-BACK_FAST_CM = 3.2  # back_one_step（待标定）
-LEFT_MOVE_CM = 1.9  # left_move（待标定）
-RIGHT_MOVE_CM = 2.2  # right_move（待标定）
-TURN_LEFT_DEG = 22.0  # turn_left（估算值，待标定）
-TURN_RIGHT_DEG = 25.7  # turn_right（估算值，待标定）
+# 实机标定结论：以下 7 个动作的位移/转角为实测值，决策算法只采用这些动作。
+# 其余动作（go_forward_one_small_step、turn_left_small_step、turn_right_small_step）
+# 实机表现不可靠，已从决策算法移除，相关常量一并删除。
+FORWARD_CM = 5.0  # go_forward（实测 5.0cm/次）
+FORWARD_ONE_STEP_CM = 2.0  # go_forward_one_step（实测 2.0cm/次）
+BACK_FAST_CM = 3.2  # back_one_step（实测 3.2cm/次）
+LEFT_MOVE_CM = 1.9  # left_move（实测 1.9cm/次）
+RIGHT_MOVE_CM = 2.2  # right_move（实测 2.2cm/次）
+TURN_LEFT_DEG = 22.0  # turn_left（实测 22.0°/次）
+TURN_RIGHT_DEG = 25.7  # turn_right（实测 25.7°/次）
 FORWARD_BIAS = 0.0  # 前进方向偏好权重，避免原地转圈
-CAMERA_FORWARD_OFFSET_CM = 2.0  # 摄像头中心相对旋转中心的前后偏移（旋转中心在后方，cm）
-TURN_LEFT_RADIUS_CM = 5.0  # 左转圆周运动半径（cm）
-TURN_RIGHT_RADIUS_CM = 5.0  # 右转圆周运动半径（cm）
 
 
 # =====================================================================
@@ -198,10 +198,11 @@ def decide_panning_action(state, current_pos, target_pos, orientation_xOy):
     right_dir = np.array([oy[1], -oy[0]])
 
     # 模拟各动作后的预期 position_diff（2D）
+    # 候选集 = 2026-08-25 实机标定的可靠动作（go_forward_one_small_step 已移除）
     candidates = {
+        "go_forward": position_diff + FORWARD_CM * oy,
         "go_forward_one_step": position_diff + FORWARD_ONE_STEP_CM * oy,
-        "go_forward_one_small_step": position_diff + FORWARD_ONE_SMALL_STEP_CM * oy,
-        "back_one_step": position_diff - BACK_ONE_STEP_CM * oy,
+        "back_one_step": position_diff - BACK_FAST_CM * oy,
         "left_move": position_diff + LEFT_MOVE_CM * left_dir,
         "right_move": position_diff + RIGHT_MOVE_CM * right_dir,
     }
@@ -236,11 +237,15 @@ def decide_panning_action(state, current_pos, target_pos, orientation_xOy):
     return best_action
 
 def decide_rotation_action(state, target):
-    """转向策略：计算带符号角度差，小角度差用小步，大角度差用大步
+    """转向策略：计算带符号角度差，用实测可靠的大步转向执行
 
     state: RobotState 实例（用于访问 current_orientation）。
     target: 目标朝向（单位向量）。
     返回 (action_name, times)。
+
+    2026-08-25 实机标定后：小步转向（turn_*_small_step）不可靠已弃用，
+    转向只使用 turn_left(22.0°) / turn_right(25.7°)。每轮循环重新定位、
+    重新决策，转角误差由闭环收敛（times 恒为 1）。
     """
     target = np.array(target, dtype=np.float64)  # 目标朝向
     # 当前朝向到目标朝向的带符号角度差
@@ -251,22 +256,11 @@ def decide_rotation_action(state, target):
     angle_deg = np.degrees(np.arccos(dot))
 
     if cross > 0:
-        direction = "left"
-        print(f"需左转 {angle_deg:.1f}°")
+        print(f"需左转 {angle_deg:.1f}°（turn_left，实测 22.0°/次）")
+        return "turn_left", 1
     else:
-        direction = "right"
-        print(f"需右转 {angle_deg:.1f}°")
-
-    if direction == "left":
-        if abs(angle_deg - TURN_LEFT_SMALL_STEP_DEG) > abs(angle_deg - TURN_LEFT_DEG):
-            return "turn_left", 1
-        else:
-            return "turn_left_small_step", 1
-    else:
-        if abs(angle_deg - TURN_RIGHT_SMALL_STEP_DEG) > abs(angle_deg - TURN_RIGHT_DEG):
-            return "turn_right", 1
-        else:
-            return "turn_right_small_step", 1
+        print(f"需右转 {angle_deg:.1f}°（turn_right，实测 25.7°/次）")
+        return "turn_right", 1
 
 def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0, bypass_position=None, bypass_condition=None):
     """统一路点导航原语：定位 → 危险检测 → 动态朝向修正 → 平移接近 → 到达检查 → 按需停留
@@ -387,31 +381,45 @@ def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0
                 # state.run_action("back_one_step")
             else:
                 # ★ 批量直行优化：朝向已对准 + 安全走廊 + 纯直行 + 远离目标时批量执行
-                if (action == "go_forward_one_step"
+                # 2026-08-25 标定后两种批量：
+                #   go_forward(5cm) 大步批量 —— 偏差 ≤ GO_FORWARD_BATCH_MAX_ANGLE_DEG（直道提速）
+                #   go_forward_one_step(2cm) 批量 —— 按朝向偏差查表限制步数（轻度偏差精修）
+                if (action in ("go_forward", "go_forward_one_step")
                         and not escaping
                         and wall_dist >= BATCH_FORWARD_MIN_WALL_DIST
                         and dist > BATCH_FORWARD_MIN_DIST
                         and od is not None
                         and np.linalg.norm(od) <= ORIENTATION_THRESHOLD):
-                    # 按朝向偏差查表限制批量步数：偏差越小允许越多步
                     # od 模长 = 2*sin(θ/2)，θ = 2*arcsin(‖od‖/2)
                     angle_deg = np.degrees(2 * np.arcsin(min(np.linalg.norm(od) / 2, 1.0)))
-                    max_steps_by_angle = 1  # 默认不批量
-                    for angle_cap, steps in sorted(BATCH_FORWARD_STEPS_BY_ANGLE.items()):
-                        if angle_deg <= angle_cap:
-                            max_steps_by_angle = steps # 我们的偏差允许走几步？
-                            break
-                    remaining_steps = int(dist / FORWARD_ONE_STEP_CM) # 剩下的距离够走几步？
-                    batch_steps = min(max_steps_by_angle, remaining_steps)
-                    if batch_steps > 1:
-                        # 路径预检：整段批量路径离墙距离是否充足
-                        if check_segment_clear(
-                            state.current_position, state.current_orientation,
-                            batch_steps, FORWARD_ONE_STEP_CM, BATCH_FORWARD_MIN_WALL_DIST
-                        ):
-                            print(f"  ★ 批量直行 {batch_steps} 步（距目标 {dist:.1f}cm，离墙 {wall_dist:.1f}cm）")
-                            state.run_action("go_forward_one_step", times=batch_steps)
-                            continue
+                    if action == "go_forward":
+                        if angle_deg <= GO_FORWARD_BATCH_MAX_ANGLE_DEG:
+                            step_cm = FORWARD_CM
+                            batch_steps = min(BATCH_FORWARD_MAX_STEPS, int(dist / step_cm))
+                            if batch_steps > 1 and check_segment_clear(
+                                state.current_position, state.current_orientation,
+                                batch_steps, step_cm, BATCH_FORWARD_MIN_WALL_DIST
+                            ):
+                                print(f"  ★ 大步批量直行 {batch_steps} 步（go_forward，距目标 {dist:.1f}cm，离墙 {wall_dist:.1f}cm）")
+                                state.run_action("go_forward", times=batch_steps)
+                                continue
+                    else:
+                        max_steps_by_angle = 1  # 默认不批量
+                        for angle_cap, steps in sorted(BATCH_FORWARD_STEPS_BY_ANGLE.items()):
+                            if angle_deg <= angle_cap:
+                                max_steps_by_angle = steps # 我们的偏差允许走几步？
+                                break
+                        remaining_steps = int(dist / FORWARD_ONE_STEP_CM) # 剩下的距离够走几步？
+                        batch_steps = min(max_steps_by_angle, remaining_steps)
+                        if batch_steps > 1:
+                            # 路径预检：整段批量路径离墙距离是否充足
+                            if check_segment_clear(
+                                state.current_position, state.current_orientation,
+                                batch_steps, FORWARD_ONE_STEP_CM, BATCH_FORWARD_MIN_WALL_DIST
+                            ):
+                                print(f"  ★ 批量直行 {batch_steps} 步（距目标 {dist:.1f}cm，离墙 {wall_dist:.1f}cm）")
+                                state.run_action("go_forward_one_step", times=batch_steps)
+                                continue
                 state.run_action(action)
             continue
         print("\n=== 本轮导航循环结束 ===")
