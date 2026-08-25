@@ -207,6 +207,10 @@ class RobotState:
         time.sleep(dynamic_time / 1000.0 + 0.2)
         self.current_head_pulse = pulse
 
+    def raise_head(self):
+        """转动头部至 UP_PULSE（90°）"""
+        ctl.set_pwm_servo_pulse(1, 1800, 500)
+
     def pulse_to_angle(self, pulse):
         """舵机脉宽→角度（度），右转为负，左转为正"""
         return (pulse - HEAD_CENTER) * SERVO_DEG_PER_US

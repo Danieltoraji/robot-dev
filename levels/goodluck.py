@@ -465,7 +465,7 @@ def run_level(state):
 
     state.run_action("stand")
     state.set_head(HEAD_CENTER)
-
+    state.raise_head()
     for i, wp in enumerate(ROUTE, 1):
         if not navigate_to_target(state, wp.pos, wp.orientation, wp.stop, wp.bypass_position, wp.bypass_condition):
             print(f"导航至路点 {i}（{wp.pos}）失败，程序终止。")
