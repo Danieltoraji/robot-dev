@@ -55,7 +55,7 @@ WALLS = [
 ORIENTATION_THRESHOLD = 0.26  # 朝向差异模长阈值，约15°
 POSITION_THRESHOLD = 3.0  # 位置差异模长阈值，单位cm
 STOP_TIME = 3  # 到达目标点后停留时间，单位秒（比赛规则要求停靠 3 秒）
-OBSTACLE_THRESHOLD = 15.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
+OBSTACLE_THRESHOLD = 8.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
 SAFE_MARGIN_CM = 3.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
 CORRIDOR_CLEAR_CM = OBSTACLE_THRESHOLD + 3.0  # 走廊净空校验阈值（路点串沿线离墙最小距离）
 ORIENT_FREEZE_DIST_CM = 10.0  # 动态朝向冻结距离阈值（cm）：距目标 > 此值时用连线方向，≤ 此值时切指定朝向或冻结连线方向（防震荡）。调大防震荡，调小扩大连线方向范围，但需 > POSITION_THRESHOLD
@@ -110,15 +110,13 @@ ROUTE = [
 # =====================================================================
 # 动作组参数常量（所有的数值都需要重新标定！！！）
 # =====================================================================
-FORWARD_ONE_STEP_CM = 4.0  # go_forward_one_step（待标定）
-FORWARD_ONE_SMALL_STEP_CM = 2.0  # go_forward_one_small_step（待标定）
-BACK_ONE_STEP_CM = 4.0  # back_one_step（待标定）
-LEFT_MOVE_CM = 2.9  # left_move（待标定）
-RIGHT_MOVE_CM = 2.1  # right_move（待标定）
-TURN_LEFT_SMALL_STEP_DEG = 15.0  # turn_left_small_step（待标定）
-TURN_RIGHT_SMALL_STEP_DEG = 15.0  # turn_right_small_step（待标定）
+FORWARD_CM = 5.0  # go_forward
+FORWARD_ONE_STEP_CM = 2.0  # go_forward_one_step
+BACK_FAST_CM = 3.2  # back_one_step（待标定）
+LEFT_MOVE_CM = 1.9  # left_move（待标定）
+RIGHT_MOVE_CM = 2.2  # right_move（待标定）
 TURN_LEFT_DEG = 22.0  # turn_left（估算值，待标定）
-TURN_RIGHT_DEG = 30.0  # turn_right（估算值，待标定）
+TURN_RIGHT_DEG = 25.7  # turn_right（估算值，待标定）
 FORWARD_BIAS = 0.0  # 前进方向偏好权重，避免原地转圈
 CAMERA_FORWARD_OFFSET_CM = 2.0  # 摄像头中心相对旋转中心的前后偏移（旋转中心在后方，cm）
 TURN_LEFT_RADIUS_CM = 5.0  # 左转圆周运动半径（cm）
