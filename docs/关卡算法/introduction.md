@@ -585,8 +585,7 @@ python goodluck.py
 | `FORWARD_BIAS` | 0.0 | 前进方向偏好权重 | 值越大越倾向前进 |
 | `MAX_LOCATE_RETRIES` | 5 | 定位失败重试次数 | 视环境光照调整 |
 | `STOP_TIME` | 3 s | 停靠点停留时间 | 比赛规则要求 3 秒 |
-| `GO_FORWARD_BATCH_MAX_ANGLE_DEG` | 3.0° | go_forward 大步批量最大朝向偏差 | 偏差越小批量越安全 |
-| `BATCH_FORWARD_STEPS_BY_ANGLE` | {15°:4, 30°:3} | one_step 批量步数表（步长 2cm） | 按横向偏移 ≤3cm 约束 |
+| `GO_FORWARD_BATCH_MAX_ANGLE_DEG` | 3.0° | 批量直行最大朝向偏差（批量一律 go_forward） | 偏差越小批量越安全 |
 
 #### ② 动作参数常量（`goodluck.py`，2026-08-25 实机标定完成）
 
