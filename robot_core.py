@@ -12,6 +12,8 @@
 关卡特定的赛道数据（墙壁、目标点等）和导航算法留在关卡文件中。
 """
 
+import json
+import os
 import time
 import subprocess
 import numpy as np
@@ -40,18 +42,16 @@ except Exception:
     ctl = None
     board = None
 
+# 相机内参/头部舵机/PnP门控常量：单一真源在 camera_config.py，
+# 此处导入以保持 robot_core.CAMERA_INTRINSIC 等既有引用方式不变。
+from camera_config import (
+    CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_INTRINSIC, CAMERA_DISTORTION,
+    HEAD_CENTER, HEAD_RIGHT, HEAD_LEFT, HEAD_WIDE_RIGHT, HEAD_WIDE_LEFT,
+    HEAD_MOVE_TIME_MS, HEAD_MOVE_TIME_MIN_MS, SERVO_DEG_PER_US, PITCH_UP_PULSE,
+    PNP_FIELD_MIN, PNP_FIELD_MAX, PNP_CAM_Z_MIN, PNP_CAM_Z_MAX,
+    PNP_ORI_Z_MAX, PNP_ORI_XY_MIN, PNP_REPROJ_ERR_MAX_PX,
+)
 
-# =====================================================================
-# 头部舵机参数常量
-# =====================================================================
-HEAD_CENTER = 1500
-HEAD_RIGHT = 1050
-HEAD_LEFT = 1950
-HEAD_MOVE_TIME_MS = 500  # 头部舵机转动等待时间，单位ms，对应旋动90°的时间。
-HEAD_MOVE_TIME_MIN_MS = 100  # 小角度转头最小等待时间，单位ms
-# 舵机脉宽→角度线性映射：angle_deg = (pulse - 1500) * SERVO_DEG_PER_US
-# 标准500-2500μs对应±90°，即 90°/1000μs = 0.09
-SERVO_DEG_PER_US = 0.09
 
 # =====================================================================
 # 定位参数常量
@@ -61,18 +61,8 @@ MAX_LOCATE_RETRIES = 5  # 定位失败最大重试次数
 # 属于关卡层，由各关卡在 levels/<level>.py 中自行定义，不要放回 core，
 # 以免出现「core 与关卡各持一份」的双重真相、造成跨关卡混乱。
 
-# =====================================================================
-# 相机内参（从原 solve_pnp 局部变量提取为模块级常量）
-# =====================================================================
-CAMERA_INTRINSIC = np.array(
-    (
-        [1.944903664123011e03, 0, 1.283069051100245e03],
-        [0, 1.950095436307893e03, 9.831983420212778e02],
-        [0, 0, 1],
-    ),
-    dtype=np.double,
-)
-CAMERA_DISTORTION = np.array([-0.384402275498781, 0.284681889150075, 0, 0])
+# 多视角联合定位外参文件（survey_field.py 产出；缺失时降级为缺省外参）
+MULTIVIEW_EXTRINSICS_PATH = os.path.join("result", "multiview_extrinsics.json")
 
 # =====================================================================
 # AprilTag 角点顺序（P0 修复 · 真机实测确认）
@@ -83,21 +73,6 @@ CAMERA_DISTORTION = np.array([-0.384402275498781, 0.284681889150075, 0, 0])
 # 即恒等映射。此常量把该事实显式化，防止换库/换版本/重贴标签后再次踩坑；
 # 若未来顺序变化，只需修改此常量并重跑 verify_corner_order.py 验证。
 TAG_CORNER_PERM = np.array([0, 1, 2, 3], dtype=np.int64)
-
-# =====================================================================
-# PnP 位姿合理性门控（P0 修复）
-# =====================================================================
-# solvePnP 对错误角点顺序也能给出「重投影误差≈0」的假位姿（正方形标签的
-# 旋转/镜像歧义）。定位结果必须通过以下物理合理性检查，否则视为定位失败
-# （由 locate_with_scan/locate_with_retry 重试或安全终止），绝不输出假位姿。
-# 阈值依据：2026-08-24 实测——正确解重投影误差 <1px、斜仰视角朝向 z 分量
-# 可达 ±0.32；错误（镜像/旋转）解位置均跑出场地、高度超界或 z 分量 ≥0.64。
-# 2026-08-25 转头实测——好解 ≤0.92px、坏解（位置错 20~30cm）≥2.79px，2.0px 可分隔。
-PNP_FIELD_MIN, PNP_FIELD_MAX = -10.0, 110.0   # 相机位置须在场地范围内（cm，含余量）
-PNP_CAM_Z_MIN, PNP_CAM_Z_MAX = 5.0, 80.0      # 相机高度合理范围（cm）
-PNP_ORI_Z_MAX = 0.4                           # 相机朝向 z 分量上限（近水平；实测斜视角可达 ±0.32）
-PNP_ORI_XY_MIN = 0.1                          # 相机朝向 XY 分量下限（防垂直朝下/朝上）
-PNP_REPROJ_ERR_MAX_PX = 2.0                   # 平均重投影误差上限（px，正确解实测 <1px）
 
 
 # =====================================================================
@@ -180,6 +155,12 @@ class RobotState:
         self.current_orientation = None
         self.current_head_pulse = HEAD_CENTER
         self.tag_poses = tag_poses if tag_poses is not None else {}
+        # 多视角外参：优先读 survey_field.py 标定产物；缺失则用缺省值
+        # （e=0 即「光心=机体中心」假设），首次联合求解时打印告警
+        from multiview_pose import load_extrinsics, normalize_extrinsics
+        ext = load_extrinsics(MULTIVIEW_EXTRINSICS_PATH)
+        self.multiview_extrinsics = normalize_extrinsics(ext)
+        self._extrinsics_warned = False
 
     # -----------------------------------------------------------------
     # 动作执行
@@ -208,8 +189,8 @@ class RobotState:
         self.current_head_pulse = pulse
 
     def raise_head(self):
-        """转动头部至 UP_PULSE（90°）"""
-        ctl.set_pwm_servo_pulse(1, 1800, 500)
+        """转动头部至 PITCH_UP_PULSE（固定抬头；外参标定须与此俯仰一致）"""
+        ctl.set_pwm_servo_pulse(1, PITCH_UP_PULSE, 500)
 
     def pulse_to_angle(self, pulse):
         """舵机脉宽→角度（度），右转为负，左转为正"""
@@ -240,7 +221,8 @@ class RobotState:
         """拍照，返回文件路径；失败返回 None"""
         timestamp = int(time.time())
         filename = f"/home/pi/Pictures/photo_{timestamp}.jpg"
-        cmd = f"fswebcam -r 2592x1944 --no-banner -S 3 {filename}"
+        cmd = (f"fswebcam -r {CAMERA_WIDTH}x{CAMERA_HEIGHT} "
+               f"--no-banner -S 3 {filename}")
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
         if result.returncode != 0:
@@ -329,51 +311,157 @@ class RobotState:
             self.current_orientation /= norm
         return True
 
-    def locate_with_scan(self):
-        """三级头部扫描定位：回正→右转→左转，每步拍照+PnP
+    def _locate_pose_once(self, head_pulse):
+        """单档定位：拍照→检测→单帧 PnP→门控；成功则写入定位状态。
 
-        成功时 current_position/current_orientation 已补偿为机体坐标系，返回 True。
-        失败返回 False，头部回到中位。
+        返回 (ok, frame)：frame=(theta_nom, objlist, imglist) 供联合求解复用
+        （检测到已知标签但单帧未通过门控时仍有值；无标签时为 None）。
+        theta_nom 为头转系数修正后的标称转角（度）。
+        模拟器通过重写本方法接入（与旧 solve_pnp 桩同一接缝层次）。
+        """
+        theta = self.multiview_extrinsics["k_head"] * \
+            (head_pulse - HEAD_CENTER) * SERVO_DEG_PER_US
+        filename = self.capture_image()
+        if filename is None:
+            return False, None
+        objlist, imglist = [], []
+        for r in self.detect_apriltag(filename):
+            tid = str(r.tag_id)
+            if tid not in self.tag_poses:
+                print(f"[WARN] 检测到未知 AprilTag ID {tid}（tag_poses 无此标签），跳过。")
+                continue
+            print("[INFO] Detected AprilTag ID: {}".format(tid))
+            objlist.extend(self.tag_poses[tid])
+            imglist.extend(np.asarray(r.corners, dtype=np.float64)[TAG_CORNER_PERM])
+
+        frame = (theta, list(objlist), list(imglist)) if objlist else None
+        if len(objlist) < 4:
+            print("检测到的AprilTag角点不足一组(4点)，无法计算相机位姿。")
+            return False, frame
+
+        result = solve_pnp_pose(objlist, imglist)
+        if result is None:
+            print("PnP求解失败，无法计算相机位姿。")
+            return False, frame
+        pos_3d, ori_3d, reproj_err = result
+        problems = pnp_pose_problems(pos_3d, ori_3d, reproj_err)
+        if problems:
+            print(f"PnP结果未通过合理性门控（{'；'.join(problems)}），本次单帧定位失败。")
+            return False, frame
+
+        self.current_position = pos_3d[:2]
+        self.current_orientation = ori_3d[:2]
+        norm = np.linalg.norm(self.current_orientation)
+        if norm != 0:
+            self.current_orientation /= norm
+        return True, frame
+
+    def _locate_joint(self, frames):
+        """多帧联合定位兜底：固定外参解机体位姿 (x_B, y_B, phi)，门控后写入状态。
+
+        frames: [(theta_deg, objlist, imglist), ...]（同一站位、机体不动时采集）
+        门控失败时自动剔除单帧残差最大的一帧重试一次；仍未通过返回 False。
+        语义与单帧路径一致：current_position=光心地面投影，orientation=机体朝向。
+        """
+        try:
+            from multiview_pose import solve_joint_3dof, gate_solution, \
+                camera_optical_center, body_orientation_xy
+        except Exception as e:
+            print(f"[联合定位] multiview_pose 导入失败: {e}")
+            return False
+
+        if not self._extrinsics_warned and "source" not in self.multiview_extrinsics:
+            print(f"[联合定位] 警告: 未找到 {MULTIVIEW_EXTRINSICS_PATH}，"
+                  f"使用缺省外参 {self.multiview_extrinsics}（e=0 即光心=机体中心假设）。"
+                  "建议先跑 survey_field.py 生成标定外参。")
+            self._extrinsics_warned = True
+
+        def _apply(fr):
+            p_est, rms, info = solve_joint_3dof(fr, self.multiview_extrinsics)
+            if p_est is None:
+                return None, None, None, None
+            problems = gate_solution(p_est, fr, self.multiview_extrinsics)
+            return p_est, rms, problems, fr
+
+        p_est, rms, problems, used = _apply(frames)
+        if problems and len(frames) > 2 and p_est is not None:
+            # 剔除联合残差最大的一帧重试一次
+            from multiview_pose import residual as _res
+            worst = max(range(len(frames)),
+                        key=lambda i: float(np.sqrt(np.mean(
+                            _res(p_est, [frames[i]]) ** 2))))
+            retry = [f for i, f in enumerate(frames) if i != worst]
+            print(f"[联合定位] 门控未过，剔除残差最大帧 θ={frames[worst][0]:+.1f}° 重试…")
+            p2, rms2, problems2, used2 = _apply(retry)
+            if not problems2:
+                p_est, rms, problems, used = p2, rms2, problems2, used2
+        if problems or p_est is None:
+            print(f"[联合定位] 未通过门控（{problems}），联合求解失败。")
+            return False
+
+        self.current_position = camera_optical_center(p_est, 0.0)[:2]
+        self.current_orientation = body_orientation_xy(p_est)
+        print(f"[联合定位] 成功：{len(used)} 帧 rms={rms:.2f}px "
+              f"光心=({self.current_position[0]:.1f},{self.current_position[1]:.1f}) "
+              f"机体朝向=({self.current_orientation[0]:.2f},{self.current_orientation[1]:.2f})")
+        return True
+
+    def locate_with_scan(self):
+        """三级头部扫描定位：回正→右转→左转，每档拍照+单帧PnP（快路径不变）
+
+        三档单帧全部失败时，用缓存的多档角点做固定外参联合求解兜底
+        （消除单标签平面歧义），仍失败才返回 False，头部回到中位。
         """
         self.current_position = None
         self.current_orientation = None
+        frames = []
 
-        # 1. 头部回正拍照
+        # 1. 头部回正拍照（快路径：单帧成功即返回，行为与历史版本一致）
         self.set_head(HEAD_CENTER)
-        if self.solve_pnp():
-            print(
-                "定位成功（头部回正）。位置：",
-                self.current_position,
-                "朝向：",
-                self.current_orientation,
-            )
+        ok, frame = self._locate_pose_once(HEAD_CENTER)
+        if frame:
+            frames.append(frame)
+        if ok:
+            print("定位成功（头部回正）。位置：", self.current_position,
+                  "朝向：", self.current_orientation)
             return True
 
-        # 2. 头部右转拍照
-        self.set_head(HEAD_RIGHT)
-        if self.solve_pnp():
-            self.compensate_head_offset(HEAD_RIGHT)
-            print(
-                "定位成功（头部右转）。位置：",
-                self.current_position,
-                "机体朝向：",
-                self.current_orientation,
-            )
-            self.set_head(HEAD_CENTER)
-            return True
+        # 2/3. 头部右转、左转拍照（单帧成功即返回；失败则角点入缓存）
+        for pulse, name in ((HEAD_RIGHT, "右转"), (HEAD_LEFT, "左转")):
+            self.set_head(pulse)
+            ok, frame = self._locate_pose_once(pulse)
+            if frame:
+                frames.append(frame)
+            if ok:
+                self.compensate_head_offset(pulse)
+                print(f"定位成功（头部{name}）。位置：", self.current_position,
+                      "机体朝向：", self.current_orientation)
+                self.set_head(HEAD_CENTER)
+                return True
 
-        # 3. 头部左转拍照
-        self.set_head(HEAD_LEFT)
-        if self.solve_pnp():
-            self.compensate_head_offset(HEAD_LEFT)
-            print(
-                "定位成功（头部左转）。位置：",
-                self.current_position,
-                "机体朝向：",
-                self.current_orientation,
-            )
-            self.set_head(HEAD_CENTER)
-            return True
+        # 4. 联合求解兜底：≥2 帧角点即可联解
+        if len(frames) >= 2:
+            if self._locate_joint(frames):
+                self.set_head(HEAD_CENTER)
+                return True
+
+        # 5. 第二档宽扫（±63°）：覆盖三档扫不到的方位（如出口走廊朝东时
+        #    东墙标签在 ~71-79°）。宽扫帧优先走单帧，失败并入联合缓存。
+        for pulse, name in ((HEAD_WIDE_RIGHT, "宽右"), (HEAD_WIDE_LEFT, "宽左")):
+            self.set_head(pulse)
+            ok, frame = self._locate_pose_once(pulse)
+            if frame:
+                frames.append(frame)
+            if ok:
+                self.compensate_head_offset(pulse)
+                print(f"定位成功（头部{name}）。位置：", self.current_position,
+                      "机体朝向：", self.current_orientation)
+                self.set_head(HEAD_CENTER)
+                return True
+        if len(frames) >= 2 and any(abs(f[0]) > 41.0 for f in frames):
+            if self._locate_joint(frames):
+                self.set_head(HEAD_CENTER)
+                return True
 
         # 全部失败，头部回正
         self.set_head(HEAD_CENTER)

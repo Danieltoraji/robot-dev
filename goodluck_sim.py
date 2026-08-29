@@ -39,7 +39,11 @@ for _font in ["Microsoft YaHei", "SimHei", "WenQuanYi Micro Hei", "Arial Unicode
 matplotlib.rcParams["axes.unicode_minus"] = False  # 负号显示
 
 # 导入通用层与关卡层
-from robot_core import RobotState, HEAD_CENTER, HEAD_RIGHT, HEAD_LEFT, HEAD_MOVE_TIME_MS
+from robot_core import (RobotState, HEAD_CENTER, HEAD_RIGHT, HEAD_LEFT,
+                        HEAD_MOVE_TIME_MS, SERVO_DEG_PER_US,
+                        solve_pnp_pose, pnp_pose_problems,
+                        CAMERA_WIDTH, CAMERA_HEIGHT)
+from multiview_pose import camera_pose, project_points
 from levels import goodluck as gl
 
 
@@ -387,6 +391,9 @@ class SimRobotState(RobotState):
         # 模拟器状态由 run_simulation 注入
         self._sim = None
         self._viz = None
+        # 角点级桩开关（--corner-stub / --decoy）
+        self.corner_stub = False
+        self.decoy = False
 
     def attach_sim(self, sim_instance, viz_instance):
         """注入模拟器状态与可视化实例"""
@@ -474,22 +481,18 @@ class SimRobotState(RobotState):
     def solve_pnp(self):
         """桩：直接返回模拟器真实状态（可注入噪声），不拍照不检测
 
-        同时兼作死循环检测点：每次 navigate_to_target 循环都会调用定位，
-        若定位次数超限则抛异常中止，防止算法逻辑死循环（不执行动作时
-        MAX_SIM_STEPS 无法触发）。
+        （遗留接缝：locate_with_scan 现走 _locate_pose_once；本桩保留供
+        旧脚本/工具直接调用 state.solve_pnp() 的场合，行为与历史一致。）
         """
         self._sim.locate_count += 1
         if self._sim.locate_count > MAX_SIM_STEPS * 3:
             raise RuntimeError(
                 f"定位次数超限({self._sim.locate_count})，算法可能陷入死循环。中止以防卡死。"
             )
-        # 累加定位耗时（真实硬件拍照+检测+PnP耗时显著）
         self._sim.elapsed_time += LOCATE_TIME_SEC
-        print(f"  📍 定位 #{self._sim.locate_count}（耗时 {LOCATE_TIME_SEC}s，累计 {self._sim.elapsed_time:.1f}s）")
         pos = self._sim.pos.copy()
         ori = self._sim.orientation.copy()
-        print(f"触发定位。真实位置为 ({pos[0]:.1f}, {pos[1]:.1f})，朝向为 ({ori[0]:.2f}, {ori[1]:.2f})")
-        # 注入定位噪声
+        print(f"[理想桩定位] 真实位置 ({pos[0]:.1f},{pos[1]:.1f})")
         if LOCATE_NOISE_STD > 0:
             pos = pos + np.random.normal(0, LOCATE_NOISE_STD, size=2)
         if LOCATE_ANGLE_NOISE_STD > 0:
@@ -502,18 +505,151 @@ class SimRobotState(RobotState):
                 ori /= n
         self.current_position = pos
         self.current_orientation = ori
-        if self._viz is not None:
-            self._viz.update(self._sim, f"📍 定位 #{self._sim.locate_count}\n"
-                            f"位置: ({self._sim.pos[0]:.1f}, {self._sim.pos[1]:.1f})  "
-                            f"朝向: ({self._sim.orientation[0]:.2f}, {self._sim.orientation[1]:.2f})\n"
-                            f"已用时间: {self._sim.elapsed_time:.1f}s  动作: {self._sim.step_count}步  定位: {self._sim.locate_count}次")
-        print(f"返回定位结果（带噪声）: 位置=({pos[0]:.2f}, {pos[1]:.2f})  朝向=({ori[0]:.2f}, {ori[1]:.2f}) ")
         return True
+
+    # -----------------------------------------------------------------
+    # 角点级合成桩（--corner-stub）：补上旧桩"从不产生歧义"的盲区
+    # -----------------------------------------------------------------
+
+    def _locate_pose_once(self, head_pulse):
+        """定位接缝桩：locate_with_scan 每档调用一次
+
+        默认模式：复刻旧 solve_pnp 理想桩（返回带噪声真值，frame=None，
+        联合求解不介入——保持历史仿真语义）。
+        corner_stub 模式：按模拟真值合成角点（含畸变/FOV/中墙遮挡/噪声），
+        走与真机完全相同的「单帧 PnP+门控」管线，返回 frame 供联合求解；
+        decoy 模式额外把右转档角点替换为镜像分支（歧义诱饵）。
+        """
+        self._sim.locate_count += 1
+        if self._sim.locate_count > MAX_SIM_STEPS * 3:
+            raise RuntimeError(
+                f"定位次数超限({self._sim.locate_count})，算法可能陷入死循环。中止以防卡死。"
+            )
+        self._sim.elapsed_time += LOCATE_TIME_SEC
+        if not getattr(self, "corner_stub", False):
+            return self.solve_pnp(), None
+        return self._locate_pose_once_corners(head_pulse)
+
+    def _true_p8(self, head_pulse):
+        """模拟真值 → 8 参数向量（生成与求解共用同一套外参，无模型失配）"""
+        ext = self.multiview_extrinsics
+        phi_deg = float(np.degrees(np.arctan2(self._sim.orientation[1],
+                                              self._sim.orientation[0])))
+        theta = ext["k_head"] * (head_pulse - HEAD_CENTER) * SERVO_DEG_PER_US
+        p8 = np.array([self._sim.pos[0], self._sim.pos[1], phi_deg,
+                       ext["e_x"], ext["e_y"], ext["z_c"],
+                       ext["pitch_deg"], ext["k_head"]], dtype=np.float64)
+        return p8, theta
+
+    def _midwall_blocks(self, cam_xy, corner_xy):
+        """相机→角点连线是否穿过中墙（Liang-Barsky）"""
+        x0, y0 = cam_xy
+        x1, y1 = corner_xy
+        dx, dy = x1 - x0, y1 - y0
+        t0, t1 = 0.02, 0.98
+        for p, q in ((-dx, x0 - gl.WALLS[1][0]), (dx, gl.WALLS[1][1] - x0),
+                     (-dy, y0 - gl.WALLS[1][2]), (dy, gl.WALLS[1][3] - y0)):
+            if abs(p) < 1e-9:
+                if q < 0:
+                    return False
+            else:
+                t = q / p
+                if p < 0:
+                    t0 = max(t0, t)
+                else:
+                    t1 = min(t1, t)
+        return t0 < t1
+
+    def _synth_corners(self, head_pulse, decoy=False):
+        """按模拟真值合成当前档位可见标签角点（含噪声与遮挡）"""
+        p8, theta = self._true_p8(head_pulse)
+        R_cw, t_cw = camera_pose(p8, theta)
+        margin = 40.0
+        cam_xy = (self._sim.pos[0], self._sim.pos[1])
+        tags = {}
+        for tid, corners in self.tag_poses.items():
+            proj, ok = project_points(corners, R_cw, t_cw)
+            if not ok.all():
+                continue
+            if ((proj[:, 0] < margin) | (proj[:, 0] > CAMERA_WIDTH - margin) |
+                    (proj[:, 1] < margin) | (proj[:, 1] > CAMERA_HEIGHT - margin)).any():
+                continue
+            if any(self._midwall_blocks(cam_xy, c[:2]) for c in corners):
+                continue
+            tags[tid] = proj + np.random.normal(0, LOCATE_NOISE_STD * 0.4, proj.shape)
+        if decoy and tags:
+            tags = self._mirror_branch_tags(tags)
+        return tags
+
+    def _mirror_branch_tags(self, tags):
+        """歧义诱饵：用 IPPE 第二解（镜像分支）重投影替换角点
+
+        平面单标签存在两支重投影都精确的解；这里把角点替换为
+        镜像分支下的投影，模拟真实歧义数据，检验联合求解的消歧能力。
+        """
+        import cv2
+        out = {}
+        for tid, corners in tags.items():
+            obj = np.asarray(self.tag_poses[tid], dtype=np.float64)
+            try:
+                ok, rvecs, tvecs, _ = cv2.solvePnPGeneric(
+                    obj, corners, self._K(), self._D(), flags=cv2.SOLVEPNP_IPPE)
+            except cv2.error:
+                continue
+            if not ok or len(rvecs) < 2:
+                continue  # 近正对时两支重合，无歧义可言
+            rvec, tvec = rvecs[1], tvecs[1]  # 第二解 = 镜像分支
+            proj, _ = cv2.projectPoints(obj, rvec, tvec, self._K(), self._D())
+            out[tid] = proj[:, 0, :]
+        return out or tags
+
+    @staticmethod
+    def _K():
+        from camera_config import CAMERA_INTRINSIC
+        return CAMERA_INTRINSIC
+
+    @staticmethod
+    def _D():
+        from camera_config import CAMERA_DISTORTION
+        return CAMERA_DISTORTION
+
+    def _locate_pose_once_corners(self, head_pulse):
+        """角点桩模式的单档定位：合成角点 → 与真机同管线的单帧 PnP+门控"""
+        ext = self.multiview_extrinsics
+        theta = ext["k_head"] * (head_pulse - HEAD_CENTER) * SERVO_DEG_PER_US
+        decoy = getattr(self, "decoy", False) and head_pulse == HEAD_RIGHT
+        tags = self._synth_corners(head_pulse, decoy=decoy)
+        objlist, imglist = [], []
+        for tid, corners in sorted(tags.items()):
+            objlist.extend(self.tag_poses[tid])
+            imglist.extend(corners)
+        frame = (theta, list(objlist), list(imglist)) if objlist else None
+        print(f"[角点桩] θ={theta:+.1f}° decoy={decoy} 检测标签 {sorted(tags) or '无'}")
+        if not objlist:
+            return False, None
+
+        result = solve_pnp_pose(objlist, imglist)
+        if result is None:
+            print("[角点桩] 单帧 PnP 失败")
+            return False, frame
+        pos_3d, ori_3d, reproj_err = result
+        if pnp_pose_problems(pos_3d, ori_3d, reproj_err):
+            print(f"[角点桩] 单帧未过门控（reproj={reproj_err:.2f}px），角点入联合缓存")
+            return False, frame
+        self.current_position = pos_3d[:2]
+        self.current_orientation = ori_3d[:2]
+        n = np.linalg.norm(self.current_orientation)
+        if n != 0:
+            self.current_orientation /= n
+        return True, frame
 
     def set_head(self, pulse, move_time_ms=HEAD_MOVE_TIME_MS):
         """桩：只更新头部脉宽记录，不调舵机"""
         self._sim.head_pulse = pulse
         self.current_head_pulse = pulse
+
+    def raise_head(self):
+        """桩：抬头舵机无操作（PC 上无硬件；真机在 run_level 开局调用）"""
 
     def capture_frame(self):
         """桩：返回合成帧，供视觉检测器在无相机环境下运行。
@@ -585,7 +721,11 @@ def run_simulation():
     # 2. 创建桩 RobotState，注入模拟器与可视化
     state = SimRobotState(tag_poses=gl.tag_poses)
     state.attach_sim(sim, viz)
-    print("[sim] 已创建 SimRobotState，I/O 方法已替换为桩函数")
+    state.corner_stub = "--corner-stub" in sys.argv
+    state.decoy = "--decoy" in sys.argv
+    mode = ("角点级桩+歧义诱饵" if state.decoy and state.corner_stub
+            else "角点级桩" if state.corner_stub else "理想位姿桩")
+    print(f"[sim] 已创建 SimRobotState（定位模式: {mode}）")
 
     try:
         # 3. 执行关卡主流程
