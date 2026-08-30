@@ -50,6 +50,7 @@ from camera_config import (
     HEAD_MOVE_TIME_MS, HEAD_MOVE_TIME_MIN_MS, SERVO_DEG_PER_US, PITCH_UP_PULSE,
     PNP_FIELD_MIN, PNP_FIELD_MAX, PNP_CAM_Z_MIN, PNP_CAM_Z_MAX,
     PNP_ORI_Z_MAX, PNP_ORI_XY_MIN, PNP_REPROJ_ERR_MAX_PX, reproj_gate_px,
+    AMBIGUITY_SEP_MIN_CM, EXPECT_SELECT_MARGIN_CM, EXPECT_RADIUS_MARGIN_CM,
 )
 
 
@@ -63,6 +64,20 @@ MAX_LOCATE_RETRIES = 5  # 定位失败最大重试次数
 
 # 多视角联合定位外参文件（survey_field.py 产出；缺失时降级为缺省外参）
 MULTIVIEW_EXTRINSICS_PATH = os.path.join("result", "multiview_extrinsics.json")
+
+# =====================================================================
+# 位置连续性守卫（2026-08-30，依据真机 trace 一次 12cm 跳变坏定位）
+# =====================================================================
+# 共面标签对的错误分支可能通过重投影门控（真机实测 (22,38)→(34,41) 跳变，
+# 触发危险的避墙绕路）。定位结果若偏离上次成功定位超过
+# 「动作位移预算 + 裕度」则拒绝本次解，扫描换下一档重试。
+# 预算是粗略上界（含动作误差与定位噪声），不用关卡层的标定精值。
+MOTION_BUDGET_CM = {
+    "go_forward": 5.5, "go_forward_one_step": 2.5, "back_one_step": 3.5,
+    "back": 3.5, "left_move": 2.5, "right_move": 2.5,
+    "turn_left": 8.0, "turn_right": 8.0, "stand": 0.0,
+}
+CONTINUITY_MARGIN_CM = 5.0  # 预算之外的额外裕度（定位噪声 + 动作散布）
 
 # =====================================================================
 # AprilTag 角点顺序（P0 修复 · 真机实测确认）
@@ -177,6 +192,9 @@ class RobotState:
         self.multiview_extrinsics = normalize_extrinsics(ext)
         self._extrinsics_from_file = ext is not None
         self._extrinsics_warned = False
+        # 位置连续性守卫：上次成功定位的位置 + 自此以来的动作位移预算
+        self._last_located_pos = None
+        self.motion_budget_cm = 0.0
 
     # -----------------------------------------------------------------
     # 动作执行
@@ -185,6 +203,34 @@ class RobotState:
     def run_action(self, name, times=1):
         """执行动作组"""
         AGC.runActionGroup(name, times=times)
+
+    def act(self, name, times=1):
+        """执行动作并累积位移预算（连续性守卫用）；定位决策统一走本方法
+
+        直接调 run_action 不计预算，其定位结果可能被连续性守卫误拒。
+        """
+        self.motion_budget_cm += MOTION_BUDGET_CM.get(name, 6.0) * max(1, times)
+        self.run_action(name, times)
+
+    def _expected_position(self):
+        """位置期望（上次成功定位），无则 None——仅用于歧义选支，不否决"""
+        return self._last_located_pos
+
+    def _accept_position(self, pos_xy):
+        """记录定位基准；位置跳变时仅打日志（不拒绝——见 2026-08-30 复盘）
+
+        曾实现为"跳变超预算即拒绝"，但真机复盘显示坏读数可能出现在跳变的
+        另一侧（先到的读数才是异常），拒绝正确解会让机器人在错误位置上
+        继续行动，比跳变本身更危险。改为仅记录，供事后诊断。
+        """
+        if self._last_located_pos is not None:
+            jump = float(np.linalg.norm(np.asarray(pos_xy) - self._last_located_pos))
+            if jump > self.motion_budget_cm + CONTINUITY_MARGIN_CM:
+                print(f"[连续性观测] 位置跳变 {jump:.1f}cm（预算 "
+                      f"{self.motion_budget_cm:.1f}+{CONTINUITY_MARGIN_CM:.0f}cm）——记录不拦截")
+        self._last_located_pos = np.array(pos_xy, dtype=np.float64)
+        self.motion_budget_cm = 0.0
+        return True
 
     # -----------------------------------------------------------------
     # 头部舵机控制
@@ -374,30 +420,72 @@ class RobotState:
                 return None
             return pos_3d, ori_3d, reproj_err
 
-        solution = _try(list(tag_obs))
-        if solution is None and len(tag_obs) >= 3:
-            # 逐标签剔除救援：优先剔除与其余标签异面的（通常是高噪声的地面标签）
-            planes = {t: tag_plane_axis(self.tag_poses[t]) for t in tag_obs}
-            rescued = None
-            for drop in tag_obs:
-                subset = [t for t in tag_obs if t != drop]
-                if len(subset) < 2:
-                    continue
-                if len({planes[t] for t in subset}) < 2:
-                    continue  # 共面子集有平面歧义，不接受
-                sol = _try(subset)
-                if sol is not None and (rescued is None or sol[2] < rescued[2]):
-                    rescued = (sol, drop)
-            if rescued is not None:
-                (pos_3d, ori_3d, reproj_err), dropped = rescued
-                print(f"[帧救援] 剔除标签 {dropped} 后通过门控（reproj={reproj_err:.2f}px）")
-                solution = (pos_3d, ori_3d, reproj_err)
+        planes = {t: tag_plane_axis(self.tag_poses[t]) for t in tag_obs}
+        solution = None
+
+        if len(planes) == 1:
+            # 共面帧（含单标签）——C3 三层歧义治理（2026-08-30）。
+            # 普查依据：共面帧 75% 门控后仅一支活（零成本）；双活时 ITERATIVE
+            # 落错支 1/4，须显式裁决。
+            from multiview_pose import frame_pose_candidates, rot_from_rvec
+            live = []
+            for rvec, tvec, err in frame_pose_candidates(objlist, imglist):
+                R = rot_from_rvec(rvec)
+                pos_3d = (-R.T @ tvec).flatten()
+                ori_3d = (R.T @ np.array([0.0, 0.0, 1.0])).flatten()
+                if not pnp_pose_problems(pos_3d, ori_3d, err, n_tags=len(tag_obs)):
+                    live.append((pos_3d, ori_3d, err))
+            if len(live) == 1:
+                solution = live[0]                      # 层1：门控筛支
+            elif len(live) >= 2:
+                sep = float(np.hypot(*(live[0][0][:2] - live[1][0][:2])))
+                if sep < AMBIGUITY_SEP_MIN_CM:
+                    solution = min(live, key=lambda s: s[2])   # 两支重合，无歧义
+                else:
+                    # 层2：期望选支（只在"干脆可分"时选，否则交给层3联合裁决）
+                    exp = self._expected_position()
+                    if exp is not None:
+                        radius = self.motion_budget_cm + EXPECT_RADIUS_MARGIN_CM
+                        d = [float(np.hypot(*(s[0][:2] - exp))) for s in live[:2]]
+                        decisive = abs(d[0] - d[1]) > EXPECT_SELECT_MARGIN_CM
+                        inside = [i for i in range(2) if d[i] <= radius]
+                        if decisive and len(inside) == 1:
+                            picked = inside[0]
+                            print(f"[歧义消解] 双支间隔{sep:.1f}cm：选{['A','B'][picked]}支"
+                                  f"（距期望 {d[picked]:.1f}cm / 另支 {d[1-picked]:.1f}cm）")
+                            solution = live[picked]
+                    if solution is None:
+                        why = "期望不可分" if exp is not None else "无期望"
+                        print(f"[歧义待裁决] 共面帧双支均过门控（间隔{sep:.1f}cm，{why}），"
+                              "帧入联合缓存")
+                        return False, frame            # 层3：交给多帧联合求解
+        else:
+            # 多平面帧：几何本身无歧义，ITERATIVE 单解 + 帧救援（剔除高噪标签）
+            solution = _try(list(tag_obs))
+            if solution is None and len(tag_obs) >= 3:
+                rescued = None
+                for drop in tag_obs:
+                    subset = [t for t in tag_obs if t != drop]
+                    if len(subset) < 2:
+                        continue
+                    if len({planes[t] for t in subset}) < 2:
+                        continue  # 共面子集有平面歧义，不接受
+                    sol = _try(subset)
+                    # rescued 是 (解, 被剔标签) 二元组，比较解的 reproj 用 rescued[0][2]
+                    if sol is not None and (rescued is None or sol[2] < rescued[0][2]):
+                        rescued = (sol, drop)
+                if rescued is not None:
+                    (pos_3d, ori_3d, reproj_err), dropped = rescued
+                    print(f"[帧救援] 剔除标签 {dropped} 后通过门控（reproj={reproj_err:.2f}px）")
+                    solution = (pos_3d, ori_3d, reproj_err)
 
         if solution is None:
-            print("PnP结果未通过合理性门控（含剔除救援），本次单帧定位失败。")
+            print("PnP结果未通过合理性门控（含歧义治理/剔除救援），本次单帧定位失败。")
             return False, frame
 
         pos_3d, ori_3d, reproj_err = solution
+        if not self._accept_position(pos_3d[:2]):
+            return False, frame
         self.current_position = pos_3d[:2]
         self.current_orientation = ori_3d[:2]
         norm = np.linalg.norm(self.current_orientation)
@@ -455,7 +543,10 @@ class RobotState:
             return False
         p_est, rms, used = best
 
-        self.current_position = camera_optical_center(p_est, 0.0)[:2]
+        joint_pos = camera_optical_center(p_est, 0.0)[:2]
+        if not self._accept_position(joint_pos):
+            return False
+        self.current_position = joint_pos
         self.current_orientation = body_orientation_xy(p_est)
         print(f"[联合定位] 成功：{len(used)} 帧 rms={rms:.2f}px "
               f"光心=({self.current_position[0]:.1f},{self.current_position[1]:.1f}) "
@@ -538,6 +629,6 @@ class RobotState:
             # 头部扫描全失败 → 身体同向连转（累计旋转，扫到不同方位）
             # 2026-08-25 实机标定：小步转向不可靠，改用实测可靠的大步转向（见 levels 动作常量）
             print("头部扫描失败，身体左转尝试重新定位。")
-            self.run_action("turn_left")
+            self.act("turn_left")
         print("定位重试超限，程序终止。")
         return False

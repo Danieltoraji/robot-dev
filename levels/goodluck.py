@@ -54,7 +54,7 @@ ORIENTATION_THRESHOLD = 0.26  # 朝向差异模长阈值，约15°
 POSITION_THRESHOLD = 3.0  # 位置差异模长阈值，单位cm
 STOP_TIME = 0  # 到达目标点后停留秒数。2026-08-30 提速改造取消停靠（原比赛规则 3 秒），
 #               恢复停靠改回 3 即可（ROUTE 停靠点引用自动生效）
-OBSTACLE_THRESHOLD = 8.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
+OBSTACLE_THRESHOLD = 13.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
 SAFE_MARGIN_CM = 3.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
 CORRIDOR_CLEAR_CM = OBSTACLE_THRESHOLD + 3.0  # 走廊净空校验阈值（路点串沿线离墙最小距离）
 ORIENT_FREEZE_DIST_CM = 10.0  # 动态朝向冻结距离阈值（cm）：距目标 > 此值时用连线方向，≤ 此值时切指定朝向或冻结连线方向（防震荡）。调大防震荡，调小扩大连线方向范围，但需 > POSITION_THRESHOLD
@@ -95,7 +95,10 @@ ROUTE = [
     Waypoint([23.1, 70.0], STOP_TIME, None, None, None),   # 停靠点2
     Waypoint([40.0, 80.0], 0.0, None, 41.0, "x+"),            # 中间路点②：先上行到y≈80，绕过中墙上方
     Waypoint([65.0, 79.7], STOP_TIME, None, None, None),   # 停靠点3
-    Waypoint([74.0, 75.0], 0.0, None, 74.0, "y-"),            # 中间路点③：先东移到x≈74，远离中墙后下行
+    # 2026-08-30 撞墙修复：bypass 原为 (74.0,"y-") 只查 y 不查 x——"先东移远离
+    # 中墙再下行"被跳过（实测在 x=64.5 触发，贴中墙东面 x=55 下行撞墙）。
+    # 改为 x≥72 才允许跳过：保证东移到位后才直落。
+    Waypoint([74.0, 75.0], 0.0, None, 72.0, "x+"),          # 中间路点③：先东移到x≥72，远离中墙后下行
     Waypoint([74.0, 30.0], STOP_TIME, None, None, None),  # 停靠点4（--end-at-last-stop 在此结束）
     Waypoint([82.0, 20.0], 0.0, None, 82.0, "x+"),
     Waypoint([100.0, 20.0], STOP_TIME, None, None, None),  # 停靠点5（出口）
@@ -183,13 +186,15 @@ def calc_distance(position_diff):
     """计算水平距离"""
     return np.linalg.norm(position_diff)
 
-def decide_panning_action(state, current_pos, target_pos, orientation_xOy):
+def decide_panning_action(state, current_pos, target_pos, orientation_xOy, escaping=False):
     """贪心平移策略：模拟各方向动作后的预期位置，选最接近目标的
 
     state: RobotState 实例（用于访问常量，当前实现直接用模块常量）。
     current_pos/target_pos: 绝对坐标（2D）。
-    对每个候选动作执行后的绝对位置做避障过滤（离墙距离 >= OBSTACLE_THRESHOLD），
-    全部被排除时返回 None（信号：机器人已在危险区）。
+    escaping: 危险区逃离模式。全部候选被避障排除时不再返回 None（按兵不动），
+        而是返回"预测位置离墙距离最大"的一步（2026-08-30 撞墙复盘：逃离的
+        单步过滤在深度入区时会全排除导致死锁——朝向平行墙面时一步补不回
+        5cm+ 的缺口；最优一步保证危险区内始终有进展）。
     前进方向加偏好权重 FORWARD_BIAS。
     """
     position_diff = np.array(current_pos) - np.array(target_pos)
@@ -213,9 +218,14 @@ def decide_panning_action(state, current_pos, target_pos, orientation_xOy):
     # 避障过滤：执行后绝对位置离墙距离 < 阈值则排除
     best_action = None
     best_score = float("inf")
+    fallback_action = None
+    fallback_dist = -1.0
     for action, new_pd in candidates.items():
         new_pos = np.array(target_pos) + new_pd
         wall_dist = distance_to_walls(new_pos)
+        if wall_dist > fallback_dist:
+            fallback_dist = wall_dist
+            fallback_action = action
         if wall_dist < OBSTACLE_THRESHOLD:
             print(
                 f"  {action}: 执行后位置 {new_pos} 离墙 {wall_dist:.2f}cm < {OBSTACLE_THRESHOLD}cm，排除"
@@ -232,6 +242,11 @@ def decide_panning_action(state, current_pos, target_pos, orientation_xOy):
             best_action = action
 
     if best_action is None:
+        if escaping:
+            # 危险区兜底：无净空步可选时执行离墙增益最大的一步，保证进展
+            print(f"危险区无净空步可选，执行离墙增益最大的一步：{fallback_action} "
+                  f"(执行后离墙 {fallback_dist:.2f}cm)")
+            return fallback_action
         print("所有平移动作均被避障排除，机器人可能已在危险区。")
         return None
 
@@ -374,12 +389,13 @@ def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0
         if (not escaping and od is not None
                 and np.linalg.norm(od) > ORIENTATION_THRESHOLD):
             action, times = decide_rotation_action(state, effective_orient)
-            state.run_action(action, times)
+            state.act(action, times)
             continue
 
         # 7. 平移接近：pd 模 > 阈值 → 贪心选最优方向
         if dist > POSITION_THRESHOLD:
-            action = decide_panning_action(state, state.current_position, target, state.current_orientation)
+            action = decide_panning_action(state, state.current_position, target,
+                                           state.current_orientation, escaping=escaping)
             if action is None:
                 # 极端兜底：所有动作被排除
                 print("警告：无安全平移动作可选，按兵不动。")
@@ -404,9 +420,9 @@ def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0
                             batch_steps, FORWARD_CM, BATCH_FORWARD_MIN_WALL_DIST
                         ):
                             print(f"  ★ 批量直行 {batch_steps} 步（go_forward，距目标 {dist:.1f}cm，离墙 {wall_dist:.1f}cm）")
-                            state.run_action("go_forward", times=batch_steps)
+                            state.act("go_forward", times=batch_steps)
                             continue
-                state.run_action(action)
+                state.act(action)
             continue
         print("\n=== 本轮导航循环结束 ===")
         # 8. 到达
@@ -415,7 +431,7 @@ def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0
             continue
         if stop_time > 0:
             print(f"===== 到达{phase} {target_pos}，停留 {stop_time} 秒 =====")
-            state.run_action("stand")
+            state.act("stand")
             time.sleep(stop_time)
         else:
             print(f"===== 到达{phase} {target_pos}，不停留 =====")
@@ -475,9 +491,8 @@ def run_level(state):
     # 上线前校验路点走廊净空
     assert_corridor_clear([wp.pos for wp in ROUTE])
 
-    state.run_action("stand")
+    state.act("stand")
     state.set_head(HEAD_CENTER)
-    state.raise_head()
     for i, wp in enumerate(ROUTE, 1):
         if not navigate_to_target(state, wp.pos, wp.orientation, wp.stop, wp.bypass_position, wp.bypass_condition):
             print(f"导航至路点 {i}（{wp.pos}）失败，程序终止。")
