@@ -10,6 +10,7 @@ goodluck 关卡（levels/goodluck.py）
 通用能力（定位、动作执行、几何工具）从 robot_core 导入。
 """
 
+import sys
 import time
 from collections import namedtuple
 import numpy as np
@@ -24,19 +25,19 @@ from robot_core import RobotState, distance_point_to_rect, HEAD_CENTER
 # 添加AprilTag的世界坐标，四个点的顺序为左上，右上，右下，左下。也即从左上角开始顺时针。
 
 tag_poses = {}
-tag_poses["151"] = np.array([[44.5, 16.6, 30.9], [44.5, 11.6, 30.9], [44.5, 11.6, 25.9], [44.5, 16.6, 25.9]],dtype=np.float64,)
-tag_poses["152"] = np.array([[45.3, 41.9, 30.8], [45.3, 36.9, 30.8], [45.3, 36.9, 25.8], [45.3, 41.9, 25.8]],dtype=np.float64,)
-tag_poses["153"] = np.array([[19.0, 100, 19.7], [24.0, 100, 19.7], [24.0, 100, 14.7], [19.0, 100, 14.7]],dtype=np.float64,)
-tag_poses["154"] = np.array([[19.0, 100, 32.0], [24.0, 100, 32.0], [24.0, 100, 27.0], [19.0, 100, 27.0]],dtype=np.float64,)
-tag_poses["155"] = np.array([[73.4, 100, 28.5], [78.4, 100, 28.5], [78.4, 100, 23.5], [73.4, 100, 23.5]],dtype=np.float64,)
-tag_poses["156"] = np.array([[95.7, 83.8, 27.6], [95.7, 78.8, 27.6], [95.7, 78.8, 22.6], [95.7, 83.8, 22.6]],dtype=np.float64,)
-tag_poses["157"] = np.array([[95.3, 61.7, 28.2], [95.3, 56.7, 28.2], [95.3, 56.7, 23.2], [95.3, 61.7, 23.2]],dtype=np.float64,)
-tag_poses["158"] = np.array([[55.6, 16.5, 29.3], [55.6, 21.5, 29.3], [55.6, 21.5, 24.3], [55.6, 16.5, 24.3]],dtype=np.float64,)
-tag_poses["161"] = np.array([[81.6, 0, 27.8], [76.6, 0, 27.8], [76.6, 0, 22.8], [81.6, 0, 22.8]],dtype=np.float64,)
-tag_poses["160"] = np.array([[78.5, 14.5, 0], [73.5, 14.5, 0], [73.5, 19.5, 0], [78.5, 19.5, 0]],dtype=np.float64,)
-tag_poses["163"] = np.array([[77.1, 79.0, 0], [77.1, 74.0, 0], [72.1, 74.0, 0], [72.1, 79.0, 0]],dtype=np.float64,)
-tag_poses["162"] = np.array([[23.1, 77.5, 0], [28.1, 77.5, 0], [28.1, 72.5, 0], [23.1, 72.5, 0]],dtype=np.float64,)
-tag_poses["159"] = np.array([[29.4, 24.2, 0], [29.4, 19.2, 0], [24.4, 19.2, 0], [24.4, 24.2, 0]],dtype=np.float64,)
+tag_poses["151"] = np.array([[45.01, 16.12, 31.40], [45.01, 11.12, 31.49], [45.01, 11.04, 26.49], [45.01, 16.04, 26.40]],dtype=np.float64,)
+tag_poses["152"] = np.array([[45.01, 42.35, 30.84], [45.01, 37.35, 31.01], [45.01, 37.17, 26.02], [45.01, 42.17, 25.84]],dtype=np.float64,)
+tag_poses["153"] = np.array([[18.19, 101.38, 19.77], [23.17, 101.38, 20.22], [23.62, 101.38, 15.24], [18.64, 101.38, 14.79]],dtype=np.float64,)
+tag_poses["154"] = np.array([[18.06, 101.38, 32.04], [23.06, 101.38, 32.05], [23.07, 101.38, 27.05], [18.07, 101.38, 27.04]],dtype=np.float64,)
+tag_poses["155"] = np.array([[73.14, 101.38, 28.13], [78.14, 101.38, 28.14], [78.16, 101.38, 23.14], [73.16, 101.38, 23.13]],dtype=np.float64,)
+tag_poses["156"] = np.array([[95.00, 82.57, 27.41], [95.00, 77.57, 27.54], [95.00, 77.43, 22.54], [95.00, 82.43, 22.41]],dtype=np.float64,)
+tag_poses["157"] = np.array([[95.00, 60.44, 28.09], [95.00, 55.47, 28.62], [95.00, 54.94, 23.65], [95.00, 59.91, 23.12]],dtype=np.float64,)
+tag_poses["158"] = np.array([[55.23, 16.49, 29.62], [55.23, 21.49, 29.67], [55.23, 21.54, 24.67], [55.23, 16.54, 24.62]],dtype=np.float64,)
+tag_poses["159"] = np.array([[27.98, 22.66, 0.00], [27.84, 17.67, 0.00], [22.84, 17.81, 0.00], [22.99, 22.81, 0.00]],dtype=np.float64,)
+tag_poses["160"] = np.array([[79.57, 15.48, 0.00], [74.57, 15.50, 0.00], [74.58, 20.50, 0.00], [79.58, 20.48, 0.00]],dtype=np.float64,)
+tag_poses["161"] = np.array([[82.36, 0.00, 27.93], [77.37, 0.00, 27.65], [77.64, 0.00, 22.66], [82.63, 0.00, 22.93]],dtype=np.float64,)
+tag_poses["162"] = np.array([[22.51, 78.43, 0.00], [27.51, 78.50, 0.00], [27.58, 73.50, 0.00], [22.58, 73.43, 0.00]],dtype=np.float64,)
+tag_poses["163"] = np.array([[77.93, 78.45, 0.00], [77.65, 73.46, 0.00], [72.66, 73.75, 0.00], [72.94, 78.74, 0.00]],dtype=np.float64,)
 
 # 赛道墙壁（不可通行区域），格式 [x_min, x_max, y_min, y_max]，单位cm
 # 来自赛道说明：左墙、中墙、右墙；外框底/顶边在 distance_to_walls 中单独处理
@@ -51,7 +52,8 @@ WALLS = [
 # =====================================================================
 ORIENTATION_THRESHOLD = 0.26  # 朝向差异模长阈值，约15°
 POSITION_THRESHOLD = 3.0  # 位置差异模长阈值，单位cm
-STOP_TIME = 3  # 到达目标点后停留时间，单位秒（比赛规则要求停靠 3 秒）
+STOP_TIME = 0  # 到达目标点后停留秒数。2026-08-30 提速改造取消停靠（原比赛规则 3 秒），
+#               恢复停靠改回 3 即可（ROUTE 停靠点引用自动生效）
 OBSTACLE_THRESHOLD = 8.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
 SAFE_MARGIN_CM = 3.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
 CORRIDOR_CLEAR_CM = OBSTACLE_THRESHOLD + 3.0  # 走廊净空校验阈值（路点串沿线离墙最小距离）
@@ -63,11 +65,11 @@ ORIENT_FREEZE_DIST_CM = 10.0  # 动态朝向冻结距离阈值（cm）：距目�
 # 仅在"朝向已对准 + 安全走廊 + 纯直行 + 远离目标"时启用批量直行，
 # 减少长直走廊段的重复定位次数。转向/横移/危险区/近目标点仍每步定位。
 # 2026-08-25 标定后批量直行一律使用 go_forward（5cm/步，实测比 one_step 更直）。
-BATCH_FORWARD_MAX_STEPS = 4        # 单次批量直行上限步数（4步×5cm=20cm）
+BATCH_FORWARD_MAX_STEPS = 6        # 单次批量直行上限步数（2026-08-30 提速 4→6；6步×5cm=30cm）
 BATCH_FORWARD_MIN_WALL_DIST = 18.0 # 批量直行要求的最小离墙距离（cm），需 > OBSTACLE_THRESHOLD
 BATCH_FORWARD_MIN_DIST = 12.0      # 距目标 > 此值才启用批量（cm），确保远离精确停靠区
 # 批量直行允许的最大朝向偏差（度）：
-# 4 步行程 20cm，横向偏移 = 20·sinθ ≤ 1.1cm，需 < POSITION_THRESHOLD(3cm)
+# 6 步行程 30cm，横向偏移 = 30·sinθ ≤ 1.6cm，需 < POSITION_THRESHOLD(3cm)
 GO_FORWARD_BATCH_MAX_ANGLE_DEG = 3.0
 
 # =====================================================================
@@ -86,16 +88,26 @@ GO_FORWARD_BATCH_MAX_ANGLE_DEG = 3.0
 Waypoint = namedtuple("Waypoint", ["pos", "stop", "orientation", "bypass_position", "bypass_condition"])
 
 ROUTE = [
-    Waypoint([14.7, 21.3], STOP_TIME, [1, 0], None, None),   # 停靠点1
+    # 2026-08-30 提速改造：停靠点 orientation 一并取消（到达即走，不再对准转身），
+    # 恢复停靠朝向时把 None 改回原值：1→[1,0]、2→[0,1]、3→[1,0]、4→[0,-1]、5→[1,0]
+    Waypoint([14.7, 21.3], STOP_TIME, None, None, None),   # 停靠点1
     Waypoint([23.1, 30.0], 0.0, None, 30.5, "y+"),            # 中间路点①：先横移到x≈23，避开左墙底角
-    Waypoint([23.1, 70.0], STOP_TIME, [0, 1], None, None),   # 停靠点2
+    Waypoint([23.1, 70.0], STOP_TIME, None, None, None),   # 停靠点2
     Waypoint([40.0, 80.0], 0.0, None, 41.0, "x+"),            # 中间路点②：先上行到y≈80，绕过中墙上方
-    Waypoint([65.0, 79.7], STOP_TIME, [1, 0], None, None),   # 停靠点3
+    Waypoint([65.0, 79.7], STOP_TIME, None, None, None),   # 停靠点3
     Waypoint([74.0, 75.0], 0.0, None, 74.0, "y-"),            # 中间路点③：先东移到x≈74，远离中墙后下行
-    Waypoint([74.0, 30.0], STOP_TIME, [0, -1], None, None),  # 停靠点4
+    Waypoint([74.0, 30.0], STOP_TIME, None, None, None),  # 停靠点4（--end-at-last-stop 在此结束）
     Waypoint([82.0, 20.0], 0.0, None, 82.0, "x+"),
-    Waypoint([100.0, 20.0], STOP_TIME, [1, 0], None, None),  # 停靠点5
+    Waypoint([100.0, 20.0], STOP_TIME, None, None, None),  # 停靠点5（出口）
 ]
+
+# =====================================================================
+# 提前结束开关（2026-08-30 提速改造）
+# =====================================================================
+# --end-at-last-stop：走到停靠点4 [74,30] 即结束流程，跳过中间路点④与出口段
+# （出口段日后由其它方法处理）。真机用法：python main.py goodluck --end-at-last-stop
+END_AT_LAST_STOP = "--end-at-last-stop" in sys.argv
+END_AFTER_POS = [74.0, 30.0]  # 提前结束的判定路点（停靠点4）
 
 # =====================================================================
 # 动作组参数常量（2026-08-25 实机标定完成）
@@ -227,15 +239,17 @@ def decide_panning_action(state, current_pos, target_pos, orientation_xOy):
     return best_action
 
 def decide_rotation_action(state, target):
-    """转向策略：计算带符号角度差，用实测可靠的大步转向执行
+    """转向策略：计算带符号角度差，用实测可靠的大步转向执行（批量连转）
 
     state: RobotState 实例（用于访问 current_orientation）。
     target: 目标朝向（单位向量）。
     返回 (action_name, times)。
 
     2026-08-25 实机标定后：小步转向（turn_*_small_step）不可靠已弃用，
-    转向只使用 turn_left(22.0°) / turn_right(25.7°)。每轮循环重新定位、
-    重新决策，转角误差由闭环收敛（times 恒为 1）。
+    转向只使用 turn_left(22.0°) / turn_right(25.7°)。
+    2026-08-30 提速改造：需要角 ≥ 1.5 步时一次连转 times 步（round 取整，上限 3），
+    省去连转链中的中间定位（每省一次 ≈2s）。过冲 ≤ 一个步长，处于
+    ORIENTATION_THRESHOLD(15°) 容忍内，转完一次定位自纠。
     """
     target = np.array(target, dtype=np.float64)  # 目标朝向
     # 当前朝向到目标朝向的带符号角度差
@@ -246,11 +260,12 @@ def decide_rotation_action(state, target):
     angle_deg = np.degrees(np.arccos(dot))
 
     if cross > 0:
-        print(f"需左转 {angle_deg:.1f}°（turn_left，实测 22.0°/次）")
-        return "turn_left", 1
+        step_deg, name = TURN_LEFT_DEG, "turn_left"
     else:
-        print(f"需右转 {angle_deg:.1f}°（turn_right，实测 25.7°/次）")
-        return "turn_right", 1
+        step_deg, name = TURN_RIGHT_DEG, "turn_right"
+    times = max(1, min(3, int(round(angle_deg / step_deg))))
+    print(f"需转向 {angle_deg:.1f}°（{name}，实测 {step_deg}°/次 × {times}）")
+    return name, times
 
 def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0, bypass_position=None, bypass_condition=None):
     """统一路点导航原语：定位 → 危险检测 → 动态朝向修正 → 平移接近 → 到达检查 → 按需停留
@@ -468,6 +483,9 @@ def run_level(state):
             print(f"导航至路点 {i}（{wp.pos}）失败，程序终止。")
             return False
         print(f"已{'到达停靠点' if wp.stop > 0 else '通过路点'} {i}：{wp.pos}")
+        if END_AT_LAST_STOP and wp.pos == END_AFTER_POS:
+            print("===== --end-at-last-stop 生效：到达最后停靠点，提前结束（出口段交给其它方法）=====")
+            return True
 
     print("===== 全程完成 =====")
     return True

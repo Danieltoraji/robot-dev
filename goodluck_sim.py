@@ -43,7 +43,7 @@ from robot_core import (RobotState, HEAD_CENTER, HEAD_RIGHT, HEAD_LEFT,
                         HEAD_MOVE_TIME_MS, SERVO_DEG_PER_US,
                         solve_pnp_pose, pnp_pose_problems,
                         CAMERA_WIDTH, CAMERA_HEIGHT)
-from multiview_pose import camera_pose, project_points
+from multiview_pose import camera_pose, camera_pose_tilted, project_points
 from levels import goodluck as gl
 
 
@@ -531,11 +531,15 @@ class SimRobotState(RobotState):
         return self._locate_pose_once_corners(head_pulse)
 
     def _true_p8(self, head_pulse):
-        """模拟真值 → 8 参数向量（生成与求解共用同一套外参，无模型失配）"""
+        """模拟真值 → 8 参数向量（生成与求解共用同一套外参，无模型失配）
+
+        返回 (p8, theta_nom)：theta 为舵机标称转角（不预乘 k——
+        camera_pose 内部会施加 k_head，预乘会双重放大）。
+        """
         ext = self.multiview_extrinsics
         phi_deg = float(np.degrees(np.arctan2(self._sim.orientation[1],
                                               self._sim.orientation[0])))
-        theta = ext["k_head"] * (head_pulse - HEAD_CENTER) * SERVO_DEG_PER_US
+        theta = (head_pulse - HEAD_CENTER) * 0.09
         p8 = np.array([self._sim.pos[0], self._sim.pos[1], phi_deg,
                        ext["e_x"], ext["e_y"], ext["z_c"],
                        ext["pitch_deg"], ext["k_head"]], dtype=np.float64)
@@ -561,9 +565,16 @@ class SimRobotState(RobotState):
         return t0 < t1
 
     def _synth_corners(self, head_pulse, decoy=False):
-        """按模拟真值合成当前档位可见标签角点（含噪声与遮挡）"""
+        """按模拟真值合成当前档位可见标签角点（含噪声与遮挡）
+
+        与求解端使用同一模型（camera_pose_tilted，含 k_head 与偏航轴倾斜），
+        保证生成/求解无模型失配。
+        """
+        ext = self.multiview_extrinsics
         p8, theta = self._true_p8(head_pulse)
-        R_cw, t_cw = camera_pose(p8, theta)
+        R_cw, t_cw = camera_pose_tilted(p8, theta,
+                                        ext.get("tilt_deg", 0.0),
+                                        ext.get("tilt_phase_deg", 0.0))
         margin = 40.0
         cam_xy = (self._sim.pos[0], self._sim.pos[1])
         tags = {}
@@ -615,8 +626,7 @@ class SimRobotState(RobotState):
 
     def _locate_pose_once_corners(self, head_pulse):
         """角点桩模式的单档定位：合成角点 → 与真机同管线的单帧 PnP+门控"""
-        ext = self.multiview_extrinsics
-        theta = ext["k_head"] * (head_pulse - HEAD_CENTER) * SERVO_DEG_PER_US
+        theta = (head_pulse - HEAD_CENTER) * SERVO_DEG_PER_US  # 标称值（k 由求解端施加）
         decoy = getattr(self, "decoy", False) and head_pulse == HEAD_RIGHT
         tags = self._synth_corners(head_pulse, decoy=decoy)
         objlist, imglist = [], []
@@ -633,7 +643,7 @@ class SimRobotState(RobotState):
             print("[角点桩] 单帧 PnP 失败")
             return False, frame
         pos_3d, ori_3d, reproj_err = result
-        if pnp_pose_problems(pos_3d, ori_3d, reproj_err):
+        if pnp_pose_problems(pos_3d, ori_3d, reproj_err, n_tags=len(imglist) // 4):
             print(f"[角点桩] 单帧未过门控（reproj={reproj_err:.2f}px），角点入联合缓存")
             return False, frame
         self.current_position = pos_3d[:2]

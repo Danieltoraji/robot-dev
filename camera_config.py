@@ -53,8 +53,21 @@ PITCH_UP_PULSE = 1800  # raise_head 固定抬头脉宽；外参标定必须与�
 # 注意：多标签帧的重投影误差对标签世界坐标间的相对误差敏感（尺量坐标
 # 互差 ~1cm 即可产生 10~20px）；若多标签帧频繁超 2px，先用 survey_field.py
 # 做场地自标定修复 tag_poses，而不是放宽此阈值。
-PNP_FIELD_MIN, PNP_FIELD_MAX = -10.0, 110.0   # 相机位置须在场地范围内（cm，含余量）
+# 场地范围门控：±5cm 余量。真值光心最远 ≈ 100+|e|≈103.5 仍在界内；
+# 出口走廊的掠射视角会产生 106+ 的镜像分支假解（2026-08-30 角点桩仿真
+# 实测 (109,30) 假解曾钻过 ±10 余量导致机器人走出场外），±5 可拦截。
+PNP_FIELD_MIN, PNP_FIELD_MAX = -5.0, 105.0   # 相机位置须在场地范围内（cm）
 PNP_CAM_Z_MIN, PNP_CAM_Z_MAX = 5.0, 80.0      # 相机高度合理范围（cm）
 PNP_ORI_Z_MAX = 0.4                           # 相机朝向 z 分量上限（近水平；实测斜视角可达 ±0.32）
 PNP_ORI_XY_MIN = 0.1                          # 相机朝向 XY 分量下限（防垂直朝下/朝上）
-PNP_REPROJ_ERR_MAX_PX = 2.0                   # 平均重投影误差上限（px，正确解实测 <1px）
+PNP_REPROJ_ERR_MAX_PX = 2.0                   # 单标签帧重投影误差上限（px，正确解实测 <1px）
+# 多标签帧重投影上限：标签世界坐标间的残余不一致（survey 精化后实测
+# 正常帧 ≤5px、"差一点"帧 8.2~10.7px、错误分支/镜像解 ≥14px）。
+# 2026-08-30 依真机 trace 从 8 放宽到 11：救回"差一点"帧（每帧省 2~4s 重试），
+# 镜像分支间隔仍有 3px。混合地面标签的 14~26px 帧由逐标签剔除救援（robot_core）。
+PNP_REPROJ_ERR_MAX_MULTI_PX = 11.0
+
+
+def reproj_gate_px(n_tags):
+    """按帧内标签数选择重投影门控阈值（1 个 = 2px，多个 = 8px）"""
+    return PNP_REPROJ_ERR_MAX_PX if n_tags <= 1 else PNP_REPROJ_ERR_MAX_MULTI_PX

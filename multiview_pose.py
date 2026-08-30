@@ -64,8 +64,12 @@ TAG_HALF = 2.5  # tag 物理半边长（cm）
 
 # 外参缺省值：e=0 即「光心=机体中心」假设；z_c/pitch 为粗略经验值。
 # 正式使用前应以 survey_field.py 的标定产物 multiview_extrinsics.json 为准。
-DEFAULT_EXTRINSICS = {"e_x": 0.0, "e_y": 0.0, "z_c": 39.0, "pitch_deg": 0.0, "k_head": 1.0}
-EXTRINSICS_KEYS = ("e_x", "e_y", "z_c", "pitch_deg", "k_head")
+# tilt_deg/tilt_phase_deg：头部偏航轴的倾斜（幅值+方位）。真机实测转头时
+# pitch 随 θ 漂 2~4°（2026-08-29），即偏航轴不竖直；0 = 旧「纯竖直轴」模型。
+DEFAULT_EXTRINSICS = {"e_x": 0.0, "e_y": 0.0, "z_c": 39.0, "pitch_deg": 0.0, "k_head": 1.0,
+                      "tilt_deg": 0.0, "tilt_phase_deg": 0.0}
+EXTRINSICS_KEYS = ("e_x", "e_y", "z_c", "pitch_deg", "k_head",
+                   "tilt_deg", "tilt_phase_deg")
 
 
 def normalize_extrinsics(ext=None):
@@ -113,7 +117,7 @@ def rot_from_rvec(rvec):
 
 
 def camera_pose(p, theta_deg):
-    """由参数向量 p 与头转角 θ，构造世界→相机 (R_cw, t_cw)
+    """由参数向量 p 与头转角 θ，构造世界→相机 (R_cw, t_cw)（纯竖直偏航轴模型）
 
     实际头转角: θ_act = k_head × θ_nom
     光轴（相机 z）世界方向 = 水平前向(yaw) 俯视 pitch：
@@ -142,6 +146,48 @@ def camera_pose(p, theta_deg):
     return R_cw, -R_cw @ p_c
 
 
+def camera_pose_tilted(p, theta_deg, tilt_deg=0.0, tilt_phase_deg=0.0):
+    """带偏航轴倾斜的相机位姿（tilt=0 时与 camera_pose 完全一致）
+
+    头部旋转不再是绕竖直轴，而是绕倾斜轴：M(θ) = W·Rz(kθ)·W⁻¹，
+    W 为绕水平方向 (cos ψ, sin ψ, 0) 倾斜 tilt_deg 的旋转。
+    相机姿态 = Rz(φ)·M(θ)·B(pitch)，光心 = p_B + Rz(φ)·M(θ)·e + (0,0,z_c)。
+    真机依据：2026-08-29 精化坐标逐帧 PnP 显示 pitch 随 θ 漂 2~4°（轴倾斜 ~2°），
+    纯竖直轴模型在此数据上残差卡 ~8px。
+    """
+    if tilt_deg == 0.0:
+        return camera_pose(p, theta_deg)
+    theta_act = p[P_INDEX["k_head"]] * theta_deg
+    phi = p[P_INDEX["phi_deg"]]
+    pitch = np.radians(p[P_INDEX["pitch_deg"]])
+    sp, cp = np.sin(pitch), np.cos(pitch)
+
+    axis = np.array([np.cos(np.radians(tilt_phase_deg)),
+                     np.sin(np.radians(tilt_phase_deg)), 0.0])
+    W = rot_from_rvec(axis * np.radians(tilt_deg))
+    M = W @ rot_z(theta_act) @ W.T
+
+    # B(pitch)：pitch 后的相机基（yaw=0 时），满足 Rz(y)·B == 旧模型的 [r|d|a]
+    B = np.array([
+        [0.0, -sp, cp],
+        [-1.0, 0.0, 0.0],
+        [0.0, -cp, -sp],
+    ])
+    R_wc = rot_z(phi) @ M @ B
+    R_cw = R_wc.T
+
+    p_b = np.array([p[P_INDEX["x_B"]], p[P_INDEX["y_B"]], 0.0])
+    e3 = np.array([p[P_INDEX["e_x"]], p[P_INDEX["e_y"]], 0.0])
+    p_c = p_b + rot_z(phi) @ (M @ e3) + np.array([0.0, 0.0, p[P_INDEX["z_c"]]])
+    return R_cw, -R_cw @ p_c
+
+
+def ext_tilt(ext):
+    """从外参 dict 提取 (tilt_deg, tilt_phase_deg)（缺省 0）"""
+    ext = normalize_extrinsics(ext)
+    return float(ext.get("tilt_deg", 0.0)), float(ext.get("tilt_phase_deg", 0.0))
+
+
 def project_points(pts3d, R_cw, t_cw):
     """手写投影（径向畸变 k1,k2）；返回 (uv, 前方掩码)"""
     X = pts3d @ R_cw.T + t_cw
@@ -157,11 +203,15 @@ def project_points(pts3d, R_cw, t_cw):
     return np.stack([u, v], axis=1), ok
 
 
-def residual(p, frames):
-    """所有帧所有可见角点的 2D 重投影残差（观测 - 投影）"""
+def residual(p, frames, ext=None):
+    """所有帧所有可见角点的 2D 重投影残差（观测 - 投影）
+
+    ext 提供偏航轴倾斜（tilt_deg/tilt_phase_deg，缺省 0 = 纯竖直轴）。
+    """
+    tilt = ext_tilt(ext) if ext is not None else (0.0, 0.0)
     rs = []
     for theta_deg, pts3d, obs in frames:
-        R_cw, t_cw = camera_pose(p, theta_deg)
+        R_cw, t_cw = camera_pose_tilted(p, theta_deg, *tilt)
         proj, ok = project_points(pts3d, R_cw, t_cw)
         if not ok.all():
             # 有角点跑到相机后方：给大惩罚，防止优化利用不可见几何
@@ -187,9 +237,9 @@ def solve_joint(frames, p0):
 # 位姿工具
 # =====================================================================
 
-def camera_optical_center(p, theta_deg):
+def camera_optical_center(p, theta_deg, ext=None):
     """某头转角下的相机光心世界坐标（3 维）"""
-    R_cw, t_cw = camera_pose(p, theta_deg)
+    R_cw, t_cw = camera_pose_tilted(p, theta_deg, *ext_tilt(ext))
     return (-R_cw.T @ t_cw).flatten()
 
 
@@ -293,7 +343,7 @@ def solve_joint_3dof(frames, ext=None, seeds=None, max_nfev=1000):
         p = np.array([p3[0], p3[1], p3[2],
                       ext["e_x"], ext["e_y"], ext["z_c"],
                       ext["pitch_deg"], ext["k_head"]], dtype=np.float64)
-        return residual(p, frames)
+        return residual(p, frames, ext=ext)
 
     best = None
     for p0 in seeds:
@@ -335,14 +385,14 @@ def gate_solution(p_est, frames, ext=None, reproj_max=None):
     if not (PNP_CAM_Z_MIN <= p_est[P_INDEX["z_c"]] <= PNP_CAM_Z_MAX):
         problems.append(f"相机高度z={p_est[P_INDEX['z_c']]:.1f}cm不合理")
     for theta_deg, _, _ in frames:
-        R_cw, t_cw = camera_pose(p_est, theta_deg)
+        R_cw, t_cw = camera_pose_tilted(p_est, theta_deg, *ext_tilt(ext))
         ori = R_cw.T @ np.array([0.0, 0.0, 1.0])
         if abs(ori[2]) > PNP_ORI_Z_MAX:
             problems.append(f"θ={theta_deg:+.1f}° 朝向不水平(z分量{ori[2]:.2f})")
         if np.linalg.norm(ori[:2]) < PNP_ORI_XY_MIN:
             problems.append(f"θ={theta_deg:+.1f}° 朝向接近垂直")
     for i, f in enumerate(frames):
-        fr = residual(p_est, [f])
+        fr = residual(p_est, [f], ext=ext)
         rms = float(np.sqrt(np.mean(fr ** 2)))
         if rms > reproj_max:
             problems.append(f"帧{i}(θ={f[0]:+.1f}°) 重投影{rms:.2f}px过大")

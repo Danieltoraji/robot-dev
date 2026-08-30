@@ -49,7 +49,7 @@ from camera_config import (
     HEAD_CENTER, HEAD_RIGHT, HEAD_LEFT, HEAD_WIDE_RIGHT, HEAD_WIDE_LEFT,
     HEAD_MOVE_TIME_MS, HEAD_MOVE_TIME_MIN_MS, SERVO_DEG_PER_US, PITCH_UP_PULSE,
     PNP_FIELD_MIN, PNP_FIELD_MAX, PNP_CAM_Z_MIN, PNP_CAM_Z_MAX,
-    PNP_ORI_Z_MAX, PNP_ORI_XY_MIN, PNP_REPROJ_ERR_MAX_PX,
+    PNP_ORI_Z_MAX, PNP_ORI_XY_MIN, PNP_REPROJ_ERR_MAX_PX, reproj_gate_px,
 )
 
 
@@ -113,10 +113,25 @@ def solve_pnp_pose(objlist, imglist):
     return pos_3d, ori_3d, reproj_err
 
 
-def pnp_pose_problems(pos_3d, ori_3d, reproj_err):
+def tag_plane_axis(corners):
+    """返回标签所在平面的判别键（轴名@常数，如 "x@45.0"）；无唯一平面返回 None
+
+    用于帧救援的共面判定：非共面标签子集的 PnP 无平面歧义，可安全接受。
+    """
+    corners = np.asarray(corners, dtype=np.float64)
+    for axis, name in ((0, "x"), (1, "y"), (2, "z")):
+        col = corners[:, axis]
+        if float(col.max() - col.min()) < 0.5:
+            return f"{name}@{float(col.mean()):.1f}"
+    return None
+
+
+def pnp_pose_problems(pos_3d, ori_3d, reproj_err, n_tags=1):
     """PnP 位姿合理性检查，返回问题列表（空列表 = 通过）
 
     拦截角点顺序错误/镜像等「重投影误差小但物理不合理」的假位姿。
+    重投影阈值按标签数自适应：单标签 2px（正确解 <1px、镜像解 ≥2.8px，
+    可分隔）；多标签 8px（标签世界坐标残余不一致 ~4px，错误分支仍 >15px）。
     """
     problems = []
     x, y, z = pos_3d
@@ -127,9 +142,9 @@ def pnp_pose_problems(pos_3d, ori_3d, reproj_err):
     if abs(ori_3d[2]) > PNP_ORI_Z_MAX:
         problems.append(f"相机朝向不水平(z分量{ori_3d[2]:.2f})")
     if np.linalg.norm(ori_3d[:2]) < PNP_ORI_XY_MIN:
-        problems.append("相机朝向接近垂直")
-    if reproj_err > PNP_REPROJ_ERR_MAX_PX:
-        problems.append(f"重投影误差{reproj_err:.1f}px过大")
+        problems.append("朝向接近垂直")
+    if reproj_err > reproj_gate_px(n_tags):
+        problems.append(f"重投影误差{reproj_err:.1f}px过大(阈值{reproj_gate_px(n_tags):.0f}px)")
     return problems
 
 
@@ -160,6 +175,7 @@ class RobotState:
         from multiview_pose import load_extrinsics, normalize_extrinsics
         ext = load_extrinsics(MULTIVIEW_EXTRINSICS_PATH)
         self.multiview_extrinsics = normalize_extrinsics(ext)
+        self._extrinsics_from_file = ext is not None
         self._extrinsics_warned = False
 
     # -----------------------------------------------------------------
@@ -298,7 +314,8 @@ class RobotState:
             return False
         pos_3d, ori_3d, reproj_err = result
 
-        problems = pnp_pose_problems(pos_3d, ori_3d, reproj_err)
+        problems = pnp_pose_problems(pos_3d, ori_3d, reproj_err,
+                                     n_tags=len(imglist) // 4)
         if problems:
             print(f"PnP结果未通过合理性门控（{'；'.join(problems)}），本次定位失败。")
             print("提示：若频繁出现，请检查标签粘贴/角点顺序（TAG_CORNER_PERM）或相机内参。")
@@ -312,43 +329,75 @@ class RobotState:
         return True
 
     def _locate_pose_once(self, head_pulse):
-        """单档定位：拍照→检测→单帧 PnP→门控；成功则写入定位状态。
+        """单档定位：拍照→检测→单帧 PnP→门控（含逐标签剔除救援）；成功则写入定位状态。
 
         返回 (ok, frame)：frame=(theta_nom, objlist, imglist) 供联合求解复用
         （检测到已知标签但单帧未通过门控时仍有值；无标签时为 None）。
-        theta_nom 为头转系数修正后的标称转角（度）。
+        theta_nom 为舵机标称转角（度，未乘头转系数 k——k 由
+        multiview_pose.camera_pose 内部施加，预乘会双重放大）。
+        救援逻辑（2026-08-30 提速）：全集门控失败且标签 ≥3 时，逐一剔除一个
+        标签重解；子集须 ≥2 标签且跨 ≥2 个平面（非共面才无平面歧义）。
+        依据真机 trace：含地面标签的混合帧（157+160+161 等）全集 14~26px
+        失败，剔除后子集 ~4px 通过，省一次换档重试（2~4s/次）。
         模拟器通过重写本方法接入（与旧 solve_pnp 桩同一接缝层次）。
         """
-        theta = self.multiview_extrinsics["k_head"] * \
-            (head_pulse - HEAD_CENTER) * SERVO_DEG_PER_US
+        theta = (head_pulse - HEAD_CENTER) * SERVO_DEG_PER_US
         filename = self.capture_image()
         if filename is None:
             return False, None
-        objlist, imglist = [], []
+        tag_obs = {}  # {tid: (obj4, img4)}
         for r in self.detect_apriltag(filename):
             tid = str(r.tag_id)
             if tid not in self.tag_poses:
                 print(f"[WARN] 检测到未知 AprilTag ID {tid}（tag_poses 无此标签），跳过。")
                 continue
             print("[INFO] Detected AprilTag ID: {}".format(tid))
-            objlist.extend(self.tag_poses[tid])
-            imglist.extend(np.asarray(r.corners, dtype=np.float64)[TAG_CORNER_PERM])
+            tag_obs[tid] = (self.tag_poses[tid],
+                            np.asarray(r.corners, dtype=np.float64)[TAG_CORNER_PERM])
 
-        frame = (theta, list(objlist), list(imglist)) if objlist else None
-        if len(objlist) < 4:
+        objlist = [p for pair in tag_obs.values() for p in pair[0]]
+        imglist = [p for pair in tag_obs.values() for p in pair[1]]
+        frame = (theta, objlist, imglist) if objlist else None
+        if not tag_obs:
             print("检测到的AprilTag角点不足一组(4点)，无法计算相机位姿。")
             return False, frame
 
-        result = solve_pnp_pose(objlist, imglist)
-        if result is None:
-            print("PnP求解失败，无法计算相机位姿。")
-            return False, frame
-        pos_3d, ori_3d, reproj_err = result
-        problems = pnp_pose_problems(pos_3d, ori_3d, reproj_err)
-        if problems:
-            print(f"PnP结果未通过合理性门控（{'；'.join(problems)}），本次单帧定位失败。")
+        def _try(tags_subset):
+            """对给定标签子集做 PnP+门控，通过返回 (pos, ori)，否则 None"""
+            obj = [p for t in tags_subset for p in tag_obs[t][0]]
+            img = [p for t in tags_subset for p in tag_obs[t][1]]
+            result = solve_pnp_pose(obj, img)
+            if result is None:
+                return None
+            pos_3d, ori_3d, reproj_err = result
+            if pnp_pose_problems(pos_3d, ori_3d, reproj_err, n_tags=len(tags_subset)):
+                return None
+            return pos_3d, ori_3d, reproj_err
+
+        solution = _try(list(tag_obs))
+        if solution is None and len(tag_obs) >= 3:
+            # 逐标签剔除救援：优先剔除与其余标签异面的（通常是高噪声的地面标签）
+            planes = {t: tag_plane_axis(self.tag_poses[t]) for t in tag_obs}
+            rescued = None
+            for drop in tag_obs:
+                subset = [t for t in tag_obs if t != drop]
+                if len(subset) < 2:
+                    continue
+                if len({planes[t] for t in subset}) < 2:
+                    continue  # 共面子集有平面歧义，不接受
+                sol = _try(subset)
+                if sol is not None and (rescued is None or sol[2] < rescued[2]):
+                    rescued = (sol, drop)
+            if rescued is not None:
+                (pos_3d, ori_3d, reproj_err), dropped = rescued
+                print(f"[帧救援] 剔除标签 {dropped} 后通过门控（reproj={reproj_err:.2f}px）")
+                solution = (pos_3d, ori_3d, reproj_err)
+
+        if solution is None:
+            print("PnP结果未通过合理性门控（含剔除救援），本次单帧定位失败。")
             return False, frame
 
+        pos_3d, ori_3d, reproj_err = solution
         self.current_position = pos_3d[:2]
         self.current_orientation = ori_3d[:2]
         norm = np.linalg.norm(self.current_orientation)
@@ -370,34 +419,41 @@ class RobotState:
             print(f"[联合定位] multiview_pose 导入失败: {e}")
             return False
 
-        if not self._extrinsics_warned and "source" not in self.multiview_extrinsics:
+        if not self._extrinsics_from_file and not self._extrinsics_warned:
             print(f"[联合定位] 警告: 未找到 {MULTIVIEW_EXTRINSICS_PATH}，"
                   f"使用缺省外参 {self.multiview_extrinsics}（e=0 即光心=机体中心假设）。"
                   "建议先跑 survey_field.py 生成标定外参。")
             self._extrinsics_warned = True
 
+        # 联合解门控阈值：帧内标签越多、帧数越多，聚合的不一致越大；
+        # 按最大帧标签数取自适应阈值再乘 1.5（多帧联合的统计涨落）。
+        max_tags = max((len(f[2]) // 4 for f in frames), default=1)
+        joint_gate = reproj_gate_px(max_tags) * 1.5
+
         def _apply(fr):
             p_est, rms, info = solve_joint_3dof(fr, self.multiview_extrinsics)
             if p_est is None:
                 return None, None, None, None
-            problems = gate_solution(p_est, fr, self.multiview_extrinsics)
+            problems = gate_solution(p_est, fr, self.multiview_extrinsics,
+                                     reproj_max=joint_gate)
             return p_est, rms, problems, fr
 
-        p_est, rms, problems, used = _apply(frames)
-        if problems and len(frames) > 2 and p_est is not None:
-            # 剔除联合残差最大的一帧重试一次
-            from multiview_pose import residual as _res
-            worst = max(range(len(frames)),
-                        key=lambda i: float(np.sqrt(np.mean(
-                            _res(p_est, [frames[i]]) ** 2))))
-            retry = [f for i, f in enumerate(frames) if i != worst]
-            print(f"[联合定位] 门控未过，剔除残差最大帧 θ={frames[worst][0]:+.1f}° 重试…")
-            p2, rms2, problems2, used2 = _apply(retry)
-            if not problems2:
-                p_est, rms, problems, used = p2, rms2, problems2, used2
-        if problems or p_est is None:
-            print(f"[联合定位] 未通过门控（{problems}），联合求解失败。")
+        # 留一法枚举：歧义/坏帧会把联合解带偏，使"残差最大帧"反而不是坏帧
+        # （直接剔除会剔错）。候选 = 全集 + 逐一去掉每帧，取过门控且 rms 最小者。
+        candidates = [frames] + [f for i in range(len(frames))
+                                 if (f := [x for j, x in enumerate(frames) if j != i])]
+        best = None
+        for cand in candidates:
+            p_c, rms_c, problems_c, _ = _apply(cand)
+            if not problems_c and (best is None or rms_c < best[1]):
+                if len(cand) < len(frames):
+                    dropped = [f[0] for f in frames if f not in cand]
+                    print(f"[联合定位] 剔除帧 θ={dropped} 后通过门控…")
+                best = (p_c, rms_c, cand)
+        if best is None:
+            print("[联合定位] 所有帧组合均未通过门控，联合求解失败。")
             return False
+        p_est, rms, used = best
 
         self.current_position = camera_optical_center(p_est, 0.0)[:2]
         self.current_orientation = body_orientation_xy(p_est)
@@ -469,18 +525,19 @@ class RobotState:
         return False
 
     def locate_with_retry(self):
-        """转头定位失败时身体转动重试：头部扫描→交替左右小步转动→有限次后报错退出"""
+        """转头定位失败时身体转动重试：头部扫描→同向连转改变视角→有限次后报错退出
+
+        2026-08-30 修正：原「左右交替转身」净旋转≈0，5 次后朝向几乎不变，
+        出口走廊类死区永远看不到新标签（角点级仿真实测卡死）。改为同向连转
+        （5×22°=110°），能扫到侧后方位的标签；定位成功后由导航层转回。
+        """
         for attempt in range(MAX_LOCATE_RETRIES):
             print(f"--- 定位尝试 {attempt + 1}/{MAX_LOCATE_RETRIES} ---")
             if self.locate_with_scan():
                 return True
-            # 头部扫描全失败 → 身体转动改变视角
+            # 头部扫描全失败 → 身体同向连转（累计旋转，扫到不同方位）
             # 2026-08-25 实机标定：小步转向不可靠，改用实测可靠的大步转向（见 levels 动作常量）
-            if attempt % 2 == 0:
-                print("头部扫描失败，身体左转小步尝试重新定位。")
-                self.run_action("turn_left")
-            else:
-                print("头部扫描失败，身体右转小步尝试重新定位。")
-                self.run_action("turn_right")
+            print("头部扫描失败，身体左转尝试重新定位。")
+            self.run_action("turn_left")
         print("定位重试超限，程序终止。")
         return False

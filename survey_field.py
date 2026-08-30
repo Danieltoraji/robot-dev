@@ -54,8 +54,8 @@ except Exception:
 
 from camera_config import CAMERA_INTRINSIC, CAMERA_DISTORTION, PITCH_UP_PULSE
 from multiview_pose import (
-    camera_pose, project_points, frame_pose_candidates, rot_from_rvec,
-    normalize_extrinsics, EXTRINSICS_KEYS,
+    camera_pose, camera_pose_tilted, project_points, frame_pose_candidates,
+    rot_from_rvec, normalize_extrinsics, EXTRINSICS_KEYS,
 )
 
 # 平面锚定：命中 (轴, 名义值) 的组平面偏移固定为名义值（固定整体基准）
@@ -79,10 +79,13 @@ def group_label(gkey):
 # 数据加载
 # =====================================================================
 
-def load_station(path, max_theta, known_ids):
+def load_station(path, max_theta, known_ids, drop_discovery=True):
     """npz → (站名, frames)；frames = [(theta_deg, {tid: corners(4,2)})]
 
     与 optimize_multi_view.load_npz 同源逻辑，但保留每标签独立角点。
+    drop_discovery=True 时剔除 collect_multi_view 的前 3 帧（发现阶段）：
+    2026-08-29 真机残差分解发现，发现帧（静止直达到位）与精拍帧（从 +81°
+    一侧逼近到位）存在 ~0.6° 舵机回程差，同用会使解产生 ~20px 系统残差。
     """
     data = np.load(path, allow_pickle=True)
     pulses = data["pulses"]
@@ -93,6 +96,8 @@ def load_station(path, max_theta, known_ids):
 
     frames = []
     for fi in range(len(pulses)):
+        if drop_discovery and fi < 3:
+            continue
         theta = float(thetas[fi])
         if max_theta is not None and max_theta < 999.0 and abs(theta) > max_theta:
             continue
@@ -226,15 +231,21 @@ class SurveyProblem:
     """场地自标定联合 BA：变量装配 / 残差 / 精化角点重建
 
     变量布局:
-      [0 .. 3S-1]           各站位 (x_B, y_B, phi_deg)
+      [0 .. 4S-1]           各站位 (x_B, y_B, phi_deg, dpitch_deg)
       [ext_off .. +4]       e_x, e_y, z_c, pitch_deg, k_head
       [tag_off .. +3T-1]    每标签 (cu, cv, alpha_deg)
       [g_off  .. +G-1]      各待估平面的偏移量 ddelta（相对记录均值）
+
+    dpitch：每站位俯仰微调量（全局 pitch + dpitch）。机器人每次搬动放站，
+    底盘在略不平的地面/脚垫接触差异带来 ±1~3° 逐站俯仰差——单一全局 pitch
+    无法拟合（实测各站单帧俯仰均值离散 16.6~19.3°），是首轮真机求解
+    rms~18px 的主因之一。dpitch 带先验拉向 0（σ=2°）。
     """
 
     def __init__(self, stations, groups, tag_poses, ext_init,
                  floor_weight=1.0, prior_sigma_cm=1.0, px_per_cm=None,
-                 st_prior_sigma_cm=5.0, phi_prior_sigma_deg=5.0):
+                 st_prior_sigma_cm=5.0, phi_prior_sigma_deg=5.0,
+                 dpitch_prior_sigma_deg=2.0):
         self.stations = stations
         self.groups = groups
         self.tag_ids = list(tag_poses.keys())
@@ -242,8 +253,9 @@ class SurveyProblem:
         self.floor_weight = floor_weight
         self._group_of = {tid: g for g, gr in groups.items() for tid in gr["tags"]}
 
+        self.st_dof = 4  # 每站位 (x, y, phi, dpitch)
         self.n_st = len(stations)
-        self.ext_off = 3 * self.n_st
+        self.ext_off = self.st_dof * self.n_st
         self.tag_off = self.ext_off + len(EXTRINSICS_KEYS)
         self.g_off = self.tag_off + 3 * len(self.tag_ids)
         self.free_groups = [g for g, gr in groups.items() if anchor_value(gr) is None]
@@ -266,6 +278,7 @@ class SurveyProblem:
         self.prior_sigma_cm = prior_sigma_cm
         self.st_prior_sigma_cm = st_prior_sigma_cm
         self.phi_prior_sigma_deg = phi_prior_sigma_deg
+        self.dpitch_prior_sigma_deg = dpitch_prior_sigma_deg
         # 站位规范固定先验（拉向 PnP 种子；σ 宽松，只用于压平整体平移弱方向）
         self.st_seeds = None
         # 面内规范固定先验：各组标签面内中心均值拉向记录值均值
@@ -291,7 +304,8 @@ class SurveyProblem:
     def pack_init(self, st_seeds):
         x0 = np.zeros(self.n_var)
         for si, seed in enumerate(st_seeds):
-            x0[3 * si:3 * si + 3] = seed
+            seed4 = np.array([seed[0], seed[1], seed[2], 0.0], dtype=np.float64)
+            x0[self.st_dof * si:self.st_dof * si + self.st_dof] = seed4
         for i, k in enumerate(EXTRINSICS_KEYS):
             x0[self.ext_off + i] = self.ext_init[k]
         for j, tid in enumerate(self.tag_ids):
@@ -302,10 +316,14 @@ class SurveyProblem:
         lo = np.full(self.n_var, -np.inf)
         hi = np.full(self.n_var, np.inf)
         for si in range(self.n_st):
-            lo[3 * si:3 * si + 2], hi[3 * si:3 * si + 2] = -30.0, 130.0
-            lo[3 * si + 2], hi[3 * si + 2] = -720.0, 720.0
-        ext_lo = {"e_x": -15.0, "e_y": -15.0, "z_c": 5.0, "pitch_deg": -30.0, "k_head": 0.7}
-        ext_hi = {"e_x": 15.0, "e_y": 15.0, "z_c": 80.0, "pitch_deg": 30.0, "k_head": 1.3}
+            b0 = self.st_dof * si
+            lo[b0:b0 + 2], hi[b0:b0 + 2] = -30.0, 130.0
+            lo[b0 + 2], hi[b0 + 2] = -720.0, 720.0
+            lo[b0 + 3], hi[b0 + 3] = -10.0, 10.0  # dpitch
+        ext_lo = {"e_x": -15.0, "e_y": -15.0, "z_c": 5.0, "pitch_deg": -30.0, "k_head": 0.7,
+                  "tilt_deg": 0.0, "tilt_phase_deg": -180.0}
+        ext_hi = {"e_x": 15.0, "e_y": 15.0, "z_c": 80.0, "pitch_deg": 30.0, "k_head": 1.3,
+                  "tilt_deg": 8.0, "tilt_phase_deg": 180.0}
         for i, k in enumerate(EXTRINSICS_KEYS):
             lo[self.ext_off + i], hi[self.ext_off + i] = ext_lo[k], ext_hi[k]
         for j in range(len(self.tag_ids)):
@@ -320,8 +338,10 @@ class SurveyProblem:
     # ---- 场景重建 ----
     def station_p8(self, x, si):
         e = {k: x[self.ext_off + i] for i, k in enumerate(EXTRINSICS_KEYS)}
-        return np.array([x[3 * si], x[3 * si + 1], x[3 * si + 2],
-                         e["e_x"], e["e_y"], e["z_c"], e["pitch_deg"], e["k_head"]],
+        b0 = self.st_dof * si
+        return np.array([x[b0], x[b0 + 1], x[b0 + 2],
+                         e["e_x"], e["e_y"], e["z_c"],
+                         e["pitch_deg"] + x[b0 + 3], e["k_head"]],
                         dtype=np.float64)
 
     def tag_corners(self, x, tid):
@@ -345,7 +365,8 @@ class SurveyProblem:
         for si, (_, frames) in enumerate(self.stations):
             p8 = self.station_p8(x, si)
             for fi, (theta, _) in enumerate(frames):
-                poses[(si, fi)] = camera_pose(p8, theta)
+                poses[(si, fi)] = camera_pose_tilted(
+                    p8, theta, x[self.ext_off + 5], x[self.ext_off + 6])
         rs = []
         for oi, (si, fi, tid) in enumerate(self.obs):
             if not self.active[oi]:
@@ -365,6 +386,9 @@ class SurveyProblem:
             # 平面偏移弱先验：σ_cm 厘米偏移 ≈ 1 个残差单位的拉力
             # （此前误写成 ddelta/(σ_cm×px_per_cm)，弱了 ~100 倍，规范方向放任）
             rs.append(np.array([x[self.g_off + gi] * self.px_per_cm / self.prior_sigma_cm]))
+        # 偏航轴倾斜幅值弱先验（拉向 0，σ=2°；真机实测 ~2°，防弱方向发散）
+        px_per_deg = self.px_per_cm * 1.05
+        rs.append(np.array([x[self.ext_off + 5] * px_per_deg / 2.0]))
         # 面内规范固定：各组面内中心均值拉向记录值（压平面内滑动弱方向）
         for gkey, (u_rec, v_rec) in self.group_ip_rec.items():
             idxs = [self.tag_off + 3 * j for j, t in enumerate(self.tag_ids)
@@ -378,15 +402,18 @@ class SurveyProblem:
         if self.st_seeds is not None:
             # 站位规范固定先验：拉向单帧 PnP 种子（记录坐标推得，~1-3cm 精度）。
             # 没有它，「全体站位+标签面内坐标整体平移」方向几乎无约束。
+            px_per_deg = self.px_per_cm * 1.05  # 60cm 处 1° ≈ 1.05cm 弧长
             for si in range(self.n_st):
                 sx, sy, sphi = self.st_seeds[si]
-                gx, gy, gphi = x[3 * si], x[3 * si + 1], x[3 * si + 2]
+                b0 = self.st_dof * si
+                gx, gy, gphi = x[b0], x[b0 + 1], x[b0 + 2]
                 dphi = (gphi - sphi + 180.0) % 360.0 - 180.0
-                px_per_deg = self.px_per_cm * 1.05  # 60cm 处 1° ≈ 1.05cm 弧长
                 rs.append(np.array([
                     (gx - sx) * self.px_per_cm / self.st_prior_sigma_cm,
                     (gy - sy) * self.px_per_cm / self.st_prior_sigma_cm,
                     dphi * px_per_deg / self.phi_prior_sigma_deg,
+                    # 每站位俯仰微调先验：拉向全局 pitch（底盘逐站倾角差 ~±2°）
+                    x[b0 + 3] * px_per_deg / self.dpitch_prior_sigma_deg,
                 ]))
         return np.concatenate(rs)
 
@@ -466,7 +493,8 @@ def run_survey(stations, tag_poses, ext_init, fix, floor_weight,
     prob.st_seeds = seeds2
     x02 = res.x.copy()
     for si in range(prob.n_st):
-        x02[3 * si:3 * si + 3] = seeds2[si]
+        b0 = prob.st_dof * si
+        x02[b0:b0 + prob.st_dof] = [seeds2[si][0], seeds2[si][1], seeds2[si][2], 0.0]
     res = least_squares(prob.residual, np.clip(x02, lo, hi), bounds=(lo, hi),
                         method="trf", loss=loss, f_scale=2.0, max_nfev=4000)
 
@@ -749,7 +777,8 @@ def selftest(noise_px=0.5, seed=0):
     prob.st_seeds = seeds2
     x02 = res.x.copy()  # 标签/外参/平面偏移沿用第一遍解，只换站位种子
     for si in range(prob.n_st):
-        x02[3 * si:3 * si + 3] = seeds2[si]
+        b0 = prob.st_dof * si
+        x02[b0:b0 + prob.st_dof] = [seeds2[si][0], seeds2[si][1], seeds2[si][2], 0.0]
     res = least_squares(prob.residual, np.clip(x02, lo, hi), bounds=(lo, hi),
                         method="trf", loss="soft_l1", f_scale=2.0, max_nfev=4000)
     x = res.x
