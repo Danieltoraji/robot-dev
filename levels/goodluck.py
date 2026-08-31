@@ -62,15 +62,14 @@ ORIENT_FREEZE_DIST_CM = 10.0  # 动态朝向冻结距离阈值（cm）：距目�
 # =====================================================================
 # 批量直行参数（"一次定位，多步行动"优化）
 # =====================================================================
-# 仅在"朝向已对准 + 安全走廊 + 纯直行 + 远离目标"时启用批量直行，
-# 减少长直走廊段的重复定位次数。转向/横移/危险区/近目标点仍每步定位。
+# 仅在"朝向已对准 + 纯直行 + 远离目标"时启用批量直行。
 # 2026-08-25 标定后批量直行一律使用 go_forward（5cm/步，实测比 one_step 更直）。
-BATCH_FORWARD_MAX_STEPS = 6        # 单次批量直行上限步数（2026-08-30 提速 4→6；6步×5cm=30cm）
-BATCH_FORWARD_MIN_WALL_DIST = 18.0 # 批量直行要求的最小离墙距离（cm），需 > OBSTACLE_THRESHOLD
-BATCH_FORWARD_MIN_DIST = 12.0      # 距目标 > 此值才启用批量（cm），确保远离精确停靠区
-# 批量直行允许的最大朝向偏差（度）：
-# 6 步行程 30cm，横向偏移 = 30·sinθ ≤ 1.6cm，需 < POSITION_THRESHOLD(3cm)
-GO_FORWARD_BATCH_MAX_ANGLE_DEG = 3.0
+# 2026-08-30 v6：BATCH_FORWARD_MIN_WALL_DIST / BATCH_FORWARD_MIN_DIST 已删除——
+# 上限由调度层按航向自适应计算（min(开阔 6 步, 中心带余量/sin(航向差))，
+# 走廊硬顶 5 步），近目标截短由调度层"批量以切换线为界"接管；
+# 路径预检阈值改为 OBSTACLE_THRESHOLD+2（15cm）。
+GO_FORWARD_BATCH_MAX_STEPS = 6        # 批量直行绝对上限（旧调用默认；调度层自适应可更小）
+GO_FORWARD_BATCH_MAX_ANGLE_DEG = 3.0  # 批量直行允许的最大朝向偏差（度）
 
 # =====================================================================
 # 统一路点模型与整条赛道路点表
@@ -111,6 +110,9 @@ ROUTE = [
 # （出口段日后由其它方法处理）。真机用法：python main.py goodluck --end-at-last-stop
 END_AT_LAST_STOP = "--end-at-last-stop" in sys.argv
 END_AFTER_POS = [74.0, 30.0]  # 提前结束的判定路点（停靠点4）
+# v6 A* 导航目标与到达阈值
+GOAL_POS = [97.5, 20.0]      # 出口（栅格中心 97.5；出口开口 x=100 y∈[0,40]）
+GOAL_THRESHOLD_CM = 6.0      # 终点到达判定（cm）
 
 # =====================================================================
 # 动作组参数常量（2026-08-25 实机标定完成）
@@ -126,6 +128,105 @@ RIGHT_MOVE_CM = 2.2  # right_move（实测 2.2cm/次）
 TURN_LEFT_DEG = 22.0  # turn_left（实测 22.0°/次）
 TURN_RIGHT_DEG = 25.7  # turn_right（实测 25.7°/次）
 FORWARD_BIAS = 0.0  # 前进方向偏好权重，避免原地转圈
+
+
+# =====================================================================
+# Batch 审计（默认关闭，不影响正常行为）
+# =====================================================================
+
+class AuditRecorder:
+    """记录批量直行/批量转向的提议、实际执行与拒绝原因。"""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.segments = []
+        self.batch_events = []
+        self.turn_events = []
+        self._current_segment = None
+        self._current_segment_idx = None
+        self._current_segment_start_locate = None
+
+    def begin_segment(self, wp, locate_count):
+        self._current_segment_idx = len(self.segments)
+        self._current_segment = {
+            "semantics": wp.semantics,
+            "xy": [float(wp.xy[0]), float(wp.xy[1])],
+            "actions": 0,
+            "locates": 0,
+            "start_locate": locate_count,
+        }
+        self.segments.append(self._current_segment)
+
+    def record_action(self):
+        if self._current_segment is not None:
+            self._current_segment["actions"] += 1
+
+    def end_segment(self, locate_count):
+        if self._current_segment is not None:
+            self._current_segment["locates"] = locate_count - self._current_segment["start_locate"]
+            self._current_segment = None
+            self._current_segment_idx = None
+
+    def record_batch(self, proposed, candidate, actual, reject_reason,
+                     angle_deg=None, angle_gate=None, precheck_ok=None,
+                     precheck_min_clearance=None):
+        self.batch_events.append({
+            "segment_idx": self._current_segment_idx,
+            "proposed": proposed,
+            "candidate": candidate,
+            "actual": actual,
+            "reject_reason": reject_reason,
+            "angle_deg": angle_deg,
+            "angle_gate": angle_gate,
+            "precheck_ok": precheck_ok,
+            "precheck_min_clearance": precheck_min_clearance,
+        })
+
+    def record_turn(self, action, proposed_times, actual_times, angle_deg=None):
+        self.turn_events.append({
+            "segment_idx": self._current_segment_idx,
+            "action": action,
+            "proposed_times": proposed_times,
+            "actual_times": actual_times,
+            "angle_deg": angle_deg,
+        })
+
+    def to_dict(self):
+        return {
+            "segments": self.segments,
+            "batch_events": self.batch_events,
+            "turn_events": self.turn_events,
+        }
+
+
+AUDIT = None  # 默认关闭；由 enable_audit() 开启
+
+
+def enable_audit():
+    """开启 batch 审计并清空旧数据。"""
+    global AUDIT
+    if AUDIT is None:
+        AUDIT = AuditRecorder()
+    AUDIT.reset()
+
+
+def get_audit_data():
+    """返回当前审计数据；未开启时返回 None。"""
+    return AUDIT.to_dict() if AUDIT is not None else None
+
+
+def _sim_locate_count(state):
+    """从模拟器状态读取累计定位次数；非模拟环境返回 0。"""
+    sim = getattr(state, "_sim", None)
+    return sim.locate_count if sim is not None else 0
+
+
+def _audit_action():
+    """审计：记录一次已执行动作。"""
+    if AUDIT is not None:
+        AUDIT.record_action()
 
 
 # =====================================================================
@@ -279,50 +380,67 @@ def decide_rotation_action(state, target):
     else:
         step_deg, name = TURN_RIGHT_DEG, "turn_right"
     times = max(1, min(3, int(round(angle_deg / step_deg))))
+    if AUDIT is not None:
+        AUDIT.record_turn(name, times, times, angle_deg=angle_deg)
     print(f"需转向 {angle_deg:.1f}°（{name}，实测 {step_deg}°/次 × {times}）")
     return name, times
 
-def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0, bypass_position=None, bypass_condition=None):
-    """统一路点导航原语：定位 → 危险检测 → 动态朝向修正 → 平移接近 → 到达检查 → 按需停留
+def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0,
+                       bypass_position=None, bypass_condition=None,
+                       semantics="precise", max_batch_steps=None,
+                       batch_angle_limit_deg=None,
+                       pass_line=None, prev_waypoint=None, locate_fail_limit=2):
+    """统一路点导航原语：定位 → 危险检测 → 动态朝向修正 → 平移接近 → 到达检查
 
     state: RobotState 实例。
     target_pos: 目标位置 [x, y]（cm）。
-    target_orientation: 目标朝向 [dx, dy]（单位向量）；None 表示不强制朝向。
-    stop_time: 到达后停留秒数；0 表示不停留（转向点/中间路点）。
+    target_orientation: 目标朝向 [dx, dy]；None 表示不强制朝向。
+    stop_time: 到达后停留秒数；0 不停留。
+    --- v6 混合架构扩展参数（调度层传入）---
+    semantics: 子目标语义。"precise"（拐点/终点：精确到达 3cm + 微调权限，
+        冻结/取反逻辑生效）或 "pass"（直段切点：法向越线即到达，不做
+        到点微调，冻结/取反被门控跳过——目标在侧后方时由远距连线方向
+        + 横移/倒退候选自然处理）。
+    max_batch_steps: 批量直行上限（调度层按航向自适应计算；None = 用
+        旧默认逻辑 GO_FORWARD_BATCH 上限，兼容旧调用）。
+    batch_angle_limit_deg: 批量直行的角度门上限（度）。调度层公式已用
+        sin(航向差) 惩罚了角度（偏角越大步数越少），执行层再用固定 3°
+        门二次否决会让自适应批量被拦（2026-08-31 主因修复）——传入时
+        取 max(默认 3°, 此值)；None = 旧行为 3°（兼容旧调用）。
+    pass_line: (prev_wp_xy, cur_wp_xy) 二元组——pass 语义的法向越线判定
+        基准（prev→cur 连线，机器人越过 cur 的法向线即通过）。
+    prev_waypoint: 上一个子目标坐标（护栏/越线计算的段起点）。
+    locate_fail_limit: 连续定位失败 retry 次数上限，超过则安全终止
+        （stand + 返回 False；不无限等待也不盲走）。
 
-    动态朝向策略：
-      - 距目标 > ORIENT_FREEZE_DIST_CM：目标朝向 = 当前位置→目标连线方向（动态更新），
-        使转弯段更平滑（斜切接近）。
+    动态朝向策略（precise 语义；pass 语义被门控跳过近距部分）：
+      - 距目标 > ORIENT_FREEZE_DIST_CM：连线方向动态更新。
       - 距目标 ≤ ORIENT_FREEZE_DIST_CM：
-        · 有指定朝向 → 切换到指定朝向（确保停靠点评分朝向精确）。
-        · 无指定朝向(None) → 冻结进入近距离时的连线方向，之后固定不变（防震荡）。
-      - 逃离危险区时跳过朝向修正（effective_orient=None），优先平移离开。
+        · 有指定朝向 → 指定朝向；无 → 冻结连线方向（目标在正后方时
+          取反——机器人倒退接近而非 180° 调头）。
+      - 逃离危险区时跳过朝向修正，优先平移离开。
     """
     target_pos = np.asarray(target_pos, dtype=np.float64)
     if target_orientation is not None:
         target_orientation = np.asarray(target_orientation, dtype=np.float64)
         target_orientation = target_orientation / np.linalg.norm(target_orientation)
 
-    if stop_time > 0:
-        phase = "停靠点"
-    elif target_orientation is not None:
-        phase = "转向点"
-    else:
-        phase = "中间路点"
-    print(f"\n===== 开始导航至{phase}：{target_pos} =====")
-    if target_orientation is not None:
-        print(f"指定朝向：{target_orientation}")
+    phase = "子目标" if semantics == "pass" else "目标点"
+    print(f"\n===== 开始导航至{phase}：{target_pos}（语义 {semantics}）=====")
 
-    frozen_orient = None  # 冻结的连线方向（走廊点近距离时使用，防震荡）
+    frozen_orient = None
+    locate_fails = 0
 
     while True:
-        print("\n=== 新一轮导航循环开始 ===")
-        print(f"目标位置：{target_pos}，目标朝向：{target_orientation}，目标停留时间：{stop_time}s")
-
-        # 1. 定位（含头部扫描+身体转动重试）
+        # 1. 定位（含头部扫描+身体转动重试）；连续失败达上限 → 安全终止
         if not state.locate_with_retry():
-            print(f"无法定位，导航至{phase} {target_pos} 失败。")
-            return False
+            locate_fails += 1
+            if locate_fails >= locate_fail_limit:
+                print(f"连续 {locate_fails} 次定位失败（retry 级），安全终止。")
+                state.act("stand")
+                return False
+            print(f"定位失败 {locate_fails}/{locate_fail_limit}，重试。")
+            continue
 
         print("当前机体位置：", state.current_position)
         print("当前机体朝向：", state.current_orientation)
@@ -355,17 +473,45 @@ def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0
         dist = np.linalg.norm(pd)
         print("位置差异pd：", pd)
 
-        # 4. 动态计算有效目标朝向。除非在逃，否则都是有效目标朝向。
+        # 3.5 pass 语义：法向越线判定（在危险检测后、朝向修正前）
+        #    prev→cur 段方向 d；机器人相对 cur 的向量 v；
+        #    along = v·d > 0（已越过 cur 的法向线）且 |side| 有界（仍在段附近，
+        #    防止在下一段远处误判）→ 视为通过，立即返回。
+        if semantics == "pass" and pass_line is not None:
+            (px0, py0), (px1, py1) = pass_line[0], pass_line[1]
+            sx, sy = float(state.current_position[0]), float(state.current_position[1])
+            seg_dx, seg_dy = px1 - px0, py1 - py0
+            seg_len = np.hypot(seg_dx, seg_dy)
+            if seg_len > 1e-9:
+                vx, vy = sx - px1, sy - py1
+                along = vx * seg_dx + vy * seg_dy
+                side = vx * seg_dy - vy * seg_dx
+                if along > 0 and abs(side) < 25.0:
+                    print(f"===== 通过直段切点 {target_pos}（越线判定）=====")
+                    return True
+
+        # 4. 动态计算有效目标朝向。pass 语义门控：朝向目标 = 路径段方向
+        #    （prev→cur 连线方向，固定值）。首版错误地用"到切点的连线方向"——
+        #    切点在前方不断移动，朝向修正是追逐目标永不收敛（步进间差 15~19°
+        #    恒过不了阈值 → 转一点走一步无限循环；一次转向过冲后目标反转
+        #    106~170°，×3 连转冲进危险区）。路径段方向是常量，转到位即收敛。
         if escaping:
             effective_orient = None  # 逃离时跳过朝向修正
             orient_source = "无（逃离）"
+        elif semantics == "pass" and pass_line is not None:
+            (px0, py0), (px1, py1) = pass_line[0], pass_line[1]
+            seg = np.array([px1 - px0, py1 - py0], dtype=np.float64)
+            seg_n = np.linalg.norm(seg)
+            effective_orient = seg / seg_n if seg_n > 1e-9 else pd / dist
+            frozen_orient = None
+            orient_source = "路径段方向"
         elif dist > ORIENT_FREEZE_DIST_CM:
             # 远距离：连线方向（指向目标的单位向量），动态更新
             effective_orient = pd / dist
             frozen_orient = effective_orient.copy()  # 重置冻结（回到远距离）
             orient_source = "连线方向"
         else:
-            # 近距离：有指定朝向则用指定，无则冻结连线方向
+            # 近距离（仅 precise 语义）：有指定朝向则用指定，无则冻结连线方向
             if target_orientation is not None:
                 effective_orient = target_orientation
                 orient_source = "指定朝向"
@@ -390,6 +536,7 @@ def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0
                 and np.linalg.norm(od) > ORIENTATION_THRESHOLD):
             action, times = decide_rotation_action(state, effective_orient)
             state.act(action, times)
+            _audit_action()
             continue
 
         # 7. 平移接近：pd 模 > 阈值 → 贪心选最优方向
@@ -401,28 +548,48 @@ def navigate_to_target(state, target_pos, target_orientation=None, stop_time=0.0
                 print("警告：无安全平移动作可选，按兵不动。")
                 # state.run_action("back_one_step")
             else:
-                # ★ 批量直行优化：朝向已对准 + 安全走廊 + 纯直行 + 远离目标时批量执行
+                # ★ 批量直行优化：朝向已对准 + 纯直行 + 远离目标时批量执行
                 # 2026-08-25 标定后：批量直行一律用 go_forward（5cm/步，实测比 one_step 更直），
                 # 仅在朝向偏差 ≤ GO_FORWARD_BATCH_MAX_ANGLE_DEG 时启用；偏差更大回退单步。
-                if (action in ("go_forward", "go_forward_one_step")
-                        and not escaping
-                        and wall_dist >= BATCH_FORWARD_MIN_WALL_DIST
-                        and dist > BATCH_FORWARD_MIN_DIST
-                        and od is not None
-                        and np.linalg.norm(od) <= ORIENTATION_THRESHOLD):
+                # 2026-08-30 v6：批量上限改为外部 max_batch_steps（调度层按航向自适应：
+                # min(开阔 6 步, 中心带余量/sin(航向差))，走廊硬顶 5 步）；
+                # None 时退回 GO_FORWARD_BATCH_MAX_STEPS（兼容旧调用）。
+                batch_cap = max_batch_steps if max_batch_steps is not None else GO_FORWARD_BATCH_MAX_STEPS
+                if action in ("go_forward", "go_forward_one_step") and not escaping and od is not None:
                     # od 模长 = 2*sin(θ/2)，θ = 2*arcsin(‖od‖/2)
                     angle_deg = np.degrees(2 * np.arcsin(min(np.linalg.norm(od) / 2, 1.0)))
-                    if angle_deg <= GO_FORWARD_BATCH_MAX_ANGLE_DEG:
-                        batch_steps = min(BATCH_FORWARD_MAX_STEPS, int(dist / FORWARD_CM))
+                    # 角度门：调度层传入 batch_angle_limit_deg 时以调度层标准为准
+                    # （其公式已按 sin(航向差) 惩罚步数，固定 3° 二次否决是 2026-08-31
+                    # 主因 bug——pass 段朝向差稳定 5° 被拦成每轮 5cm 单步+定位）
+                    angle_gate = max(GO_FORWARD_BATCH_MAX_ANGLE_DEG,
+                                     batch_angle_limit_deg or 0.0)
+                    if np.linalg.norm(od) <= ORIENTATION_THRESHOLD and angle_deg <= angle_gate:
+                        batch_steps = min(batch_cap, int(dist / FORWARD_CM))
                         # 路径预检：整段批量路径离墙距离是否充足
                         if batch_steps > 1 and check_segment_clear(
                             state.current_position, state.current_orientation,
-                            batch_steps, FORWARD_CM, BATCH_FORWARD_MIN_WALL_DIST
+                            batch_steps, FORWARD_CM, OBSTACLE_THRESHOLD + 2.0
                         ):
                             print(f"  ★ 批量直行 {batch_steps} 步（go_forward，距目标 {dist:.1f}cm，离墙 {wall_dist:.1f}cm）")
+                            if AUDIT is not None:
+                                AUDIT.record_batch(batch_cap, batch_steps, batch_steps, "none",
+                                                   angle_deg=angle_deg, angle_gate=angle_gate,
+                                                   precheck_ok=True)
                             state.act("go_forward", times=batch_steps)
+                            _audit_action()
                             continue
+                        else:
+                            reason = "dist_cut" if batch_steps <= 1 else "precheck_fail"
+                            if AUDIT is not None:
+                                AUDIT.record_batch(batch_cap, batch_steps, 1, reason,
+                                                   angle_deg=angle_deg, angle_gate=angle_gate,
+                                                   precheck_ok=False)
+                    else:
+                        if AUDIT is not None:
+                            AUDIT.record_batch(batch_cap, 1, 1, "angle_gate",
+                                               angle_deg=angle_deg, angle_gate=angle_gate)
                 state.act(action)
+                _audit_action()
             continue
         print("\n=== 本轮导航循环结束 ===")
         # 8. 到达
@@ -480,27 +647,142 @@ def assert_corridor_clear(polyline, min_dist=CORRIDOR_CLEAR_CM):
 
 
 # =====================================================================
-# 关卡入口函数
+# 调度层 + 关卡入口（v6 混合架构：A* 子目标 + 旧执行层）
 # =====================================================================
 
-def run_level(state):
-    """goodluck 关卡主流程：沿 ROUTE 路点串依次导航
+# 航向自适应批量参数（v6：激进度由实测对准度决定，不由地理标签决定）
+BATCH_ADAPTIVE_MAX_STEPS = 6     # 开阔区绝对上限
+BATCH_CORRIDOR_HARD_CAP = 5      # 走廊内（净空 <21cm）硬顶
+GUARDRAIL_MARGIN_CM = 1.0        # 护栏安全垫：护栏阈值 = 中心带余量 − 此值
+REPLAN_DEVIATION_CM = 12.0       # 偏离路径中线超过此值 → 重规划
+REPLAN_NO_PROGRESS_ROUNDS = 4    # 同一子目标 N 轮无进展 → 重规划
 
-    state: RobotState 实例（需已用 tag_poses 初始化）。
+
+def adaptive_batch_steps(state, target, dist_cm):
+    """航向自适应批量：返回 (步数, 允许航向差角)
+
+    物理依据：横向漂移 = 批长 × sin(航向残差) ≤ 中心带余量。
+    步数 = min(开阔 6, 中心带余量/sin(允许角)/5cm)，走廊（净空<21）硬顶 5。
+    允许角 = 航向差本身（对准 <3° 时全额步数）——激进度由实测对准度决定。
+    返回的第二值传给执行层 batch_angle_limit_deg（统一批量判定，
+    避免 3° 固定门二次否决调度层已按 sin(角) 惩罚过的批量）。
     """
-    # 上线前校验路点走廊净空
-    assert_corridor_clear([wp.pos for wp in ROUTE])
+    ori = np.asarray(state.current_orientation, dtype=np.float64)
+    tgt = np.asarray(target, dtype=np.float64) - np.asarray(state.current_position, dtype=np.float64)
+    tgt_n = np.linalg.norm(tgt)
+    if tgt_n < 1e-9:
+        return 1, 0.0
+    from path_planner import clearance
+    clr = clearance(float(state.current_position[0]), float(state.current_position[1]))
+    cap = BATCH_CORRIDOR_HARD_CAP if clr < 21.0 else BATCH_ADAPTIVE_MAX_STEPS
+    # 航向与目标连线夹角
+    cos_a = float(np.clip(np.dot(ori, tgt / tgt_n), -1.0, 1.0))
+    angle_deg = np.degrees(np.arccos(cos_a))
+    margin = clr - 13.0  # 中心带余量（cm）
+    if angle_deg < 1.0:
+        return cap, 15.0        # 对准：地理上限全额；角度门给足（后续轮闭环）
+    if margin <= 0.5:
+        return 1, 15.0          # 已贴墙（理论上逃离会先接管）：单步保底
+    # 允许批长 = margin / sin(angle)，步数 = 批长 / 5cm；允许角 = 当前航向差
+    import math as _m
+    allowed_cm = margin / _m.sin(_m.radians(angle_deg))
+    steps = int(allowed_cm / FORWARD_CM)
+    return max(1, min(cap, steps, BATCH_ADAPTIVE_MAX_STEPS)), angle_deg
+
+
+def run_route(state, route, goal_name="终点"):
+    """调度层：沿 A* 子目标序列逐段导航（v6 核心，~80 行）
+
+    职责：子目标索引推进（只前进不后退）+ 语义分发（pass/corner/goal）+
+    批量截短（发射前投影越线检查）+ 护栏/重规划守护。
+    定位与动作全部由 navigate_to_target（执行层）完成。
+    仲裁互斥：escaping 由执行层内处理，本层每轮只看导航结果。
+    """
+    from path_planner import clearance, plan_route
+    wps = route.waypoints
+    idx = 0
+    prev_xy = list(state.current_position) if state.current_position is not None else list(wps[0].xy)
+    no_progress = 0
+    last_dist = None
+
+    while idx < len(wps):
+        wp = wps[idx]
+        dist = float(np.hypot(*(np.asarray(wp.xy) - np.asarray(state.current_position))))
+        print(f"\n◆ 调度：子目标 {idx+1}/{len(wps)} {wp.semantics} {wp.xy}（距 {dist:.1f}cm）")
+
+        # 护栏与重规划守护（执行层每轮定位后，本层在子目标切换间检查）
+        if no_progress >= REPLAN_NO_PROGRESS_ROUNDS:
+            print("  [守护] 多轮无进展，重规划。")
+            return "replan"
+        if last_dist is not None and dist > last_dist + 2.0:
+            no_progress += 1
+        else:
+            no_progress = 0
+        last_dist = dist
+
+        semantics = "pass" if wp.semantics == "pass" else "precise"
+        pass_line = (prev_xy, wp.xy) if wp.semantics == "pass" else None
+
+        # 批量截短：本批终点+余量投影越线 → 传小上限给执行层
+        max_steps, angle_limit = adaptive_batch_steps(state, wp.xy, dist)
+        if wp.semantics == "pass" and dist < FORWARD_CM * (max_steps + 2):
+            max_steps = max(1, int(dist / FORWARD_CM))  # 接近切换线：截短
+
+        if AUDIT is not None:
+            AUDIT.begin_segment(wp, _sim_locate_count(state))
+
+        ok = navigate_to_target(state, wp.xy, None, 0.0, None, None,
+                                semantics=semantics, max_batch_steps=max_steps,
+                                batch_angle_limit_deg=angle_limit,
+                                pass_line=pass_line, prev_waypoint=prev_xy)
+        if AUDIT is not None:
+            AUDIT.end_segment(_sim_locate_count(state))
+        if ok is False:
+            return False  # 定位失败终止（执行层已 stand）
+        # ok=True（到达/通过）或 None（不会出现；函数只返回 bool）
+        prev_xy = list(wp.xy)
+        idx += 1
+        last_dist = None
+
+    print(f"===== 到达{goal_name} =====")
+    return True
+
+
+def run_level(state):
+    """goodluck 关卡主流程（v6 混合架构）
+
+    A* 规划子目标序列 → 调度层逐段交给旧 navigate_to_target 执行。
+    旧 ROUTE 手工路点体系保留于 git 历史；--end-at-last-stop = 目标改 [74,30]。
+    """
+    from path_planner import plan_route
+    goal = END_AFTER_POS if END_AT_LAST_STOP else GOAL_POS
+    print(f"导航目标：{goal}{'（--end-at-last-stop）' if END_AT_LAST_STOP else '（出口）'}")
 
     state.act("stand")
     state.set_head(HEAD_CENTER)
-    for i, wp in enumerate(ROUTE, 1):
-        if not navigate_to_target(state, wp.pos, wp.orientation, wp.stop, wp.bypass_position, wp.bypass_condition):
-            print(f"导航至路点 {i}（{wp.pos}）失败，程序终止。")
-            return False
-        print(f"已{'到达停靠点' if wp.stop > 0 else '通过路点'} {i}：{wp.pos}")
-        if END_AT_LAST_STOP and wp.pos == END_AFTER_POS:
-            print("===== --end-at-last-stop 生效：到达最后停靠点，提前结束（出口段交给其它方法）=====")
-            return True
+    state.raise_head()
 
-    print("===== 全程完成 =====")
-    return True
+    replans = 0
+    while True:
+        if not state.locate_with_retry():
+            print("开局定位失败，程序终止。")
+            return False
+        route = plan_route(list(state.current_position), list(goal))
+        if route is None:
+            print("A* 无可行路径，程序终止。")
+            return False
+        print(f"[A*] 路线 {route.length_cm:.0f}cm，{len(route.waypoints)} 个子目标")
+
+        result = run_route(state, route, goal_name="终点")
+        if result is True:
+            print("===== 全程完成 =====")
+            return True
+        if result is False:
+            print("导航失败（定位终止），程序终止。")
+            return False
+        # result == "replan"
+        replans += 1
+        if replans > 3:
+            print("重规划超限，程序终止。")
+            return False
+        print(f"[守护] 重规划 {replans}/3")

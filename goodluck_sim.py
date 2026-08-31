@@ -54,6 +54,7 @@ from levels import goodluck as gl
 LOCATE_NOISE_STD = 0.5          # 定位位置噪声标准差（cm），0=无噪声
 LOCATE_ANGLE_NOISE_STD = 1.0    # 定位朝向角噪声标准差（度），0=无噪声
 ACTION_ERROR_STD = 0.1          # 动作步长误差标准差（比例，0.1=±10%），0=无误差
+ACTION_ERROR_BIAS = 0.05        # 系统性动作偏差（比例，+0.05=恒偏长 5%，模拟地板单向打滑；0=关闭）
 TURN_ERROR_STD = 5.0            # 转向角度误差标准差（度），0=无误差
 ANIM_PAUSE_SEC = 0.01            # 每步动画刷新间隔（秒）
 MAX_SIM_STEPS = 500            # 模拟最大动作步数，防止算法不收敛时无限循环卡死
@@ -111,14 +112,14 @@ LOG_FILE_PATH = os.path.join(RESULT_DIR, f"simulation_log_{_RESULT_TIMESTAMP}.tx
 # 2026-08-25 标定后决策算法只采用可靠动作集，小步动作耗时表项已移除
 ACTION_TIME_SEC = {
     "stand": 1.0,
-    "go_forward_one_step": 1.0,
-    "go_forward": 1.0,
-    "back_one_step": 1.0,
-    "back": 1.0,
+    "go_forward_one_step": 1.2,
+    "go_forward": 0.8,
+    "back_one_step": 1.2,
+    "back": 1.5,
     "left_move": 1.2,
     "right_move": 1.2,
-    "turn_left": 1.5,
-    "turn_right": 1.5,
+    "turn_left": 1.0,
+    "turn_right": 1.0,
 }
 LOCATE_TIME_SEC = 0.5  # 每次定位耗时（秒），可调。真实硬件拍照+检测+PnP约数秒
 
@@ -168,34 +169,34 @@ class SimState:
 
     def apply_forward(self, cm, action_name="forward"):
         """沿当前朝向前进 cm 厘米"""
-        actual_cm = cm
+        actual_cm = cm * (1.0 + ACTION_ERROR_BIAS)
         if ACTION_ERROR_STD > 0:
-            actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
+            actual_cm = cm * (1.0 + ACTION_ERROR_BIAS + np.random.normal(0, ACTION_ERROR_STD))
         self.pos = self.pos + actual_cm * self.orientation
         self._record(action_name)
 
     def apply_back(self, cm, action_name="back"):
         """沿当前朝向后退 cm 厘米"""
-        actual_cm = cm
+        actual_cm = cm * (1.0 + ACTION_ERROR_BIAS)
         if ACTION_ERROR_STD > 0:
-            actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
+            actual_cm = cm * (1.0 + ACTION_ERROR_BIAS + np.random.normal(0, ACTION_ERROR_STD))
         self.pos = self.pos - actual_cm * self.orientation
         self._record(action_name)
 
     def apply_left_move(self, cm, action_name="left_move"):
         """机体左侧横移 cm 厘米（左转为 [-oy[1], oy[0]]）"""
-        actual_cm = cm
+        actual_cm = cm * (1.0 + ACTION_ERROR_BIAS)
         if ACTION_ERROR_STD > 0:
-            actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
+            actual_cm = cm * (1.0 + ACTION_ERROR_BIAS + np.random.normal(0, ACTION_ERROR_STD))
         left_dir = np.array([-self.orientation[1], self.orientation[0]])
         self.pos = self.pos + actual_cm * left_dir
         self._record(action_name)
 
     def apply_right_move(self, cm, action_name="right_move"):
         """机体右侧横移 cm 厘米（右转为 [oy[1], -oy[0]]）"""
-        actual_cm = cm
+        actual_cm = cm * (1.0 + ACTION_ERROR_BIAS)
         if ACTION_ERROR_STD > 0:
-            actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
+            actual_cm = cm * (1.0 + ACTION_ERROR_BIAS + np.random.normal(0, ACTION_ERROR_STD))
         right_dir = np.array([self.orientation[1], -self.orientation[0]])
         self.pos = self.pos + actual_cm * right_dir
         self._record(action_name)
