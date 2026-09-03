@@ -54,9 +54,8 @@ from levels import goodluck as gl
 LOCATE_NOISE_STD = 0.5          # 定位位置噪声标准差（cm），0=无噪声
 LOCATE_ANGLE_NOISE_STD = 1.0    # 定位朝向角噪声标准差（度），0=无噪声
 ACTION_ERROR_STD = 0.1          # 动作步长误差标准差（比例，0.1=±10%），0=无误差
-ACTION_ERROR_BIAS = 0.05        # 系统性动作偏差（比例，+0.05=恒偏长 5%，模拟地板单向打滑；0=关闭）
 TURN_ERROR_STD = 5.0            # 转向角度误差标准差（度），0=无误差
-ANIM_PAUSE_SEC = 1            # 每步动画刷新间隔（秒）
+ANIM_PAUSE_SEC = 0.01            # 每步动画刷新间隔（秒）
 MAX_SIM_STEPS = 500            # 模拟最大动作步数，防止算法不收敛时无限循环卡死
 
 '''压测模式
@@ -112,14 +111,14 @@ LOG_FILE_PATH = os.path.join(RESULT_DIR, f"simulation_log_{_RESULT_TIMESTAMP}.tx
 # 2026-08-25 标定后决策算法只采用可靠动作集，小步动作耗时表项已移除
 ACTION_TIME_SEC = {
     "stand": 1.0,
-    "go_forward_one_step": 1.2,
-    "go_forward": 0.8,
-    "back_one_step": 1.2,
-    "back": 1.5,
+    "go_forward_one_step": 1.0,
+    "go_forward": 1.0,
+    "back_one_step": 1.0,
+    "back": 1.0,
     "left_move": 1.2,
     "right_move": 1.2,
-    "turn_left": 1.0,
-    "turn_right": 1.0,
+    "turn_left": 1.5,
+    "turn_right": 1.5,
 }
 LOCATE_TIME_SEC = 0.5  # 每次定位耗时（秒），可调。真实硬件拍照+检测+PnP约数秒
 
@@ -169,34 +168,34 @@ class SimState:
 
     def apply_forward(self, cm, action_name="forward"):
         """沿当前朝向前进 cm 厘米"""
-        actual_cm = cm * (1.0 + ACTION_ERROR_BIAS)
+        actual_cm = cm
         if ACTION_ERROR_STD > 0:
-            actual_cm = cm * (1.0 + ACTION_ERROR_BIAS + np.random.normal(0, ACTION_ERROR_STD))
+            actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
         self.pos = self.pos + actual_cm * self.orientation
         self._record(action_name)
 
     def apply_back(self, cm, action_name="back"):
         """沿当前朝向后退 cm 厘米"""
-        actual_cm = cm * (1.0 + ACTION_ERROR_BIAS)
+        actual_cm = cm
         if ACTION_ERROR_STD > 0:
-            actual_cm = cm * (1.0 + ACTION_ERROR_BIAS + np.random.normal(0, ACTION_ERROR_STD))
+            actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
         self.pos = self.pos - actual_cm * self.orientation
         self._record(action_name)
 
     def apply_left_move(self, cm, action_name="left_move"):
         """机体左侧横移 cm 厘米（左转为 [-oy[1], oy[0]]）"""
-        actual_cm = cm * (1.0 + ACTION_ERROR_BIAS)
+        actual_cm = cm
         if ACTION_ERROR_STD > 0:
-            actual_cm = cm * (1.0 + ACTION_ERROR_BIAS + np.random.normal(0, ACTION_ERROR_STD))
+            actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
         left_dir = np.array([-self.orientation[1], self.orientation[0]])
         self.pos = self.pos + actual_cm * left_dir
         self._record(action_name)
 
     def apply_right_move(self, cm, action_name="right_move"):
         """机体右侧横移 cm 厘米（右转为 [oy[1], -oy[0]]）"""
-        actual_cm = cm * (1.0 + ACTION_ERROR_BIAS)
+        actual_cm = cm
         if ACTION_ERROR_STD > 0:
-            actual_cm = cm * (1.0 + ACTION_ERROR_BIAS + np.random.normal(0, ACTION_ERROR_STD))
+            actual_cm = cm * (1.0 + np.random.normal(0, ACTION_ERROR_STD))
         right_dir = np.array([self.orientation[1], -self.orientation[0]])
         self.pos = self.pos + actual_cm * right_dir
         self._record(action_name)
@@ -263,23 +262,7 @@ class Visualizer:
         self.traj_line = None
         self.action_text = None
         self.step_markers = []  # 步骤序号标记列表
-        # A* 预期路径/路点层
-        self.route = None
-        self.waypoint_idx = 0
-        self.plan_line = None
-        self.plan_waypoint_markers = []
-        self.next_seg_line = None
-        self.next_wp_marker = None
         self.fig.canvas.manager.set_window_title("寻路算法模拟器")
-
-    def set_route(self, route):
-        """保存当前 A* 规划路径，并重置路点索引。"""
-        self.route = route
-        self.waypoint_idx = 0
-
-    def set_waypoint_idx(self, idx):
-        """更新当前正在前往的路点索引。"""
-        self.waypoint_idx = idx
 
     def _draw_static(self):
         ax = self.ax
@@ -328,52 +311,14 @@ class Visualizer:
         ax.annotate("出口", (100, 20), textcoords="offset points",
                     xytext=(8, 0), fontsize=9, color="purple")
 
-    def _draw_plan(self, sim_state):
-        """绘制 A* 预期路径与剩余路点（淡色，便于人工观察）。"""
-        ax = self.ax
-        if self.route is None:
-            return
-
-        # 完整规划路径：淡色虚线背景
-        wps = self.route.waypoints
-        if wps:
-            xs = [w.xy[0] for w in wps]
-            ys = [w.xy[1] for w in wps]
-            # 把起点也纳入，使线段从当前位置附近连到第一个路点
-            if sim_state.trajectory:
-                sx, sy = sim_state.trajectory[0]
-                xs = [sx] + xs
-                ys = [sy] + ys
-            self.plan_line, = ax.plot(xs, ys, "b:", linewidth=1.0, alpha=0.15)
-
-        # 剩余路点：淡色圆点
-        idx = max(0, min(self.waypoint_idx, len(wps) - 1))
-        for i, wp in enumerate(wps[idx:], start=idx):
-            marker, = ax.plot(wp.xy[0], wp.xy[1], "o", markersize=5,
-                              color="lime", alpha=0.4)
-            self.plan_waypoint_markers.append(marker)
-
-        # 当前目标：稍大的淡色圆圈
-        if wps:
-            wp = wps[idx]
-            self.next_wp_marker, = ax.plot(wp.xy[0], wp.xy[1], "o", markersize=11,
-                                           mfc="none", mec="cyan", alpha=0.5)
-
-            # 当前机器人位置 → 当前目标：淡虚线
-            cur = sim_state.pos
-            self.next_seg_line, = ax.plot([cur[0], wp.xy[0]], [cur[1], wp.xy[1]],
-                                          "c--", linewidth=1.5, alpha=0.5)
-
     def update(self, sim_state, action_text=""):
         """重绘动态层并刷新"""
         ax = self.ax
         # 移除旧的动态元素
-        for artist in [self.robot_arrow, self.robot_box, self.traj_line, self.action_text,
-                       self.plan_line, self.next_seg_line, self.next_wp_marker] + self.step_markers + self.plan_waypoint_markers:
+        for artist in [self.robot_arrow, self.robot_box, self.traj_line, self.action_text] + self.step_markers:
             if artist is not None:
                 artist.remove()
         self.step_markers = []
-        self.plan_waypoint_markers = []
         # 历史轨迹
         traj = np.array(sim_state.trajectory)
         self.traj_line, = ax.plot(traj[:, 0], traj[:, 1], "c-", linewidth=1.5, alpha=0.7)
@@ -399,8 +344,6 @@ class Visualizer:
                 bbox=dict(boxstyle="round,pad=0.1", facecolor="yellow", alpha=0.7, edgecolor="none"),
             )
             self.step_markers.append(marker)
-        # A* 预期路径/路点层
-        self._draw_plan(sim_state)
         # 机器人位置箭头
         pos = sim_state.pos
         ori = sim_state.orientation
