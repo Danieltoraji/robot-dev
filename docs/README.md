@@ -7,6 +7,7 @@
 > 退回提交 `80aedd6`）。A* 与“可执行直线-圆弧路径规划”实验代码已从工作区移除，
 > 方案文档保留在 `docs/关卡算法/可执行直线-圆弧路径规划方案.md` 作为历史留档。
 > 代码现状以 [`introduction.md`](关卡算法/introduction.md) 为准。
+> 2026-09 目录整理后：代码按 `core/ levels/ vision/ sim/ tools/` 分层，历史与产物在 `archive/`。
 
 ## 目录结构
 

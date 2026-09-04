@@ -42,16 +42,16 @@
 当前 goodluck 由三层组成：
 
 ```
-main.py                # 入口 + LEVELS 关卡注册表
+main.py                # 根入口 + LEVELS 关卡注册表
+core/robot_core.py     # RobotState：定位/动作/头部/几何等通用能力
 levels/goodluck.py     # 赛道数据、ROUTE 路点表、导航算法、run_level
-robot_core.py          # RobotState：定位/动作/头部/几何等通用能力
-goodluck_sim.py        # 模拟器：SimRobotState 继承重写 I/O
+sim/goodluck_sim.py    # 模拟器：SimRobotState 继承重写 I/O
 ```
 
-依赖方向：`main → level → core`，`goodluck_sim → level + core`。
+依赖方向：`main → level → core`，`sim/goodluck_sim → level + core`。
 
 - 关卡内只关心 goodluck 的墙、标签、路点和决策参数；
-- 通用定位、动作执行放在 `robot_core.py`，不掺入关卡规则。
+- 通用定位、动作执行放在 `core/robot_core.py`，不掺入关卡规则。
 
 ---
 
@@ -248,10 +248,10 @@ python main.py goodluck --end-at-last-stop
 
 ```bash
 # 默认使用 goodluck 关卡
-python goodluck_sim.py
+python -m sim.goodluck_sim
 
 # 无界面模式（Windows PowerShell）
-$env:MPLBACKEND="Agg"; python goodluck_sim.py
+$env:MPLBACKEND="Agg"; python -m sim.goodluck_sim
 ```
 
 ---

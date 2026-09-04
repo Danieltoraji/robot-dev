@@ -87,9 +87,9 @@
   <p>逐层列出每个类 / 方法 / 函数，标注「引用 →（它用了谁）」与「← 被引用（谁用了它）」</p>
   <div class="badges">
     <span class="badge" style="border-color:#c084fc">main.py 入口层</span>
-    <span class="badge" style="border-color:#38bdf8">robot_core.py 核心层</span>
+    <span class="badge" style="border-color:#38bdf8">core/robot_core.py 核心层</span>
     <span class="badge" style="border-color:#34d399">levels/goodluck.py 关卡层</span>
-    <span class="badge" style="border-color:#fbbf24">goodluck_sim.py 模拟层</span>
+    <span class="badge" style="border-color:#fbbf24">sim/goodluck_sim.py 模拟层</span>
   </div>
 </div>
 
@@ -100,15 +100,17 @@
       <li><a href="#overview">1. 分层总览与依赖图</a></li>
       <li><a href="#runtime">2. 运行时调用链（override 机制）</a></li>
       <li><a href="#main">3. main.py 入口层</a></li>
-      <li><a href="#core">4. robot_core.py 核心层</a></li>
+      <li><a href="#core">4. core/robot_core.py 核心层</a></li>
       <li><a href="#level">5. levels/goodluck.py 关卡层</a></li>
-      <li><a href="#sim">6. goodluck_sim.py 模拟层</a></li>
+      <li><a href="#sim">6. sim/goodluck_sim.py 模拟层</a></li>
       <li><a href="#matrix">7. 跨层引用矩阵</a></li>
       <li><a href="#trace">8. 一次导航的完整调用链</a></li>
     </ol>
   </nav>
 
   <main>
+
+    <div class="callout blue"><b>2026-09 目录整理：</b>实际代码路径已调整为 <code>core/robot_core.py</code>、<code>sim/goodluck_sim.py</code>，<code>main.py</code> 仍为根入口；下文分层逻辑不变。</div>
 
     <!-- 1 总览 -->
     <section id="overview">
@@ -135,12 +137,12 @@
           <text x="175" y="240" text-anchor="middle" fill="#94a3b8" font-size="11">tag_poses / WALLS / ROUTE / run_level</text>
 
           <rect x="570" y="170" width="270" height="84" rx="10" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
-          <text x="705" y="200" text-anchor="middle" fill="#38bdf8" font-size="14" font-weight="bold">robot_core.py</text>
+          <text x="705" y="200" text-anchor="middle" fill="#38bdf8" font-size="14" font-weight="bold">core/robot_core.py</text>
           <text x="705" y="220" text-anchor="middle" fill="#94a3b8" font-size="11">核心层 · RobotState 基础能力</text>
           <text x="705" y="240" text-anchor="middle" fill="#94a3b8" font-size="11">定位 / 动作 / 头部舵机 / 几何</text>
 
           <rect x="320" y="320" width="240" height="72" rx="10" fill="#1e293b" stroke="#fbbf24" stroke-width="2"/>
-          <text x="440" y="350" text-anchor="middle" fill="#fbbf24" font-size="14" font-weight="bold">goodluck_sim.py</text>
+          <text x="440" y="350" text-anchor="middle" fill="#fbbf24" font-size="14" font-weight="bold">sim/goodluck_sim.py</text>
           <text x="440" y="370" text-anchor="middle" fill="#94a3b8" font-size="11">模拟层 · 继承重写 I/O + 可视化</text>
 
           <!-- 箭头 -->
@@ -170,10 +172,10 @@
 
       <table>
         <tr><th>层</th><th>文件</th><th>依赖（import / 调用）</th><th>角色</th></tr>
-        <tr><td><span class="layer-badge l-entry">入口</span></td><td><code>main.py</code></td><td><code>robot_core</code>、<code>levels.goodluck</code></td><td>关卡注册与分发</td></tr>
-        <tr><td><span class="layer-badge l-core">核心</span></td><td><code>robot_core.py</code></td><td>仅硬件库（hiwonder / apriltag / cv2）</td><td>基础能力，关卡无关</td></tr>
-        <tr><td><span class="layer-badge l-level">关卡</span></td><td><code>levels/goodluck.py</code></td><td><code>robot_core</code>（RobotState、distance_point_to_rect、HEAD_CENTER）</td><td>本关卡数据 + 算法</td></tr>
-        <tr><td><span class="layer-badge l-sim">模拟</span></td><td><code>goodluck_sim.py</code></td><td><code>robot_core</code>、<code>levels.goodluck</code></td><td>算法验证环境</td></tr>
+        <tr><td><span class="layer-badge l-entry">入口</span></td><td><code>main.py</code></td><td><code>core.robot_core</code>、<code>levels.goodluck</code></td><td>关卡注册与分发</td></tr>
+        <tr><td><span class="layer-badge l-core">核心</span></td><td><code>core/robot_core.py</code></td><td>仅硬件库（hiwonder / apriltag / cv2）</td><td>基础能力，关卡无关</td></tr>
+        <tr><td><span class="layer-badge l-level">关卡</span></td><td><code>levels/goodluck.py</code></td><td><code>core.robot_core</code>（RobotState、distance_point_to_rect、HEAD_CENTER）</td><td>本关卡数据 + 算法</td></tr>
+        <tr><td><span class="layer-badge l-sim">模拟</span></td><td><code>sim/goodluck_sim.py</code></td><td><code>core.robot_core</code>、<code>levels.goodluck</code></td><td>算法验证环境</td></tr>
       </table>
     </section>
 
@@ -221,7 +223,7 @@
 
     <!-- 4 core -->
     <section id="core">
-      <h2 class="sec">4. robot_core.py —— 核心层</h2>
+      <h2 class="sec">4. core/robot_core.py —— 核心层</h2>
 
       <h3>4.1 模块级常量</h3>
       <table>
@@ -380,7 +382,7 @@
 
     <!-- 6 sim -->
     <section id="sim">
-      <h2 class="sec">6. goodluck_sim.py —— 模拟层</h2>
+      <h2 class="sec">6. sim/goodluck_sim.py —— 模拟层</h2>
 
       <h3>6.1 类 SimState（运动模型）</h3>
       <table>
@@ -453,14 +455,14 @@
       <h2 class="sec">7. 跨层引用矩阵</h2>
       <p>从「调用方 → 被调用方」视角汇总跨层引用（✔ 表示存在该方向的 import / 调用）。</p>
       <table>
-        <tr><th>被引用方 ↓ / 调用方 →</th><th>main.py</th><th>robot_core.py</th><th>levels/goodluck.py</th><th>goodluck_sim.py</th></tr>
-        <tr><td><b>robot_core.py</b></td><td>✔ import RobotState</td><td>（内部 self 调用）</td><td>✔ import RobotState / distance_point_to_rect / HEAD_CENTER；✔ 调 state.locate_with_retry / run_action / set_head</td><td>✔ import RobotState / HEAD_*；✔ 继承重写 3 方法</td></tr>
+        <tr><th>被引用方 ↓ / 调用方 →</th><th>main.py</th><th>core/robot_core.py</th><th>levels/goodluck.py</th><th>sim/goodluck_sim.py</th></tr>
+        <tr><td><b>core/robot_core.py</b></td><td>✔ import RobotState</td><td>（内部 self 调用）</td><td>✔ import RobotState / distance_point_to_rect / HEAD_CENTER；✔ 调 state.locate_with_retry / run_action / set_head</td><td>✔ import RobotState / HEAD_*；✔ 继承重写 3 方法</td></tr>
         <tr><td><b>levels/goodluck.py</b></td><td>✔ import + 调 run_level</td><td>✘（core 不依赖关卡）</td><td>（内部函数互调）</td><td>✔ import gl + 调 run_level / tag_poses / WALLS / ROUTE / 动作常量</td></tr>
         <tr><td><b>main.py</b></td><td>——</td><td>✘</td><td>✘</td><td>✘（未复用 LEVELS）</td></tr>
       </table>
       <div class="callout blue">
-        <b>关键结论：</b><code>robot_core.py</code> 对关卡层<b>零依赖</b>（✔ 只在「被依赖」方向出现），说明 core 的方向正确；
-        但 <code>goodluck_sim.py</code> 对关卡层有大量 <code>gl.*</code> 依赖，且未复用 <code>main.py</code> 的 <code>LEVELS</code> 注册表，是当前最大的跨层耦合点。
+        <b>关键结论：</b><code>core/robot_core.py</code> 对关卡层<b>零依赖</b>（✔ 只在「被依赖」方向出现），说明 core 的方向正确；
+        但 <code>sim/goodluck_sim.py</code> 对关卡层有大量 <code>gl.*</code> 依赖，且未复用 <code>main.py</code> 的 <code>LEVELS</code> 注册表，是当前最大的跨层耦合点。
       </div>
     </section>
 
@@ -496,7 +498,7 @@
 
     <section>
       <div class="card" style="text-align:center; color:var(--muted);">
-        <p style="margin:0;">robot-dev 分层方法与引用说明 — 基于对 main.py / robot_core.py / levels/goodluck.py / goodluck_sim.py 的逐行梳理生成。</p>
+        <p style="margin:0;">robot-dev 分层方法与引用说明 — 基于对 main.py / core/robot_core.py / levels/goodluck.py / sim/goodluck_sim.py 的逐行梳理生成。</p>
       </div>
     </section>
 
