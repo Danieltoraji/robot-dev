@@ -1,5 +1,8 @@
 /archive/result/
 
+# release 打包产物（不入库）
+/release/
+
 # Python 缓存
 __pycache__/
 *.pyc
