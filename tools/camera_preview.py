@@ -7,16 +7,16 @@
 
 两种模式：
   1. GUI 模式（默认，有桌面环境时）：
-       python camera_preview.py
+       python -m tools.camera_preview
        打开 OpenCV 窗口，按 s 保存截图，按 q / ESC 退出。
   2. 网页流模式（适合 SSH / 无显示器）：
-       python camera_preview.py --stream
+       python -m tools.camera_preview --stream
        或直接运行，脚本在 Linux 无 DISPLAY 时自动切换为网页流模式。
        然后浏览器打开 http://<树莓派IP>:8080 即可实时查看。
 
 可选 AprilTag 叠加：
-    python camera_preview.py --apriltag
-    python camera_preview.py --stream --apriltag
+    python -m tools.camera_preview --apriltag
+    python -m tools.camera_preview --stream --apriltag
 """
 
 import argparse
@@ -26,6 +26,12 @@ import threading
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# 允许直接运行本工具
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.paths import RESULT_DIR
 
 import cv2
 import numpy as np
@@ -124,7 +130,7 @@ def run_gui(args, detector):
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
 
-    os.makedirs("result", exist_ok=True)
+    os.makedirs(RESULT_DIR, exist_ok=True)
     print("[camera_preview] 按 s 保存截图，按 q / ESC 退出")
 
     prev_time = time.time()
@@ -158,12 +164,12 @@ def run_gui(args, detector):
                 break
             if key == ord("s"):
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                path = os.path.join("result", f"camera_snapshot_{timestamp}.png")
+                path = os.path.join(RESULT_DIR, f"camera_snapshot_{timestamp}.png")
                 cv2.imwrite(path, frame)
                 print(f"[camera_preview] 截图已保存: {path}")
     except cv2.error as e:
         print(f"[camera_preview] GUI 模式失败（可能没有显示器）: {e}")
-        print("请使用: python camera_preview.py --stream")
+        print("请使用: python -m tools.camera_preview --stream")
     finally:
         cap.release()
         cv2.destroyAllWindows()

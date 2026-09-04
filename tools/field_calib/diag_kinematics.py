@@ -16,13 +16,20 @@ diag_kinematics.py —— 转头运动学链诊断（阶段3 辅助）
     若位置残差大 → 偏心模型缺项（如 t_H 转轴偏移）或机体真的动了。
 
 用法：
-    python diag_kinematics.py --data result/multiview_20260825_201411.npz
+    python -m tools.field_calib.diag_kinematics --data archive/result/multiview_20260825_201411.npz
 """
 
 import argparse
 import json
 
+import os
+import sys
+
 import numpy as np
+
+# 允许直接运行本文件
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 try:
     import cv2
@@ -30,7 +37,7 @@ except Exception:
     cv2 = None
 
 from levels.goodluck import tag_poses
-from multiview_pose import K, DIST
+from core.multiview_pose import K, DIST
 
 
 def load_npz(path):

@@ -9,20 +9,20 @@ collect_multi_view.py —— 阶段2：真机多帧定位数据采集（A 方案
     3. 估算目标方位角 θ₀（头转角 + 像素横向偏移换算）；
     4. 精拍阶段：以 θ₀ 为中心摆动 ±--sweep（默认 15°）拍 3 帧
        （超出舵机实测行程 ±90° 时整体平移回界内）；
-    5. 全部帧的角点观测落盘 result/multiview_<时间戳>.npz，
-       供 optimize_multi_view.py 离线联合求解。
+    5. 全部帧的角点观测落盘 archive/result/multiview_<时间戳>.npz，
+       供 tools/field_calib/optimize_multi_view.py 离线联合求解。
 
 用法（机器人项目根目录）：
-    python collect_multi_view.py
-    python collect_multi_view.py --sweep 9
-    python collect_multi_view.py --scan-left 2250 --scan-right 750   # 发现档位可调
+    python -m tools.field_calib.collect_multi_view
+    python -m tools.field_calib.collect_multi_view --sweep 9
+    python -m tools.field_calib.collect_multi_view --scan-left 2250 --scan-right 750   # 发现档位可调
 
 发现阶段档位：
     默认右转 600 / 左转 2400（±81°，舵机实测行程 ±90° 内留 9° 余量）；
     可分别用 --scan-right / --scan-left 调整（脉宽 500~2500 范围内）。
 
 输出：
-    result/multiview_<时间戳>.npz：
+    archive/result/multiview_<时间戳>.npz：
       pulses      (N,)      每帧头部脉宽
       thetas_nom  (N,)      每帧标称转角（度）
       frame_idx   (K,)      每条角点记录所属帧
@@ -34,11 +34,17 @@ collect_multi_view.py —— 阶段2：真机多帧定位数据采集（A 方案
 import argparse
 import json
 import os
+import sys
 from datetime import datetime
 
 import numpy as np
 
-from robot_core import RobotState, HEAD_CENTER, HEAD_RIGHT, HEAD_LEFT, TAG_CORNER_PERM
+# 允许直接运行本文件
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core.paths import RESULT_DIR
+from core.robot_core import RobotState, HEAD_CENTER, HEAD_RIGHT, HEAD_LEFT, TAG_CORNER_PERM
 from levels.goodluck import tag_poses
 
 FX = 1.944903664123011e03   # 相机内参 fx（像素→角度换算）
@@ -104,9 +110,9 @@ def main():
 
     scan = [("回正", HEAD_CENTER), ("右转", args.scan_right), ("左转", args.scan_left)]
 
-    os.makedirs("result", exist_ok=True)
+    os.makedirs(RESULT_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    npz_path = os.path.join("result", f"multiview_{ts}.npz")
+    npz_path = os.path.join(RESULT_DIR, f"multiview_{ts}.npz")
 
     state = RobotState(tag_poses=tag_poses)
     state.set_head(HEAD_CENTER)
@@ -210,7 +216,7 @@ def main():
     print("\n" + "=" * 70)
     print(f"采集完成: {len(frames)} 帧, {len(t_ids)} 条角点观测")
     print(f"已保存: {npz_path}")
-    print("下一步: python optimize_multi_view.py --data " + npz_path)
+    print("下一步: python -m tools.field_calib.optimize_multi_view --data " + npz_path)
     print("=" * 70)
 
 

@@ -11,9 +11,9 @@ verify_corner_order.py —— 真机验证 AprilTag 角点顺序（P0 验证脚�
     与手工测量的真实相机位姿对比，跑多组后投票得出正确排列。
 
 用法（在机器人项目根目录）：
-    python verify_corner_order.py               # 默认 3 组
-    python verify_corner_order.py --n 5         # 跑 5 组
-    python verify_corner_order.py --photo /home/pi/Pictures/xxx.jpg  # 分析已存照片
+    python -m tools.field_calib.verify_corner_order               # 默认 3 组
+    python -m tools.field_calib.verify_corner_order --n 5         # 跑 5 组
+    python -m tools.field_calib.verify_corner_order --photo /home/pi/Pictures/xxx.jpg  # 分析已存照片
 
 每组步骤：
     1. 摆好机器人到任意可测位姿（尽量同时看到 ≥2 个标签）；
@@ -23,7 +23,7 @@ verify_corner_order.py —— 真机验证 AprilTag 角点顺序（P0 验证脚�
 
 输出：
     每组明细 + 汇总投票表 + 推荐 TAG_CORNER_PERM；
-    日志同步保存 result/verify_corner_order_<时间戳>.txt。
+    日志同步保存 archive/result/verify_corner_order_<时间戳>.txt。
 
 注意：
     - 真值量「相机镜头中心」而不是机器人中心，最准；
@@ -38,9 +38,15 @@ from datetime import datetime
 
 import numpy as np
 
+# 允许直接运行本文件
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core.paths import RESULT_DIR
+
 try:
     import cv2
-    from robot_core import RobotState, CAMERA_INTRINSIC, CAMERA_DISTORTION
+    from core.robot_core import RobotState, CAMERA_INTRINSIC, CAMERA_DISTORTION
     from levels.goodluck import tag_poses
 except Exception as e:
     print(f"[verify] 导入失败: {e}")
@@ -391,9 +397,9 @@ def main():
                         help="分析已存照片（单张，忽略 --n；需输入拍照时的真值）")
     args = parser.parse_args()
 
-    os.makedirs("result", exist_ok=True)
+    os.makedirs(RESULT_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join("result", f"verify_corner_order_{ts}.txt")
+    log_path = os.path.join(RESULT_DIR, f"verify_corner_order_{ts}.txt")
     tee = TeeWriter(log_path)
     old_stdout = sys.stdout
     sys.stdout = tee

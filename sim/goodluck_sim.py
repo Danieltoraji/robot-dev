@@ -9,7 +9,7 @@
     set_head 三个 I/O 方法为桩函数（更新模拟器状态 + 刷新可视化），
     算法函数通过 state.xxx() 调用命中桩函数，无需 monkey-patch。
 
-运行：python goodluck_sim.py
+运行：python -m sim.goodluck_sim
 """
 
 import os
@@ -29,6 +29,10 @@ from matplotlib.patches import Rectangle
 from matplotlib.transforms import Affine2D
 from datetime import datetime
 
+# 允许直接 `python sim/goodluck_sim.py` 运行
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # 配置中文字体（Windows: Microsoft YaHei / SimHei；缺失则回退默认）
 for _font in ["Microsoft YaHei", "SimHei", "WenQuanYi Micro Hei", "Arial Unicode MS"]:
     try:
@@ -39,12 +43,13 @@ for _font in ["Microsoft YaHei", "SimHei", "WenQuanYi Micro Hei", "Arial Unicode
 matplotlib.rcParams["axes.unicode_minus"] = False  # 负号显示
 
 # 导入通用层与关卡层
-from robot_core import (RobotState, HEAD_CENTER, HEAD_RIGHT, HEAD_LEFT,
+from core.robot_core import (RobotState, HEAD_CENTER, HEAD_RIGHT, HEAD_LEFT,
                         HEAD_MOVE_TIME_MS, SERVO_DEG_PER_US,
                         solve_pnp_pose, pnp_pose_problems,
                         CAMERA_WIDTH, CAMERA_HEIGHT)
-from multiview_pose import camera_pose, camera_pose_tilted, project_points
+from core.multiview_pose import camera_pose, camera_pose_tilted, project_points
 from levels import goodluck as gl
+from core.paths import RESULT_DIR
 
 
 # =====================================================================
@@ -94,9 +99,9 @@ ANIM_PAUSE_SEC = 0.01            # 每步动画刷新间隔（秒）
 MAX_SIM_STEPS = 500            # 模拟最大动作步数，防止算法不收敛时无限循环卡死
 '''
 
-# 输出目录与文件（result/ 子目录，文件名含日期时间）
+# 输出目录与文件（archive/result，文件名含日期时间）
 _RESULT_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
-RESULT_DIR = "result"
+# RESULT_DIR 来自 core.paths（archive/result）
 TRAJECTORY_PNG_PATH = os.path.join(RESULT_DIR, f"trajectory_{_RESULT_TIMESTAMP}.png")
 
 # 机器人边界框尺寸（以几何中心为中心）
@@ -616,12 +621,12 @@ class SimRobotState(RobotState):
 
     @staticmethod
     def _K():
-        from camera_config import CAMERA_INTRINSIC
+        from core.camera_config import CAMERA_INTRINSIC
         return CAMERA_INTRINSIC
 
     @staticmethod
     def _D():
-        from camera_config import CAMERA_DISTORTION
+        from core.camera_config import CAMERA_DISTORTION
         return CAMERA_DISTORTION
 
     def _locate_pose_once_corners(self, head_pulse):

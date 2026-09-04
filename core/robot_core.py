@@ -44,7 +44,7 @@ except Exception:
 
 # 相机内参/头部舵机/PnP门控常量：单一真源在 camera_config.py，
 # 此处导入以保持 robot_core.CAMERA_INTRINSIC 等既有引用方式不变。
-from camera_config import (
+from core.camera_config import (
     CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_INTRINSIC, CAMERA_DISTORTION,
     HEAD_CENTER, HEAD_RIGHT, HEAD_LEFT, HEAD_WIDE_RIGHT, HEAD_WIDE_LEFT,
     HEAD_MOVE_TIME_MS, HEAD_MOVE_TIME_MIN_MS, SERVO_DEG_PER_US, PITCH_UP_PULSE,
@@ -52,6 +52,8 @@ from camera_config import (
     PNP_ORI_Z_MAX, PNP_ORI_XY_MIN, PNP_REPROJ_ERR_MAX_PX, reproj_gate_px,
     AMBIGUITY_SEP_MIN_CM, EXPECT_SELECT_MARGIN_CM, EXPECT_RADIUS_MARGIN_CM,
 )
+
+from core.paths import RESULT_DIR
 
 
 # =====================================================================
@@ -62,8 +64,8 @@ MAX_LOCATE_RETRIES = 5  # 定位失败最大重试次数
 # 属于关卡层，由各关卡在 levels/<level>.py 中自行定义，不要放回 core，
 # 以免出现「core 与关卡各持一份」的双重真相、造成跨关卡混乱。
 
-# 多视角联合定位外参文件（survey_field.py 产出；缺失时降级为缺省外参）
-MULTIVIEW_EXTRINSICS_PATH = os.path.join("result", "multiview_extrinsics.json")
+# 多视角联合定位外参文件（tools/field_calib/survey_field.py 产出；缺失时降级为缺省外参）
+MULTIVIEW_EXTRINSICS_PATH = os.path.join(RESULT_DIR, "multiview_extrinsics.json")
 
 # =====================================================================
 # 位置连续性守卫（2026-08-30，依据真机 trace 一次 12cm 跳变坏定位）
@@ -83,10 +85,10 @@ CONTINUITY_MARGIN_CM = 5.0  # 预算之外的额外裕度（定位噪声 + 动�
 # AprilTag 角点顺序（P0 修复 · 真机实测确认）
 # =====================================================================
 # tag_poses 世界坐标顺序约定（levels/goodluck.py）：左上→右上→右下→左下。
-# 2026-08-24 真机实测（verify_corner_order.py，标签 36/37/38/39 共 6 组观测，
+# 2026-08-24 真机实测（tools/field_calib/verify_corner_order.py，标签 36/37/38/39 共 6 组观测，
 # 含正对与斜视角）确认：apriltag 库返回的 r.corners 顺序与 tag_poses 完全一致，
 # 即恒等映射。此常量把该事实显式化，防止换库/换版本/重贴标签后再次踩坑；
-# 若未来顺序变化，只需修改此常量并重跑 verify_corner_order.py 验证。
+# 若未来顺序变化，只需修改此常量并重跑 tools/field_calib/verify_corner_order.py 验证。
 TAG_CORNER_PERM = np.array([0, 1, 2, 3], dtype=np.int64)
 
 
@@ -187,7 +189,7 @@ class RobotState:
         self.tag_poses = tag_poses if tag_poses is not None else {}
         # 多视角外参：优先读 survey_field.py 标定产物；缺失则用缺省值
         # （e=0 即「光心=机体中心」假设），首次联合求解时打印告警
-        from multiview_pose import load_extrinsics, normalize_extrinsics
+        from core.multiview_pose import load_extrinsics, normalize_extrinsics
         ext = load_extrinsics(MULTIVIEW_EXTRINSICS_PATH)
         self.multiview_extrinsics = normalize_extrinsics(ext)
         self._extrinsics_from_file = ext is not None
@@ -427,7 +429,7 @@ class RobotState:
             # 共面帧（含单标签）——C3 三层歧义治理（2026-08-30）。
             # 普查依据：共面帧 75% 门控后仅一支活（零成本）；双活时 ITERATIVE
             # 落错支 1/4，须显式裁决。
-            from multiview_pose import frame_pose_candidates, rot_from_rvec
+            from core.multiview_pose import frame_pose_candidates, rot_from_rvec
             live = []
             for rvec, tvec, err in frame_pose_candidates(objlist, imglist):
                 R = rot_from_rvec(rvec)
@@ -501,7 +503,7 @@ class RobotState:
         语义与单帧路径一致：current_position=光心地面投影，orientation=机体朝向。
         """
         try:
-            from multiview_pose import solve_joint_3dof, gate_solution, \
+            from core.multiview_pose import solve_joint_3dof, gate_solution, \
                 camera_optical_center, body_orientation_xy
         except Exception as e:
             print(f"[联合定位] multiview_pose 导入失败: {e}")

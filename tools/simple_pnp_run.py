@@ -18,8 +18,8 @@ simple_pnp_run.py —— 独立基线程序：最简单的 PnP 定位 + 现行�
       的定位结果可能偶发大偏差——这是"最简单"的代价，属预期。
 
 用法（机器人项目根目录）：
-    python simple_pnp_run.py
-    python simple_pnp_run.py --end-at-last-stop   # 到停靠点4 [74,30] 结束
+    python -m tools.simple_pnp_run
+    python -m tools.simple_pnp_run --end-at-last-stop   # 到停靠点4 [74,30] 结束
 """
 
 import sys

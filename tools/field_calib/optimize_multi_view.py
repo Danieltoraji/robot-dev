@@ -10,10 +10,10 @@ optimize_multi_view.py —— 阶段3：真机采集数据 离线联合求解（
 输出：
     机体位姿 / 光心偏心 / 俯仰 求解结果与残差 RMS；
     与单帧 PnP 逐帧对比（位置/光轴误差）——检验联合解是否压掉了歧义；
-    标定结果保存 result/multiview_calib_<时间戳>.json（供阶段4集成）。
+    标定结果保存 archive/result/multiview_calib_<时间戳>.json（供阶段4集成）。
 
 用法：
-    python optimize_multi_view.py --data result/multiview_<时间戳>.npz
+    python -m tools.field_calib.optimize_multi_view --data archive/result/multiview_<时间戳>.npz
 """
 
 import argparse
@@ -29,11 +29,16 @@ try:
 except Exception:
     cv2 = None
 
-from robot_core import TAG_CORNER_PERM
+# 允许直接运行本文件
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core.paths import RESULT_DIR
+from core.robot_core import TAG_CORNER_PERM
 from levels.goodluck import tag_poses
 
 # 几何模型与参数定义已收敛到 multiview_pose.py（单一实现）
-from multiview_pose import (
+from core.multiview_pose import (
     camera_pose, project_points, residual,
     K, DIST, P_NAMES, P_INDEX, P_UNIT, P_BOUNDS,
 )
@@ -356,9 +361,9 @@ def main():
         print("    位置差大 = 单帧歧义明显；位置差小 = 两者一致。")
 
     # ---- 保存标定结果 ----
-    os.makedirs("result", exist_ok=True)
+    os.makedirs(RESULT_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    calib_path = os.path.join("result", f"multiview_calib_{ts}.json")
+    calib_path = os.path.join(RESULT_DIR, f"multiview_calib_{ts}.json")
     calib = {
         "x_B": float(p_est[0]), "y_B": float(p_est[1]),
         "phi_deg": float(p_est[2]),

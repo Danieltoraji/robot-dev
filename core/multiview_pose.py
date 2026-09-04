@@ -3,10 +3,10 @@
 multiview_pose.py —— 多视角联合位姿求解共享模块（单一实现，多方复用）
 
 使用方：
-  - synthetic_multi_view.py / optimize_multi_view.py / diag_kinematics.py（离线工具）
-  - survey_field.py（场地自标定 Bundle Adjustment）
-  - robot_core.py（运行时三档联解）
-  - goodluck_sim.py（角点级仿真桩）
+  - tools/field_calib/synthetic_multi_view.py / tools/field_calib/optimize_multi_view.py / tools/field_calib/diag_kinematics.py（离线工具）
+  - tools/field_calib/survey_field.py（场地自标定 Bundle Adjustment）
+  - core/robot_core.py（运行时三档联解）
+  - sim/goodluck_sim.py（角点级仿真桩）
 
 依赖约束：本模块会被 robot_core 在机器人上运行时导入，
 因此只依赖 numpy/scipy/cv2 与 camera_config，
@@ -39,7 +39,7 @@ try:
 except Exception:
     cv2 = None
 
-from camera_config import (
+from core.camera_config import (
     CAMERA_INTRINSIC, CAMERA_DISTORTION,
     PNP_FIELD_MIN, PNP_FIELD_MAX, PNP_CAM_Z_MIN, PNP_CAM_Z_MAX,
     PNP_ORI_Z_MAX, PNP_ORI_XY_MIN, PNP_REPROJ_ERR_MAX_PX,

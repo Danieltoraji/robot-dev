@@ -15,7 +15,8 @@ import os
 import time
 from datetime import datetime
 
-from robot_core import RobotState
+from core.paths import RESULT_DIR
+from core.robot_core import RobotState
 
 
 class TeeWriter:
@@ -40,7 +41,7 @@ class TeeWriter:
 class TraceRecorder:
     """记录真机运行过程中的动作和定位结果"""
 
-    def __init__(self, output_dir="result"):
+    def __init__(self, output_dir=RESULT_DIR):
         os.makedirs(output_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_path = os.path.join(output_dir, f"real_trace_{timestamp}.txt")

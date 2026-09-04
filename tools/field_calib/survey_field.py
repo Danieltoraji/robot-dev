@@ -29,12 +29,12 @@ survey_field.py —— 场地自标定：多站位联合 Bundle Adjustment 精�
     尽量让每个标签出现在 ≥2 个站位。
 
 用法：
-    python survey_field.py result/multiview_A.npz result/multiview_B.npz ...
-    python survey_field.py --selftest        # PC 端合成数据自检，无需真机数据
+    python -m tools.field_calib.survey_field archive/result/multiview_A.npz archive/result/multiview_B.npz ...
+    python -m tools.field_calib.survey_field --selftest   # PC 端合成数据自检，无需真机数据
 
 输出：
-    result/tag_poses_refined.json + 可直接粘贴回 levels/goodluck.py 的代码块
-    result/multiview_extrinsics.json（供运行时三档联解使用）
+    archive/result/tag_poses_refined.json + 可直接粘贴回 levels/goodluck.py 的代码块
+    archive/result/multiview_extrinsics.json（供运行时三档联解使用）
     逐标签/逐站位残差报告（揪出贴歪/量错的单个标签）
 """
 
@@ -46,14 +46,20 @@ from datetime import datetime
 
 import numpy as np
 
+# 允许直接运行本文件
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core.paths import RESULT_DIR
+
 try:
     from scipy.optimize import least_squares
     HAS_SCIPY = True
 except Exception:
     HAS_SCIPY = False
 
-from camera_config import CAMERA_INTRINSIC, CAMERA_DISTORTION, PITCH_UP_PULSE
-from multiview_pose import (
+from core.camera_config import CAMERA_INTRINSIC, CAMERA_DISTORTION, PITCH_UP_PULSE
+from core.multiview_pose import (
     camera_pose, camera_pose_tilted, project_points, frame_pose_candidates,
     rot_from_rvec, normalize_extrinsics, EXTRINSICS_KEYS,
 )
@@ -895,7 +901,7 @@ def main():
                         help="地面(z=0)标签残差权重（擦视角噪声大可调 0.3~0.5）")
     parser.add_argument("--loss", type=str, default="soft_l1",
                         help="scipy loss: soft_l1/huber/linear（默认 soft_l1）")
-    parser.add_argument("--out", type=str, default="result", help="输出目录")
+    parser.add_argument("--out", type=str, default=RESULT_DIR, help="输出目录")
     args = parser.parse_args()
 
     if not HAS_SCIPY:

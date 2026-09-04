@@ -15,7 +15,8 @@ RoboTrack 主入口
 
 import sys
 
-from robot_core import RobotState
+from core.paths import RESULT_DIR
+from core.robot_core import RobotState
 from levels import goodluck as level_goodluck
 
 
@@ -23,8 +24,8 @@ from levels import goodluck as level_goodluck
 # 真机调试输出开关
 # =====================================================================
 # True 时，直接运行 python main.py goodluck 也会：
-#   - 把详细日志输出到 result/real_trace_*.txt
-#   - 把定位轨迹保存为 result/real_trajectory_*.png
+#   - 把详细日志输出到 archive/result/real_trace_*.txt
+#   - 把定位轨迹保存为 archive/result/real_trajectory_*.png
 # False 时保持原有真机行为，不引入额外依赖。
 TRACE_ENABLED = False
 
@@ -64,9 +65,9 @@ def main():
     trace_recorder = None
 
     if TRACE_ENABLED:
-        from trace import TraceRecorder, TraceRobotState, TeeWriter, save_trajectory_png
+        from core.trace import TraceRecorder, TraceRobotState, TeeWriter, save_trajectory_png
 
-        trace_recorder = TraceRecorder(output_dir="result")
+        trace_recorder = TraceRecorder(output_dir=RESULT_DIR)
         state = TraceRobotState(tag_poses=level["tag_poses"], recorder=trace_recorder)
         tee = TeeWriter(trace_recorder.log_path, original_stdout)
         sys.stdout = tee

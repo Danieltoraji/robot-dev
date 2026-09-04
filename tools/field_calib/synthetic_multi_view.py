@@ -16,8 +16,8 @@ synthetic_multi_view.py —— 阶段1：多帧联合位姿求解（A 方案）�
     D 不同墙（非共面） 帧间观测来自两个墙面（概念验证非共面增益）
 
 用法（需 numpy + scipy；TonyPi 已确认有 scipy）：
-    python synthetic_multi_view.py
-    python synthetic_multi_view.py --noise 0.5 --seed 2
+    python -m tools.field_calib.synthetic_multi_view
+    python -m tools.field_calib.synthetic_multi_view --noise 0.5 --seed 2
 
 输出：
     每场景：真实/初值/求解参数表、位置/朝向/偏心/俯仰恢复误差、残差 RMS；
@@ -26,7 +26,14 @@ synthetic_multi_view.py —— 阶段1：多帧联合位姿求解（A 方案）�
 
 import argparse
 
+import os
+import sys
+
 import numpy as np
+
+# 允许直接运行本文件
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 try:
     from scipy.optimize import least_squares
@@ -42,7 +49,7 @@ except Exception:
 # 正向几何模型（camera_pose/project_points/residual/solve_joint）、参数表与
 # 相机内参已收敛到 multiview_pose.py（单一实现）；本脚本保留合成场景、
 # 判定与报告逻辑，作为阶段1合成验证器。
-from multiview_pose import (
+from core.multiview_pose import (
     camera_pose, project_points, residual, solve_joint,
     K, DIST, P_NAMES, P_INDEX, P_UNIT, P_BOUNDS,
 )

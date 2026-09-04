@@ -15,7 +15,7 @@ import time
 from collections import namedtuple
 import numpy as np
 
-from robot_core import RobotState, distance_point_to_rect, HEAD_CENTER
+from core.robot_core import RobotState, distance_point_to_rect, HEAD_CENTER
 
 
 # =====================================================================

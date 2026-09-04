@@ -3,7 +3,7 @@
 run_sim_variants.py —— 以不同噪声配置批量跑模拟器（不改 goodluck_sim.py 源码）
 
 用法：
-    python tools/run_sim_variants.py ideal|noisy|stress [次数]
+    python -m sim.run_sim_variants ideal|noisy|stress [次数]
     ideal  : 全零噪声（验证决策逻辑正确性）
     noisy  : 默认噪声（定位 0.5cm/1.0°，动作 ±10%，转向 5°）
     stress : 压测噪声（定位 2.4cm/5.0°，动作 ±10%，转向 8°）
@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import goodluck_sim as sim
+from sim import goodluck_sim as sim
 
 VARIANTS = {
     "ideal":  dict(LOCATE_NOISE_STD=0.0, LOCATE_ANGLE_NOISE_STD=0.0,

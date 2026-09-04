@@ -15,12 +15,12 @@ head_compensation_check.py —— 头部转动定位补偿有效性验证（真�
     reproj > 2.0px 的档位判为坏解（2026-08-25 实测分隔线），不参与判定。
 
 用法（机器人项目根目录）：
-    python head_compensation_check.py            # 每档位 1 次
-    python head_compensation_check.py --repeat 3 # 每档位 3 次取中值
+    python -m tools.field_calib.head_compensation_check            # 每档位 1 次
+    python -m tools.field_calib.head_compensation_check --repeat 3 # 每档位 3 次取中值
 
 输出：
     每个头位一行数据（先），再输出结论（后）；
-    日志保存 result/head_comp_check_<时间戳>.txt
+    日志保存 archive/result/head_comp_check_<时间戳>.txt
 
 判定标准（汇总段结论）：
     朝向差/转角 比例 r = median(朝向差 / |标称转角|)：
@@ -37,9 +37,15 @@ from datetime import datetime
 
 import numpy as np
 
+# 允许直接运行本文件
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core.paths import RESULT_DIR
+
 try:
     import cv2
-    from robot_core import (RobotState, HEAD_CENTER, HEAD_RIGHT, HEAD_LEFT,
+    from core.robot_core import (RobotState, HEAD_CENTER, HEAD_RIGHT, HEAD_LEFT,
                             TAG_CORNER_PERM, solve_pnp_pose, pnp_pose_problems)
     from levels.goodluck import tag_poses
 except Exception as e:
@@ -158,9 +164,9 @@ def main():
     args = parser.parse_args()
     repeat = max(1, args.repeat)
 
-    os.makedirs("result", exist_ok=True)
+    os.makedirs(RESULT_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join("result", f"head_comp_check_{ts}.txt")
+    log_path = os.path.join(RESULT_DIR, f"head_comp_check_{ts}.txt")
     tee = TeeWriter(log_path)
     old_stdout = sys.stdout
     sys.stdout = tee

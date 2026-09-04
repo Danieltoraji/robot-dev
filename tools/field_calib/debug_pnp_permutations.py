@@ -3,7 +3,7 @@
 一键诊断：AprilTag 角点顺序 + 通用 solvePnP
 
 在机器人上直接运行：
-    python debug_pnp_permutations.py
+    python -m tools.field_calib.debug_pnp_permutations
 
 它会：
   1. 拍一张照片
