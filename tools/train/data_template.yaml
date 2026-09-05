@@ -1,0 +1,19 @@
+# 足球/球门检测数据集配置（YOLO detect 格式）
+#
+# 用法：复制到容器云数据集根目录 datasets/football_goal/data.yaml，
+#       并把 path 改成容器内实际路径。目录结构：
+#         datasets/football_goal/
+#         ├── data.yaml          # 本文件
+#         ├── images/{train,val,test}/
+#         └── labels/{train,val,test}/
+# 划分用 tools/train/split_dataset.py 生成；划分原则见
+# 《docs/视觉能力/足球与球门识别训练部署方案.md》§3.4。
+
+path: /workspace/datasets/football_goal   # 容器内数据集根目录（按实际修改）
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: football   # 标准黑白足球：框住整个球体，外接框贴合球边缘
+  1: goal       # 白色铁网球门：框住门框+网体整体；框底边中心=射门瞄准参考
