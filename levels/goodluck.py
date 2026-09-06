@@ -65,12 +65,12 @@ ORIENT_FREEZE_DIST_CM = 10.0  # 动态朝向冻结距离阈值（cm）：距目�
 # 仅在"朝向已对准 + 安全走廊 + 纯直行 + 远离目标"时启用批量直行，
 # 减少长直走廊段的重复定位次数。转向/横移/危险区/近目标点仍每步定位。
 # 2026-08-25 标定后批量直行一律使用 go_forward（5cm/步，实测比 one_step 更直）。
-BATCH_FORWARD_MAX_STEPS = 6        # 单次批量直行上限步数（2026-08-30 提速 4→6；6步×5cm=30cm）
+BATCH_FORWARD_MAX_STEPS = 4        # 单次批量直行上限步数（2026-08-30 提速 4→6；6步×5cm=30cm）
 BATCH_FORWARD_MIN_WALL_DIST = 18.0 # 批量直行要求的最小离墙距离（cm），需 > OBSTACLE_THRESHOLD
-BATCH_FORWARD_MIN_DIST = 12.0      # 距目标 > 此值才启用批量（cm），确保远离精确停靠区
+BATCH_FORWARD_MIN_DIST = 15.0      # 距目标 > 此值才启用批量（cm），确保远离精确停靠区
 # 批量直行允许的最大朝向偏差（度）：
 # 6 步行程 30cm，横向偏移 = 30·sinθ ≤ 1.6cm，需 < POSITION_THRESHOLD(3cm)
-GO_FORWARD_BATCH_MAX_ANGLE_DEG = 3.0
+GO_FORWARD_BATCH_MAX_ANGLE_DEG = 4.0
 
 # =====================================================================
 # 统一路点模型与整条赛道路点表
