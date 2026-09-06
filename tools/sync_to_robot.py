@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -56,17 +57,32 @@ class JupyterClient:
         self._login(password)
 
     def _login(self, password):
-        resp = self.opener.open(self.host + "/login", timeout=self.timeout)
+        resp = self._open_with_retry(self.host + "/login")
         html = resp.read().decode("utf-8", "replace")
         m = re.search(r'name="_xsrf" value="([^"]+)"', html)
         token = m.group(1) if m else self._cookie("_xsrf")
-        self.opener.open(
+        self._open_with_retry(urllib.request.Request(
             self.host + "/login",
             data=urllib.parse.urlencode({"_xsrf": token, "password": password}).encode(),
-            timeout=self.timeout)
+            method="POST"))
         if not self._cookie("username"):
             raise RuntimeError("登录失败：未取得会话 cookie（检查密码/地址）")
         self.xsrf = token
+
+    def _open_with_retry(self, req, tries=3):
+        """链路抖动重试（2026-09-05：机器人 WiFi 省电导致的频繁超时，已关省电，
+        但仍保留重试兜底）"""
+        last = None
+        for i in range(tries):
+            try:
+                return self.opener.open(req, timeout=self.timeout)
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    TimeoutError, OSError) as e:
+                if isinstance(e, urllib.error.HTTPError) and e.code < 500:
+                    raise  # 4xx 是业务错误，重试无意义
+                last = e
+                time.sleep(1.5 * (i + 1))
+        raise last
 
     def _cookie(self, prefix):
         for c in self.jar:
@@ -83,7 +99,7 @@ class JupyterClient:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            resp = self.opener.open(req, timeout=self.timeout)
+            resp = self._open_with_retry(req)
             return resp.status, resp.read()
         except urllib.error.HTTPError as e:
             return e.code, e.read()

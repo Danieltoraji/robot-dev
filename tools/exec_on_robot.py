@@ -33,17 +33,26 @@ DEFAULT_PASSWORD = "pi"
 
 
 def login(host, password, timeout=30):
-    jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-    resp = opener.open(host + "/login", timeout=timeout)
-    m = re.search(r'name="_xsrf" value="([^"]+)"', resp.read().decode("utf-8", "replace"))
-    token = m.group(1) if m else next(
-        (c.value for c in jar if c.name == "_xsrf"), None)
-    opener.open(host + "/login",
-                data=urllib.parse.urlencode({"_xsrf": token, "password": password}).encode(),
-                timeout=timeout)
-    cookie = "; ".join(f"{c.name}={c.value}" for c in jar)
-    return opener, token, cookie
+    """登录（带重试：链路偶发抖动时自动重连）"""
+    last = None
+    for attempt in range(3):
+        try:
+            jar = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+            resp = opener.open(host + "/login", timeout=timeout)
+            m = re.search(r'name="_xsrf" value="([^"]+)"', resp.read().decode("utf-8", "replace"))
+            token = m.group(1) if m else next(
+                (c.value for c in jar if c.name == "_xsrf"), None)
+            opener.open(host + "/login",
+                        data=urllib.parse.urlencode({"_xsrf": token, "password": password}).encode(),
+                        timeout=timeout)
+            cookie = "; ".join(f"{c.name}={c.value}" for c in jar)
+            return opener, token, cookie
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last = e
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+    raise last
 
 
 def create_session(opener, host, xsrf):
