@@ -18,13 +18,15 @@
         平方损失会被裁切野值拖走，故用 IRLS + Cauchy 鲁棒核，并加弱先验
         正则（σ=8cm/8°）保证 1~2 点也能解。用真实内参+畸变模型。
   运动  小幅度动作白名单（单步 2cm 前进、~2cm 横移、3.2cm 后退），每步
-        闭环；批量直行仅远距+对准良好且 <=3 步。转向用参考方案的「在线
-        EMA 估计小转实际角，连续 2 批 <0.5°/次→升级大转」，并带大转
-        防振荡（误差符号翻转即停止转向、改用航向偏置接近）。
+        闭环；远距+对准良好才小批量（≤3 次 one_step = 6cm）。本场地禁用
+        go_forward / go_forward_fast（5cm 步幅在小面板+打滑地板上易摔倒，
+        `_act` 硬门拒绝）。转向用参考方案的「在线 EMA 估计小转实际角，
+        连续 2 批 <0.5°/次→升级大转」，并带大转防振荡（误差符号翻转即
+        停止转向、改用航向偏置接近）。
   容错  卡滞检测（相邻两次定位目标改善<0.5cm 连续 2 次→后退脱困）、
-        丢失恢复（低头补扫→退格重扫→运动先验盲走一步→撤销转向）、
-        分格时间预算 + 全局看门狗、到达确认（位姿"脚下覆盖中心"主判 +
-        接近段确实检出过目标面板 + 蹭步来回覆盖微动开关）。
+        丢失恢复（低头补扫→按运动先验朝目标转→退格重扫→盲走一步→撤销
+        转向）、分格时间预算 + 全局看门狗、到达确认（位姿"脚下覆盖中心"
+        主判 + 接近段确实检出过目标面板 + 蹭步来回覆盖微动开关）。
         绝不跳格：跳格断 70 分计分链（ESP32 顺序错只日志不断链，借道
         穿越其他面板计分安全）。
 
@@ -75,7 +77,7 @@ PANEL_HALF_CM = 14.0  # 面板色块半边长（33cm 格含缝，色块约 28cm�
 ALIGN_TOL_DEG = 8.0      # 航向差小于此视为对准
 ENTER_ALIGN_TOL_DEG = 15.0  # 进入段容忍的航向差上限（粗对齐即可，横移纠偏）
 ENTER_BEARING_GATE_CM = 12.0  # 进入段纵向小于此不再按 bearing 转向（方位角病态）
-FAR_DIST_CM = 18.0       # > 此值允许 go_forward 批量（配合 3 步上限 ≈15cm）
+FAR_DIST_CM = 18.0       # > 此值允许 one_step 批量（配合 3 步上限 ≈6cm）
 MID_DIST_CM = 20.0       # > 此值 APPROACH，否则 ENTER（切低头）
 # 为什么 20cm 就切低头：导航档（pitch 1200）可见地面从 28.9cm 起，目标面板
 # 在 20cm 处远边仅 34cm、且其它面板都在身后——继续用导航档会"整帧 0 个面板"。
@@ -89,19 +91,22 @@ TURN_NEAR_LIMIT_CM = 20.0  # 距目标中心小于此先退格再转（防面板
 # =====================================================================
 # 动作白名单与名义位移模型（预测用；实测标定值见 levels/goodluck.py）
 # =====================================================================
-FORWARD_CM = 5.0            # go_forward（实测更直，仅远距批量用）
-FORWARD_ONE_STEP_CM = 2.0   # go_forward_one_step（主前进原语）
+# 本场地禁用 go_forward / go_forward_fast：5cm 步幅在 33cm 小面板+打滑地板上
+# 容易重心前扑摔倒（现场结论）。前进一律用 go_forward_one_step（2cm），
+# 远距允许小批量（≤3 次=6cm）。白名单外的动作由 _act 直接拒绝。
+DISABLED_ACTIONS = ("go_forward", "go_forward_fast")
+
+FORWARD_ONE_STEP_CM = 2.0   # go_forward_one_step（唯一前进原语）
 BACK_ONE_STEP_CM = 3.2      # back_one_step
 LEFT_MOVE_CM = 1.9
 RIGHT_MOVE_CM = 2.2
 TURN_LEFT_DEG = 22.0
 TURN_RIGHT_DEG = 25.7
-BATCH_MAX_STEPS = 3         # 批量直行上限（3×5cm=15cm；打滑地板保守值）
+BATCH_MAX_STEPS = 3         # 单次批量 one_step 上限（3×2cm=6cm；打滑地板保守值）
 BATCH_MAX_ANGLE_DEG = 4.0   # 批量直行允许的最大航向差
 
 # (类型, 名义增量)：fwd 前向 cm（负=后退）、lat 右向 cm、turn 右转度（右正）
 ACTION_MODEL = {
-    "go_forward": ("fwd", FORWARD_CM),
     "go_forward_one_step": ("fwd", FORWARD_ONE_STEP_CM),
     "back_one_step": ("fwd", -BACK_ONE_STEP_CM),
     "left_move": ("lat", -LEFT_MOVE_CM),
@@ -601,15 +606,15 @@ class NineGridLevel:
                 return True  # 交棒 ENTER
 
             prev_fwd = fwd
-            # 前进（批量门控：远距+对准良好才批量，上限 BATCH_MAX_STEPS 步）
+            # 前进：一律 go_forward_one_step（本场地禁用 go_forward）。
+            # 远距+对准良好才小批量，上限 BATCH_MAX_STEPS 步（3×2cm=6cm）。
             if fwd > FAR_DIST_CM and abs(bearing) <= BATCH_MAX_ANGLE_DEG \
                     and abs(lat) <= LAT_TOL_CM:
                 n = min(BATCH_MAX_STEPS,
-                        max(1, int((fwd - MID_DIST_CM) // FORWARD_CM)))
-                self._act("go_forward", n)
+                        max(1, int((fwd - MID_DIST_CM) // FORWARD_ONE_STEP_CM)))
             else:
                 n = 2 if fwd > 2 * MID_DIST_CM else 1
-                self._act("go_forward_one_step", n)
+            self._act("go_forward_one_step", n)
         print("[接近] 时间预算耗尽")
         return False
 
@@ -725,7 +730,17 @@ class NineGridLevel:
     # =================================================================
 
     def _act(self, action, times=1):
-        """动作执行 + 位姿预测推进（GN 先验的基础）"""
+        """动作执行 + 位姿预测推进（GN 先验的基础）
+
+        白名单硬门：本场地禁用的大步幅动作（go_forward / go_forward_fast）
+        直接拒绝，避免后续改动误用导致摔倒。
+        """
+        if action in DISABLED_ACTIONS:
+            raise ValueError(
+                f"本关卡禁用动作 {action}（小面板+打滑地板易摔倒）；"
+                f"前进请用 go_forward_one_step 小批量")
+        if action not in ACTION_MODEL:
+            raise ValueError(f"未登记的动作: {action}（动作白名单见 ACTION_MODEL）")
         self.state.act(action, times=times)
         self.predict_pose(action, times)
         if ACTION_MODEL.get(action, (None, 0))[0] != "turn":

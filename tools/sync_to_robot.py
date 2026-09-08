@@ -180,6 +180,8 @@ def main():
                         help="不用本地清单，退回远端逐字节比对（慢，不推荐）")
     parser.add_argument("--full", action="store_true",
                         help="忽略清单全量重传（结束后重建清单）")
+    parser.add_argument("--request-timeout", type=int, default=30,
+                        help="单请求超时秒（默认 30；大文件弱链路可调大，如 150）")
     args = parser.parse_args()
 
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -199,7 +201,7 @@ def main():
         print("没有可同步的文件")
         sys.exit(1)
 
-    client = JupyterClient(args.host, args.password)
+    client = JupyterClient(args.host, args.password, timeout=args.request_timeout)
     print(f"已登录 {args.host}，目标 {args.remote_root}/，"
           f"待同步 {len(pairs)} 个文件{'（干跑）' if args.check else ''}")
 

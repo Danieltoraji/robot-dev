@@ -177,6 +177,20 @@ class SimNineGridRobot(RobotState):
             cv2.fillPoly(frame, [digit_quad], (0, 0, 0))
 
 
+def test_banned_actions_rejected():
+    """动作白名单硬门：本场地禁用的大步幅动作必须被拒绝（防误用摔倒）"""
+    robot = SimNineGridRobot()
+    level = NineGridLevel(robot)
+    for action in ("go_forward", "go_forward_fast", "climb_stairs"):
+        try:
+            level._act(action, 1)
+        except ValueError:
+            continue
+        raise AssertionError(f"{action} 未被白名单拒绝")
+    level._act("go_forward_one_step", 1)  # 白名单内动作应可执行
+    print("  动作白名单：go_forward/go_forward_fast 被拒，one_step 可执行 ✓")
+
+
 def test_render_guard_fast():
     """渲染守卫回归：角点贴近相机平面时不得产生退化多边形（曾 26s/帧）
 
@@ -220,8 +234,14 @@ def test_sim_full_run():
     assert ok_all and not failed, \
         f"未确认到达的面板: {failed}，结果 {level.results}"
 
+    # 本场地禁用 go_forward / go_forward_fast（小面板+打滑地板易摔倒）：
+    # 白名单硬门之外再加一条行为断言，防止后续改动绕过 _act 直接调 state.act
+    used = {a for a, _ in robot.action_log}
+    banned = used & {"go_forward", "go_forward_fast"}
+    assert not banned, f"使用了本场地禁用的大步幅动作: {banned}"
+
     # 定位次数护栏（真机时间预算的代理指标；超限说明 FSM 在空转）
-    # 基线 241 张（2026-09-08 裁切感知观测 + min_panels=1 + 20cm 切低头）
+    # 基线 215 张（2026-09-08：裁切感知观测 + min_panels=1 + 20cm 切低头 + 禁用 go_forward）
     assert robot.n_captures < 350, \
         f"拍照次数 {robot.n_captures} 超护栏，检查是否出现定位风暴"
 
@@ -235,6 +255,7 @@ def test_sim_full_run():
 
 
 if __name__ == "__main__":
+    test_banned_actions_rejected()
     test_render_guard_fast()
     test_sim_full_run()
     print("数字宫格仿真集成测试通过 ✓")
