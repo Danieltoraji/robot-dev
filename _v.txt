@@ -1,0 +1,136 @@
+﻿python : E:\Robot_Competition_others\robot-dev\sim\line_tracking_sim.py:477: Us
+erWarning: Glyph 10003 (\N{CHECK MARK}) missing from font(s) Microsoft YaHei.
+所在位置 行:1 字符: 32
++ ... NG="utf-8"; python sim/line_tracking_sim.py --mode vision 2>&1 | Out- ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (E:\Robot_Compet...icrosoft YaHei. 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  self.fig.canvas.draw_idle()
+============================================================
+===== Vision 模式：视觉链路独立测试 =====
+============================================================
+
+--- 测试 1/34: 直道居中 ---
+  检测到线: orientation=follow  lookahead_x=0.0  lateral_offset=0.0  heading=0.0  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 2/34: 直道居中2 ---
+  检测到线: orientation=follow  lookahead_x=0.0  lateral_offset=0.0  heading=0.0  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 3/34: 直道居中3 ---
+  检测到线: orientation=follow  lookahead_x=0.0  lateral_offset=0.0  heading=0.0  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 4/34: 直道偏左（线在右前方） ---
+  检测到线: orientation=follow  lookahead_x=-23.2  lateral_offset=-13.0  heading=4.7  curvature=-0.0000  straightness=1.000  ✓
+
+--- 测试 5/34: 直道偏右（线在左前方） ---
+  检测到线: orientation=follow  lookahead_x=21.5  lateral_offset=13.0  heading=-4.8  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 6/34: 接近弯道 ---
+  检测到线: orientation=corner  lookahead_x=0.0  lateral_offset=-3.0  heading=0.0  curvature=-1.0000  straightness=0.935  ✓
+  [拐角统计] 检出 corner，curvature=-1.0（方向错误!）
+
+--- 测试 7/34: 弯道入口附近 ---
+  检测到线: orientation=corner  lookahead_x=-200.0  lateral_offset=20.0  heading=-4.7  curvature=-1.0000  straightness=0.969  ✓
+  [拐角统计] 检出 corner，curvature=-1.0（方向错误!）
+
+--- 测试 8/34: 已左转，朝北直道 ---
+  检测到线: orientation=follow  lookahead_x=0.0  lateral_offset=0.0  heading=0.0  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 9/34: 朝北直道中段 ---
+  检测到线: orientation=follow  lookahead_x=0.0  lateral_offset=0.0  heading=0.0  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 10/34: 远离赛道（应丢线） ---
+  未检测到线 (exists=False)  ✓
+
+--- 测试 11/34: 头部左转40.5° ---
+  检测到线: orientation=corner  lookahead_x=129.0  lateral_offset=166.0  heading=27.3  curvature=-1.0000  straightness=0.996  ✓
+
+--- 测试 12/34: 头部右转-40.5° ---
+  检测到线: orientation=corner  lookahead_x=-130.0  lateral_offset=-190.0  heading=-27.4  curvature=-1.0000  straightness=0.915  ✓
+
+--- 测试 13/34: 拐角专项: 距P1弯40cm（远距接近） ---
+  检测到线: orientation=follow  lookahead_x=0.0  lateral_offset=0.0  heading=0.0  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 14/34: 拐角专项: 距P1弯20cm（中距接近） ---
+  检测到线: orientation=corner  lookahead_x=0.0  lateral_offset=-3.0  heading=0.0  curvature=-1.0000  straightness=0.894  ✓
+  [拐角统计] 检出 corner，curvature=-1.0（方向正确）
+
+--- 测试 15/34: 拐角专项: 距P1弯7cm（近距接近） ---
+  检测到线: orientation=corner  lookahead_x=-200.0  lateral_offset=-3.0  heading=0.0  curvature=-1.0000  straightness=0.998  ✓
+  [拐角统计] 检出 corner，curvature=-1.0（方向正确）
+
+--- 测试 16/34: 拐角专项: 距P1弯65cm（超远距接近） ---
+  检测到线: orientation=follow  lookahead_x=0.0  lateral_offset=0.0  heading=0.0  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 17/34: 拐角专项: 距P1弯55cm（远距接近2） ---
+  检测到线: orientation=follow  lookahead_x=0.0  lateral_offset=0.0  heading=0.0  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 18/34: 拐角专项: 距P2弯15cm（北上接近右弯） ---
+  检测到线: orientation=corner  lookahead_x=0.0  lateral_offset=3.0  heading=0.0  curvature=1.0000  straightness=0.934  ✓
+  [拐角统计] 检出 corner，curvature=+1.0（方向正确）
+
+--- 测试 19/34: 拐角专项: 距P2弯5cm（右弯入口） ---
+  检测到线: orientation=cross  lookahead_x=0.0  lateral_offset=0.0  heading=90.0  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 20/34: 拐角专项: 过P2弯后朝东看（新方向线） ---
+  检测到线: orientation=follow  lookahead_x=-23.2  lateral_offset=-13.0  heading=4.7  curvature=-0.0000  straightness=1.000  ✓
+
+--- 测试 21/34: 拐角专项: 距P2弯30cm（远距北上接近） ---
+  检测到线: orientation=corner  lookahead_x=0.0  lateral_offset=3.0  heading=0.0  curvature=1.0000  straightness=0.843  ✓
+  [拐角统计] 检出 corner，curvature=+1.0（方向正确）
+
+--- 测试 22/34: 拐角专项: 距P2弯45cm（超远距北上接近） ---
+  检测到线: orientation=follow  lookahead_x=0.0  lateral_offset=0.0  heading=0.0  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 23/34: 拐角专项: 距P2弯55cm（极远距北上接近） ---
+  检测到线: orientation=follow  lookahead_x=0.0  lateral_offset=0.0  heading=0.0  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 24/34: 拐角专项: 转弯中途45°视角看P1弯 ---
+  检测到线: orientation=follow  lookahead_x=-88.7  lateral_offset=-193.0  heading=-39.3  curvature=-0.0000  straightness=1.000  ✓
+
+--- 测试 25/34: 拐角专项: 转弯中途135°视角看P2弯 ---
+  检测到线: orientation=follow  lookahead_x=68.0  lateral_offset=68.0  heading=45.0  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 26/34: 拐角专项: 过P1弯后朝北看（新方向线） ---
+  检测到线: orientation=follow  lookahead_x=-23.2  lateral_offset=-13.0  heading=4.7  curvature=-0.0000  straightness=1.000  ✓
+
+--- 测试 27/34: 拐角专项: 过P1弯后朝北看2（新方向线） ---
+  检测到线: orientation=follow  lookahead_x=-23.2  lateral_offset=-13.0  heading=4.7  curvature=-0.0000  straightness=1.000  ✓
+
+--- 测试 28/34: 拐角专项: 过P2弯后朝东看（新方向线） ---
+  检测到线: orientation=follow  lookahead_x=-56.7  lateral_offset=-30.0  heading=11.2  curvature=0.0000  straightness=1.000  ✓
+
+--- 测试 29/34: 拐角专项: 过P2弯后朝东看2（新方向线） ---
+  检测到线: orientation=follow  lookahead_x=-23.2  lateral_offset=-13.0  heading=4.7  curvature=-0.0000  straightness=1.000  ✓
+
+--- 测试 30/34: 拐角专项: 距P3弯15cm（东向接近右弯） ---
+  检测到线: orientation=corner  lookahead_x=0.0  lateral_offset=3.0  heading=0.0  curvature=1.0000  straightness=0.934  ✓
+  [拐角统计] 检出 corner，curvature=+1.0（方向正确）
+
+--- 测试 31/34: 拐角专项: 距P3弯25cm（远距东向接近右弯） ---
+  检测到线: orientation=corner  lookahead_x=0.0  lateral_offset=3.0  heading=0.0  curvature=1.0000  straightness=0.864  ✓
+  [拐角统计] 检出 corner，curvature=+1.0（方向正确）
+
+--- 测试 32/34: 拐角专项: 距P3弯35cm（超远距东向接近右弯） ---
+  检测到线: orientation=corner  lookahead_x=0.0  lateral_offset=2.0  heading=0.0  curvature=1.0000  straightness=0.833  ✓
+  [拐角统计] 检出 corner，curvature=+1.0（方向正确）
+
+--- 测试 33/34: 拐角专项: 距P4弯15cm（南下接近左弯） ---
+  检测到线: orientation=corner  lookahead_x=0.0  lateral_offset=-3.0  heading=0.0  curvature=-1.0000  straightness=0.935  ✓
+  [拐角统计] 检出 corner，curvature=-1.0（方向正确）
+
+--- 测试 34/34: 拐角专项: 距P4弯20cm（远距南下接近左弯） ---
+  检测到线: orientation=corner  lookahead_x=0.0  lateral_offset=-3.0  heading=0.0  curvature=-1.0000  straightness=0.894  ✓
+  [拐角统计] 检出 corner，curvature=-1.0（方向正确）
+
+============================================================
+===== Vision 测试统计 =====
+通过: 34/34
+失败: 0/34
+拟合爆炸: 0 次（|lateral_offset|>500 或 |lookahead_x|>500）
+拐角专项: 期望 corner 11 个，检出 11，方向正确 9
+>>> Vision 测试全部通过 <<<
+
+===== Vision 模式测试完成 =====

@@ -1,0 +1,293 @@
+﻿============================================================
+===== Decision 模式：决策链路独立测试 =====
+============================================================
+
+========================================
+  场景: A_直道前进
+  预设 5 帧 LineResult
+========================================
+==================================================
+===== 开始循迹 =====
+==================================================
+[循迹] step=1 orientation=follow lookahead_x=2.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] 居中，前进（lookahead_x=2.0）
+[循迹] step=2 orientation=follow lookahead_x=-1.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] 居中，前进（lookahead_x=-1.0）
+[循迹] step=3 orientation=follow lookahead_x=3.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] 居中，前进（lookahead_x=3.0）
+[循迹] step=4 orientation=follow lookahead_x=0.5 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] 居中，前进（lookahead_x=0.5）
+[循迹] step=5 orientation=follow lookahead_x=-2.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] 居中，前进（lookahead_x=-2.0）
+[循迹] step=6 丢线
+[丢线] 后退 1/3 次找线
+[丢线] 后退 2/3 次找线
+[丢线] 后退 3/3 次找线
+[丢线] 后退用尽仍丢线，回寻线阶段
+==================================================
+===== 开始寻线 =====
+==================================================
+[寻线] 身体扫描第 1/14 次（右转）
+[寻线] 身体扫描第 2/14 次（右转）
+[寻线] 身体扫描第 3/14 次（右转）
+[寻线] 身体扫描第 4/14 次（右转）
+[寻线] 身体扫描第 5/14 次（右转）
+[寻线] 身体扫描第 6/14 次（右转）
+[寻线] 身体扫描第 7/14 次（右转）
+[寻线] 身体扫描第 8/14 次（右转）
+[寻线] 身体扫描第 9/14 次（右转）
+[寻线] 身体扫描第 10/14 次（右转）
+[寻线] 身体扫描第 11/14 次（右转）
+[寻线] 身体扫描第 12/14 次（右转）
+[寻线] 身体扫描第 13/14 次（右转）
+[寻线] 身体扫描第 14/14 次（右转）
+[寻线] 平移试探第 1/3 轮
+[寻线] 第 1 轮平移试探无果
+[寻线] 平移试探第 2/3 轮
+[寻线] 第 2 轮平移试探无果
+[寻线] 平移试探第 3/3 轮
+[寻线] 第 3 轮平移试探无果
+===== 寻线失败：未找到线 =====
+[循迹] 重新寻线失败，循迹结束
+  动作序列 (83 步): ['go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'back_one_step', 'back_one_step', 'back_one_step', 'stand', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move']
+  最终位置: (35.5, -17.4)  角度: -359.8°
+
+========================================
+  场景: B_偏左修正
+  预设 4 帧 LineResult
+========================================
+==================================================
+===== 开始循迹 =====
+==================================================
+[循迹] step=1 orientation=follow lookahead_x=-25.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] lookahead_x=-25.0，左移对齐
+[循迹] step=2 orientation=follow lookahead_x=-15.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] lookahead_x=-15.0，左移对齐
+[循迹] step=3 orientation=follow lookahead_x=-5.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] 居中，前进（lookahead_x=-5.0）
+[循迹] step=4 orientation=follow lookahead_x=1.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] 居中，前进（lookahead_x=1.0）
+[循迹] step=5 丢线
+[丢线] 后退 1/3 次找线
+[丢线] 后退 2/3 次找线
+[丢线] 后退 3/3 次找线
+[丢线] 后退用尽仍丢线，回寻线阶段
+==================================================
+===== 开始寻线 =====
+==================================================
+[寻线] 身体扫描第 1/14 次（右转）
+[寻线] 身体扫描第 2/14 次（右转）
+[寻线] 身体扫描第 3/14 次（右转）
+[寻线] 身体扫描第 4/14 次（右转）
+[寻线] 身体扫描第 5/14 次（右转）
+[寻线] 身体扫描第 6/14 次（右转）
+[寻线] 身体扫描第 7/14 次（右转）
+[寻线] 身体扫描第 8/14 次（右转）
+[寻线] 身体扫描第 9/14 次（右转）
+[寻线] 身体扫描第 10/14 次（右转）
+[寻线] 身体扫描第 11/14 次（右转）
+[寻线] 身体扫描第 12/14 次（右转）
+[寻线] 身体扫描第 13/14 次（右转）
+[寻线] 身体扫描第 14/14 次（右转）
+[寻线] 平移试探第 1/3 轮
+[寻线] 第 1 轮平移试探无果
+[寻线] 平移试探第 2/3 轮
+[寻线] 第 2 轮平移试探无果
+[寻线] 平移试探第 3/3 轮
+[寻线] 第 3 轮平移试探无果
+===== 寻线失败：未找到线 =====
+[循迹] 重新寻线失败，循迹结束
+  动作序列 (82 步): ['left_move', 'left_move', 'go_forward_one_step', 'go_forward_one_step', 'back_one_step', 'back_one_step', 'back_one_step', 'stand', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move']
+  最终位置: (29.5, -13.6)  角度: -359.8°
+
+========================================
+  场景: C_右弯
+  预设 6 帧 LineResult
+========================================
+==================================================
+===== 开始循迹 =====
+==================================================
+[循迹] step=1 orientation=follow lookahead_x=5.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] 居中，前进（lookahead_x=5.0）
+[循迹] step=2 orientation=corner lookahead_x=0.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=1.0000
+[转弯] 右弯（curvature=1.00），先前进接近拐角
+[转弯] 接近中 orientation=corner（继续前进）
+[转弯] 接近拐角前进 1/20 步
+[转弯] 接近中 orientation=follow（继续前进）
+[转弯] 接近拐角前进 2/20 步
+[转弯] 接近中 orientation=follow（继续前进）
+[转弯] 接近拐角前进 3/20 步
+[转弯] 接近中 orientation=follow（继续前进）
+[转弯] 接近拐角前进 4/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 5/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 6/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 7/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 8/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 9/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 10/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 11/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 12/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 13/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 14/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 15/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 16/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 17/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 18/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 19/20 步
+[转弯] 接近中丢线（继续前进）
+[转弯] 接近拐角前进 20/20 步
+[转弯] 接近阶段前进用尽，按当前位置定点转弯
+[转弯] 第 1/3 次 turn_right（累计 25.7°）
+[转弯] 第 2/3 次 turn_right（累计 51.4°）
+[转弯] 第 3/3 次 turn_right（累计 77.1°）
+[转弯] 出口确认 1: 丢线，前进一步再找
+[转弯] 出口确认 2: 丢线，前进一步再找
+[转弯] 出口确认 3: 丢线，前进一步再找
+[转弯] 出口确认 4: 丢线，前进一步再找
+[转弯] 出口确认 5: 丢线，前进一步再找
+[转弯] 出口确认 6: 丢线，前进一步再找
+[转弯] 出口确认 7: 丢线，前进一步再找
+[转弯] 出口确认 8: 丢线，前进一步再找
+[转弯] 出口确认超过 8 次，返回异常
+[循迹] 转弯异常，尝试继续循迹
+[循迹] step=3 丢线
+[丢线] 后退 1/3 次找线
+[丢线] 后退 2/3 次找线
+[丢线] 后退 3/3 次找线
+[丢线] 后退用尽仍丢线，回寻线阶段
+==================================================
+===== 开始寻线 =====
+==================================================
+[寻线] 身体扫描第 1/14 次（右转）
+[寻线] 身体扫描第 2/14 次（右转）
+[寻线] 身体扫描第 3/14 次（右转）
+[寻线] 身体扫描第 4/14 次（右转）
+[寻线] 身体扫描第 5/14 次（右转）
+[寻线] 身体扫描第 6/14 次（右转）
+[寻线] 身体扫描第 7/14 次（右转）
+[寻线] 身体扫描第 8/14 次（右转）
+[寻线] 身体扫描第 9/14 次（右转）
+[寻线] 身体扫描第 10/14 次（右转）
+[寻线] 身体扫描第 11/14 次（右转）
+[寻线] 身体扫描第 12/14 次（右转）
+[寻线] 身体扫描第 13/14 次（右转）
+[寻线] 身体扫描第 14/14 次（右转）
+[寻线] 平移试探第 1/3 轮
+[寻线] 第 1 轮平移试探无果
+[寻线] 平移试探第 2/3 轮
+[寻线] 第 2 轮平移试探无果
+[寻线] 平移试探第 3/3 轮
+[寻线] 第 3 轮平移试探无果
+===== 寻线失败：未找到线 =====
+[循迹] 重新寻线失败，循迹结束
+  动作序列 (110 步): ['go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'turn_right', 'turn_right', 'turn_right', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'back_one_step', 'back_one_step', 'back_one_step', 'stand', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move']
+  最终位置: (18.7, -24.0)  角度: -436.9°
+
+========================================
+  场景: D_丢线恢复
+  预设 4 帧 LineResult
+========================================
+==================================================
+===== 开始循迹 =====
+==================================================
+[循迹] step=1 orientation=follow lookahead_x=1.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] 居中，前进（lookahead_x=1.0）
+[循迹] step=2 丢线
+[丢线] 后退 1/3 次找线
+[丢线] 后退 2/3 次找线
+[丢线] 后退后找回线：orientation=follow
+[循迹] step=3 丢线
+[丢线] 后退 1/3 次找线
+[丢线] 后退 2/3 次找线
+[丢线] 后退 3/3 次找线
+[丢线] 后退用尽仍丢线，回寻线阶段
+==================================================
+===== 开始寻线 =====
+==================================================
+[寻线] 身体扫描第 1/14 次（右转）
+[寻线] 身体扫描第 2/14 次（右转）
+[寻线] 身体扫描第 3/14 次（右转）
+[寻线] 身体扫描第 4/14 次（右转）
+[寻线] 身体扫描第 5/14 次（右转）
+[寻线] 身体扫描第 6/14 次（右转）
+[寻线] 身体扫描第 7/14 次（右转）
+[寻线] 身体扫描第 8/14 次（右转）
+[寻线] 身体扫描第 9/14 次（右转）
+[寻线] 身体扫描第 10/14 次（右转）
+[寻线] 身体扫描第 11/14 次（右转）
+[寻线] 身体扫描第 12/14 次（右转）
+[寻线] 身体扫描第 13/14 次（右转）
+[寻线] 身体扫描第 14/14 次（右转）
+[寻线] 平移试探第 1/3 轮
+[寻线] 第 1 轮平移试探无果
+[寻线] 平移试探第 2/3 轮
+[寻线] 第 2 轮平移试探无果
+[寻线] 平移试探第 3/3 轮
+[寻线] 第 3 轮平移试探无果
+===== 寻线失败：未找到线 =====
+[循迹] 重新寻线失败，循迹结束
+  动作序列 (81 步): ['go_forward_one_step', 'back_one_step', 'back_one_step', 'back_one_step', 'back_one_step', 'back_one_step', 'stand', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move']
+  最终位置: (21.1, -17.4)  角度: -359.8°
+
+========================================
+  场景: E_横线跨越
+  预设 3 帧 LineResult
+========================================
+==================================================
+===== 开始循迹 =====
+==================================================
+[循迹] step=1 orientation=follow lookahead_x=2.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] 居中，前进（lookahead_x=2.0）
+[循迹] step=2 orientation=cross lookahead_x=0.0 lateral_offset=0.0 heading=90.0 far_ry=0 curvature=0.0000
+[循迹] 横线（卡住计数 1），跨越
+[循迹] step=3 orientation=follow lookahead_x=1.0 lateral_offset=0.0 heading=0.0 far_ry=0 curvature=0.0000
+[循迹] 居中，前进（lookahead_x=1.0）
+[循迹] step=4 丢线
+[丢线] 后退 1/3 次找线
+[丢线] 后退 2/3 次找线
+[丢线] 后退 3/3 次找线
+[丢线] 后退用尽仍丢线，回寻线阶段
+==================================================
+===== 开始寻线 =====
+==================================================
+[寻线] 身体扫描第 1/14 次（右转）
+[寻线] 身体扫描第 2/14 次（右转）
+[寻线] 身体扫描第 3/14 次（右转）
+[寻线] 身体扫描第 4/14 次（右转）
+[寻线] 身体扫描第 5/14 次（右转）
+[寻线] 身体扫描第 6/14 次（右转）
+[寻线] 身体扫描第 7/14 次（右转）
+[寻线] 身体扫描第 8/14 次（右转）
+[寻线] 身体扫描第 9/14 次（右转）
+[寻线] 身体扫描第 10/14 次（右转）
+[寻线] 身体扫描第 11/14 次（右转）
+[寻线] 身体扫描第 12/14 次（右转）
+[寻线] 身体扫描第 13/14 次（右转）
+[寻线] 身体扫描第 14/14 次（右转）
+[寻线] 平移试探第 1/3 轮
+[寻线] 第 1 轮平移试探无果
+[寻线] 平移试探第 2/3 轮
+[寻线] 第 2 轮平移试探无果
+[寻线] 平移试探第 3/3 轮
+[寻线] 第 3 轮平移试探无果
+===== 寻线失败：未找到线 =====
+[循迹] 重新寻线失败，循迹结束
+  动作序列 (81 步): ['go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'back_one_step', 'back_one_step', 'back_one_step', 'stand', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'turn_right', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'go_forward_one_step', 'left_move', 'left_move', 'left_move', 'left_move', 'left_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move', 'right_move']
+  最终位置: (31.5, -17.4)  角度: -359.8°
+
+===== Decision 模式测试完成 =====

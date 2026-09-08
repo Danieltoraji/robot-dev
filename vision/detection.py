@@ -35,11 +35,20 @@ class LineSegment:
     """一条中心线（一个连通组件）的几何描述。
 
     orientation    : "follow" 顺线(可跟随) / "cross" 横线(停止线等) / "corner" 拐角
-    heading_deg    : 切线方向角（相对前向，右正左负，度）；cross 时为 ±90
-    curvature      : follow 时为拟合曲率（正=向右弯）；corner 时为转向方向（+1 右 / -1 左）
-    straightness   : 直线度 0~1（1=完全直线，趋近 0=拐角 / 急弧）
-    lateral_offset : follow 时机器人处横向偏移（像素，右正左负）
-    lookahead_x    : follow 时前视点横向偏移（纯追踪转向量）
+    heading_deg    : 切线方向角（相对前向，右正左负，度）；cross 时为 ±90；
+                     corner 时为近臂弦向角（机器人当前与来线的夹角）
+    curvature      : follow 时为拟合曲率（正=向右弯）；corner 时为转向方向（+1 右 / -1 左，
+                     由远臂末端相对肘点的横向符号决定）
+    straightness   : 直线度 0~1（1=完全直线，趋近 0=拐角 / 急弧）；仅作 cross 判据与置信度，
+                     corner 判据为肘部检测（弦向角突变），见 line_detector.py
+    lateral_offset : 机器人处横向偏移（像素，右正左负）；follow/corner 均为最近点实测 rx，
+                     不做多项式外推（防 L 形拟合爆炸）
+    lookahead_x    : follow 时前视点横向偏移（纯追踪转向量）；拟合病态时回退为
+                     ry≈L 处实测点 rx（插值不外推）
+    far_ry         : 线远端（最远点）的 ry 值（像素，前正，越大越远）。线延伸到
+                     视野远尽头时 ≈ roi_h；线末端进入视野（线快走完）时显著变小。
+                     用于终点判定（线末端接近）。cross 时为 0。
+    elbow_px       : corner 时肘点（拐点）图像坐标 (x, y)，非 corner 为 None
     points         : 中心线像素点列 [(x, y), ...]，调试可视化用
     """
     orientation: str = "none"
@@ -48,6 +57,8 @@ class LineSegment:
     straightness: float = 0.0
     lateral_offset: float = 0.0
     lookahead_x: float = 0.0
+    far_ry: float = 0.0
+    elbow_px: Optional[Tuple[float, float]] = None
     points: List[Tuple[float, float]] = field(default_factory=list)
 
 
