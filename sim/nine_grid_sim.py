@@ -31,6 +31,10 @@
 集成测试：python tests/test_nine_grid_sim.py
 """
 
+import sys
+print("当前脚本使用的 Python 路径：", sys.executable)
+
+
 import argparse
 import contextlib
 import io
@@ -101,7 +105,7 @@ class SimNineGridRobot(RobotState):
     CAM_HEIGHT = 39.0
     CAM_BODY_OFFSET = 0.0  # 仿真中相机即机体中心（关卡常量另算，端到端容差内）
 
-    def __init__(self, layout=SIM_LAYOUT, seed=3):
+    def __init__(self, layout=SIM_LAYOUT, seed=3, viewer=None):
         super().__init__(tag_poses={})
         self.pos = np.array([50.0, -20.0])   # 入口外居中
         self.heading = 0.0                   # 场地系 bearing（度，右正）
@@ -111,6 +115,8 @@ class SimNineGridRobot(RobotState):
         self.rng = np.random.RandomState(seed)
         self.n_captures = 0
         self.action_log = []
+        # 可选图形化 viewer（sim/nine_grid_view.NineGridView）；None = 纯无头
+        self.viewer = viewer
 
     # ---- I/O 接缝 ----
 
@@ -125,6 +131,8 @@ class SimNineGridRobot(RobotState):
         for _ in range(max(1, times)):
             self._apply_action(name)
         self.action_log.append((name, times))
+        if self.viewer is not None:
+            self.viewer.on_action(self, name, times)
 
     def _apply_action(self, name):
         th = np.radians(self.heading)
@@ -167,6 +175,8 @@ class SimNineGridRobot(RobotState):
             if digit is None:
                 continue
             self._draw_panel(frame, R, C, cell, digit)
+        if self.viewer is not None:
+            self.viewer.on_frame(self, frame)
         return frame
 
     def _draw_panel(self, frame, R, C, cell, digit):
@@ -228,16 +238,20 @@ def random_layout(seed):
     return layout
 
 
-def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False):
+def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None):
     """跑一遍完整关卡（布局扫→1..7），不做断言；返回 SimRun(robot, level, stats)
 
     stats 键：ok_all / results / layout_ok / digit_cell / truth / captures /
               actions / action_counts / small_turn_deg / small_turn_usable /
               banned_used
     quiet=True 时吞掉关卡逐行日志（只留返回值供调用方打印摘要）。
+    viewer：可选图形化 viewer（需有 attach(robot, level) 与 on_action/on_frame）；
+            传入后由 viewer 决定节奏（暂停/单步），None = 纯无头。
     """
-    robot = SimNineGridRobot(layout=layout, seed=seed)
+    robot = SimNineGridRobot(layout=layout, seed=seed, viewer=viewer)
     level = NineGridLevel(robot)
+    if viewer is not None:
+        viewer.attach(robot, level)
     if quiet:
         with contextlib.redirect_stdout(io.StringIO()):
             ok_all = level.run_level()

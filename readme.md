@@ -44,6 +44,8 @@ python main.py nine_grid
 python -m sim.goodluck_sim            # goodluck：2D 可视化 + 位姿桩
 python -m sim.nine_grid_sim           # 数字宫格：合成相机图像，跑真实视觉链路
 python -m sim.nine_grid_sim --random-layout --seed 11   # 随机布局探索
+python -m sim.nine_grid_view          # 数字宫格图形界面（相机窗格 + 俯视图，可暂停/单步）
+python -m sim.nine_grid_view --headless   # 无图形环境（SSH）退回无头运行
 
 # 批量跑模拟变体（可选，goodluck）
 python -m sim.run_sim_variants ideal 1
@@ -72,6 +74,7 @@ robot-dev/
 ├── sim/               # 模拟器（只提供世界/传感器/带噪声动作，算法走真实代码）
 │   ├── goodluck_sim.py    # goodluck：位姿桩 + matplotlib 可视化
 │   ├── nine_grid_sim.py   # 数字宫格：合成相机图像 + 真实视觉链路
+│   ├── nine_grid_view.py  # 数字宫格图形界面（相机窗格 + 俯视图，暂停/单步/重开）
 │   └── run_sim_variants.py
 ├── tests/             # 单测 + 仿真集成测试（断言在 tests/，环境在 sim/）
 ├── tools/             # 开发/调试/标定工具

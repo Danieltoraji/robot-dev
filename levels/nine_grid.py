@@ -184,6 +184,8 @@ class NineGridLevel:
         # 到达确认状态（每格重置）
         self._target_seen = False   # 接近/进入段是否检出过目标数字面板
         self._loc_count = 0         # 本格定位次数（时间预算诊断）
+        # FSM 阶段标签（纯诊断：日志/仿真可视化用，不参与任何决策）
+        self.phase = "INIT"
 
     # =================================================================
     # 入口
@@ -224,6 +226,8 @@ class NineGridLevel:
         双俯角互补：导航档看不到最近排（贴下边被裁切），低头档看不全
         远排；任一档扫齐 7 个数字即提前收束。
         """
+        self.phase = "LAYOUT"
+
         def hg_for(pitch):
             hg = GroundHomography.load(pitch)
             if hg is not None:
@@ -535,6 +539,7 @@ class NineGridLevel:
         self._target_seen = False
         self._loc_count = 0
         self._current_digit = digit
+        self.phase = f"SEEK{digit}"
         for attempt in range(RETRY_LIMIT + 1):
             if time.time() > t_end:
                 print(f"[面板{digit}] 时间预算耗尽")
@@ -555,6 +560,7 @@ class NineGridLevel:
         卡滞判据用"本次定位 vs 上次动作前的定位"，不再在动作后额外补一帧
         定位（旧实现每次动作 2 次定位，真机拍照 2~4s/张扛不住）。
         """
+        self.phase = "APPROACH"
         stall = 0
         prev_fwd = None
         fails = 0
@@ -625,6 +631,7 @@ class NineGridLevel:
         在脚下时方位角病态（实测 2cm 处可跳到 24°），转向只会触发
         "退格再转"空耗；此时只用横移纠偏。
         """
+        self.phase = "ENTER"
         self.state.set_pitch(PITCH_DOWN)
         stall = 0
         prev_fwd = None
@@ -696,6 +703,7 @@ class NineGridLevel:
         判据：位姿（相机在面板中心 ±4cm 内）+ 接近段确实检出过目标数字面板，
         再用 back(3.2cm)+forward(2.0cm) 蹭步确保压到微动开关。
         """
+        self.phase = "CONFIRM"
         fwd, lat, _bearing = self.target_relative(digit)
         on_panel = abs(fwd) <= ENTER_TOL_CM and abs(lat) <= LAT_TOL_CM
         if not on_panel:
@@ -832,6 +840,7 @@ class NineGridLevel:
         运动先验位姿（动作模型推算，仍可用）算目标方位，把视角转回有面板
         的方向——纯头部扫（±40.5°）救不了。
         """
+        self.phase = f"RECOVER{fails}"
         if fails > RECOVER_LIMIT:
             print(f"[恢复] 连续 {fails} 次定位失败，放弃本段")
             return False
