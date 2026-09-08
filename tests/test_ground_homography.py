@@ -9,6 +9,12 @@ target_in_robot_frame 全链路，断言恢复误差在容差内。头部偏航�
 运行：python -m tests.test_ground_homography
 """
 
+import os
+import sys
+
+# 允许从任意目录直接运行本文件（脚本目录在 sys.path[0]，仓库根不在）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 
 from core.camera_config import CAMERA_INTRINSIC, CAMERA_DISTORTION

@@ -119,6 +119,17 @@ def main():
     p.add_argument("--conf", type=float, default=0.25)
     p.add_argument("--out", default=None)
 
+    # 数字宫格：七色面板检测 + HOG/SVM 数字仲裁 + 地面单应网格叠加
+    p = sub.add_parser("ninegrid")
+    p.add_argument("--image", required=True)
+    p.add_argument("--pitch", type=int, default=1200,
+                   help="俯仰脉宽（读对应单应标定档；1200 导航 / 1040 低头）")
+    p.add_argument("--pose", default=None,
+                   help="无单应标定文件时的解析自举位姿 'x,y,bearing_deg'")
+    p.add_argument("--no-arbitrate", action="store_true",
+                   help="跳过 HOG/SVM 数字仲裁（快，但无复核标记）")
+    p.add_argument("--out", default=None)
+
     args = ap.parse_args()
     frame = cv2.imread(args.image)
     if frame is None:
@@ -162,6 +173,31 @@ def main():
         rs = YoloDetector(backend).detect(out)
         draw_boxes(out, rs)
         print(rs)
+
+    elif args.cmd == "ninegrid":
+        from core.ground_homography import GroundHomography, grid_cell_center
+        from vision.nine_grid_detector import NineGridDetector
+        det = NineGridDetector()
+        obs = det.detect_panels(out, arbitrate=not args.no_arbitrate)
+        out = det.annotate(out, obs)
+        print(f"检出 {len(obs)} 块面板：")
+        for o in obs:
+            print(f"  {o}  clipped={o.clipped}  area={o.area:.0f}")
+        # 地面单应网格叠加（有标定读标定，否则用 --pose 解析自举）
+        hg = GroundHomography.load(args.pitch)
+        if hg is None and args.pose:
+            x, y, deg = [float(v) for v in args.pose.split(",")]
+            hg = GroundHomography.from_pose((x, y), 39.0, args.pitch, deg)
+            print(f"  单应：解析自举 pose=({x},{y},{deg}°)")
+        elif hg is not None:
+            print(f"  单应：已加载 pitch={args.pitch} 标定档")
+        if hg is not None:
+            for cell in range(9):
+                px = hg.ground_to_pixels([grid_cell_center(cell)])[0]
+                cv2.drawMarker(out, (int(px[0]), int(px[1])), (255, 0, 255),
+                               cv2.MARKER_TILTED_CROSS, 40, 3)
+                cv2.putText(out, str(cell), (int(px[0]) + 12, int(px[1])),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 0, 255), 2)
 
     _show_or_save(out, args.out)
 

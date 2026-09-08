@@ -12,7 +12,7 @@
 import cv2
 import numpy as np
 
-from detection import LineResult, LineSegment
+from vision.detection import LineResult, LineSegment
 
 
 class LineDetector:

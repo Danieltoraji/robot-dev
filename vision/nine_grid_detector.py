@@ -227,13 +227,22 @@ class DigitArbiter:
 # =====================================================================
 
 class PanelObservation:
-    """单个面板色块观测（像素坐标为原生分辨率）"""
+    """单个面板色块观测（像素坐标为原生分辨率）
+
+    clipped / hull_centroid_px 是"裁切感知定位"的输入：
+    - 未被画幅裁切时，center_px（轮廓对角线交点）就是面板中心的精确投影；
+    - 被裁切时对角线交点失去几何意义（实测偏差可达数百 px），此时必须用
+      hull_centroid_px（颜色掩膜凸包的面积质心）作为观测，并在定位端用
+      "预测裁切四边形质心"与之配对。
+    """
 
     __slots__ = ("color", "color_id", "bbox", "center_px", "area",
-                 "solidity", "model_digit", "model_conf")
+                 "solidity", "model_digit", "model_conf",
+                 "clipped", "hull_centroid_px", "hull_area")
 
     def __init__(self, color, bbox, center_px, area, solidity,
-                 model_digit=None, model_conf=0.0):
+                 model_digit=None, model_conf=0.0, clipped=False,
+                 hull_centroid_px=None, hull_area=0.0):
         self.color = color
         self.color_id = COLOR_TO_ID[color]
         self.bbox = bbox                      # (x,y,w,h) 原生像素
@@ -242,6 +251,9 @@ class PanelObservation:
         self.solidity = solidity
         self.model_digit = model_digit        # SVM 仲裁结果（None=未跑/不可用）
         self.model_conf = model_conf
+        self.clipped = bool(clipped)          # 是否被画幅边缘裁切
+        self.hull_centroid_px = hull_centroid_px or center_px
+        self.hull_area = float(hull_area)
 
     @property
     def digit(self):
@@ -284,10 +296,14 @@ class NineGridDetector:
 
         colors:      限定颜色列表（None=全部七色）
         arbitrate:   对每个候选跑 SVM 数字仲裁（慢，布局扫/复核时开）
-        drop_border: 丢弃贴画幅边缘的轮廓——裁切面板的中心/面积都系统性
-                     偏差。布局扫（一次定归属）建议开启；GN 定位路径默认
-                     关闭（贴近段侧板大量合法裁切，全丢会饿死对应点，
-                     交给 GN 逐点离群剔除+跳变门控兜底）。
+        drop_border: 丢弃被画幅裁切的面板。裁切后 center_px（对角线交点）
+                     与面积都系统性偏差，只适合"定归属"的布局扫；GN 定位
+                     路径默认关闭——裁切面板改用 hull_centroid_px 参与解算
+                     （见 PanelObservation 与 levels/nine_grid._gn_run）。
+
+        同色碎块合并：黑色数字块/画幅裁切会把同一面板的颜色掩膜切成多块
+        （bbox 互不重叠，跨色 IoU 去重抓不到）。本关卡每种颜色只有一块面板，
+        故把"间距小于较大块尺寸"的同色碎块并成一个观测，取凸包为可见区域。
         """
         if frame is None or frame.size == 0:
             return []
@@ -296,21 +312,18 @@ class NineGridDetector:
                                   int(round(frame.shape[0] / scale))))
         hsv = cv2.cvtColor(work, cv2.COLOR_BGR2HSV)
         border_px = 8  # 工作分辨率下贴边判据
+        work_h = work.shape[0]
 
         raw = []
         for color in (colors or COLOR_TO_ID.keys()):
             mask = build_color_mask(hsv, color)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel)
+            frags = []
             for cnt in _find_contours(mask):
                 area = cv2.contourArea(cnt)
                 if not (self.min_area <= area <= self.max_area):
                     continue
                 x, y, w, h = cv2.boundingRect(cnt)
-                if drop_border and (
-                        x < border_px or y < border_px
-                        or x + w > self.work_width - border_px
-                        or y + h > work.shape[0] - border_px):
-                    continue
                 if max(w / h, h / w) > MAX_ASPECT_RATIO:
                     continue
                 hull_area = cv2.contourArea(cv2.convexHull(cnt))
@@ -319,8 +332,28 @@ class NineGridDetector:
                 solidity = area / hull_area
                 if solidity < MIN_SOLIDITY:
                     continue
-                center = quad_center(cnt)
-                raw.append((color, area, (x, y, w, h), solidity, cnt, center))
+                frags.append((area, (x, y, w, h), solidity, cnt))
+            if not frags:
+                continue
+
+            # 同色碎块合并（数字孔洞/画幅裁切造成的分裂）
+            frags.sort(key=lambda f: f[0], reverse=True)
+            main = frags[0]
+            merge_gap = max(main[1][2], main[1][3])
+            group = [main] + [f for f in frags[1:]
+                              if _bbox_gap(f[1], main[1]) <= merge_gap]
+            hull = _hull_of([g[3] for g in group])
+            area = float(cv2.contourArea(hull))
+            if area <= 0:
+                continue
+            x, y, w, h = cv2.boundingRect(hull)
+            clipped = (x < border_px or y < border_px
+                       or x + w > self.work_width - border_px
+                       or y + h > work_h - border_px)
+            if drop_border and clipped:
+                continue
+            raw.append((color, area, (x, y, w, h), main[2], hull,
+                        quad_center(hull), _contour_centroid(hull), clipped))
 
         # 跨色去重：同区域多色命中时保留面积大者（阈值交界抖动）
         raw.sort(key=lambda r: r[1], reverse=True)
@@ -335,13 +368,18 @@ class NineGridDetector:
                 kept.append(item)
 
         results = []
-        for color, area, (x, y, w, h), solidity, cnt, center in kept:
+        for (color, area, (x, y, w, h), solidity, _hull, center,
+             hull_centroid, clipped) in kept:
             obs = PanelObservation(
                 color=color,
                 bbox=(x * scale, y * scale, w * scale, h * scale),
                 center_px=(center[0] * scale, center[1] * scale),
                 area=area,
                 solidity=solidity,
+                clipped=clipped,
+                hull_centroid_px=(hull_centroid[0] * scale,
+                                  hull_centroid[1] * scale),
+                hull_area=area * scale * scale,
             )
             if arbitrate:
                 roi = work[y:y + h, x:x + w]
@@ -408,3 +446,27 @@ def _iou(a, b):
     inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
     union = aw * ah + bw * bh - inter
     return inter / union if union > 0 else 0.0
+
+
+def _bbox_gap(a, b):
+    """两 (x,y,w,h) 框的最短间距（相交为 0）"""
+    ax0, ay0, aw, ah = a
+    bx0, by0, bw, bh = b
+    dx = max(0.0, max(ax0 - (bx0 + bw), bx0 - (ax0 + aw)))
+    dy = max(0.0, max(ay0 - (by0 + bh), by0 - (ay0 + ah)))
+    return float(np.hypot(dx, dy))
+
+
+def _hull_of(contours):
+    """多轮廓点集 → 凸包（同色碎块合并后的可见面板区域）"""
+    pts = np.vstack([c.reshape(-1, 2) for c in contours])
+    return cv2.convexHull(pts.astype(np.int32))
+
+
+def _contour_centroid(cnt):
+    """轮廓/多边形的面积质心（裁切不变；数字孔洞被凸包填掉）"""
+    m = cv2.moments(cnt)
+    if m["m00"] > 1e-9:
+        return (float(m["m10"] / m["m00"]), float(m["m01"] / m["m00"]))
+    x, y, w, h = cv2.boundingRect(cnt)
+    return (x + w / 2.0, y + h / 2.0)

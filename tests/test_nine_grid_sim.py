@@ -5,11 +5,18 @@
 （模拟打滑：位移 ±10~20%、小转角噪声大且偶尔趋零），继承 RobotState
 只重写 I/O 接缝（run_action/capture_frame/set_head/set_pitch），
 端到端跑 NineGridLevel.run_level()：布局扫描 → 1..7 逐格导航 → 到达确认。
-视觉检测、逐帧单应定位、自适应转向、卡滞守卫全部走真实代码路径。
+视觉检测、GN 地图定位、自适应转向、卡滞守卫全部走真实代码路径。
 
-运行（约 1~2 分钟，PC 上跑；不进快速单测）：
+运行（PC 上跑；不进快速单测）：
     python tests/test_nine_grid_sim.py
+    python -m tests.test_nine_grid_sim
 """
+
+import os
+import sys
+
+# 允许从任意目录直接运行本文件（脚本目录在 sys.path[0]，仓库根不在）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 
@@ -25,6 +32,9 @@ from vision.nine_grid_detector import COLOR_TO_ID
 FRAME_W, FRAME_H = 2592, 1944
 PANEL_HALF_CM = 14.0    # 面板半边 14cm（33cm 格减缝）
 DIGIT_HALF_CM = (4.0, 6.0)  # 黑色数字块半尺寸
+_IMAGE_RECT = np.array([[0.0, 0.0], [FRAME_W, 0.0],
+                        [FRAME_W, FRAME_H], [0.0, FRAME_H]],
+                       dtype=np.float32)
 
 # 各颜色满足阈值的 HSV（与 tests/test_nine_grid_detector.py 一致）
 COLOR_HSV = {
@@ -144,7 +154,20 @@ class SimNineGridRobot(RobotState):
                 np.column_stack([norm, np.ones(4)]).reshape(-1, 1, 3)
                 .astype(np.float32),
                 np.zeros(3), np.zeros(3), CAMERA_INTRINSIC, CAMERA_DISTORTION)
-            return np.round(pix[:, 0, :]).astype(np.int32)
+            pix = pix[:, 0, :]
+            # 角点贴近相机平面（z 略大于 0.05）时投影会溢出为 ±inf，
+            # astype(int32) 得 INT_MIN 后 cv2.fillPoly 会扫描 ~2^31 行
+            # （实测 26s/次，整轮仿真被拖到 800s+）。
+            # 正确处理 = 裁到画幅：真实相机只看到交集，直接丢弃会让"贴边
+            # 仍可见的细条"在仿真里消失（比现实更难，掩盖定位缺陷）。
+            if not np.all(np.isfinite(pix)):
+                return None
+            pix = np.clip(pix, -1e6, 1e6)
+            area, inter = cv2.intersectConvexConvex(
+                pix.astype(np.float32), _IMAGE_RECT)
+            if inter is None or len(inter) < 3 or area <= 1e-9:
+                return None
+            return np.round(inter).astype(np.int32)
 
         panel = quad(PANEL_HALF_CM, PANEL_HALF_CM)
         if panel is not None:
@@ -154,10 +177,38 @@ class SimNineGridRobot(RobotState):
             cv2.fillPoly(frame, [digit_quad], (0, 0, 0))
 
 
+def test_render_guard_fast():
+    """渲染守卫回归：角点贴近相机平面时不得产生退化多边形（曾 26s/帧）
+
+    背景：z_cam 略大于 0.05 的角点投影为 ±inf，astype(int32) 得 INT_MIN，
+    cv2.fillPoly 会扫描 ~2^31 行。此处遍历"格内/格间 + 两档俯仰 + 广角头部"
+    组合，断言单帧渲染 <0.1s，防止该缺陷回归。
+    """
+    import time
+    from core.camera_config import HEAD_WIDE_LEFT, HEAD_WIDE_RIGHT
+    robot = SimNineGridRobot()
+    slow = []
+    for (x, y) in ((50, -20), (50, 10), (50, 30), (50, 45), (20, 45), (80, 45)):
+        for heading in (0.0, 90.0, -90.0):
+            for pitch in (PITCH_NAV, PITCH_DOWN):
+                for head in (HEAD_CENTER, HEAD_WIDE_LEFT, HEAD_WIDE_RIGHT):
+                    robot.pos = np.array([float(x), float(y)])
+                    robot.heading = heading
+                    robot.pitch = pitch
+                    robot.head = head
+                    t0 = time.perf_counter()
+                    robot.capture_frame()
+                    dt = time.perf_counter() - t0
+                    if dt > 0.1:
+                        slow.append((x, y, heading, pitch, head, dt))
+    assert not slow, f"渲染超时（退化多边形回归）: {slow[:5]}"
+    print("  渲染守卫：极端位姿/俯仰/头部组合全部 <0.1s ✓")
+
+
 def test_sim_full_run():
     robot = SimNineGridRobot()
     level = NineGridLevel(robot)
-    done = level.run_level()
+    ok_all = level.run_level()
 
     # 布局应与真值一致
     truth = {d: c for c, d in SIM_LAYOUT.items() if d is not None}
@@ -165,8 +216,14 @@ def test_sim_full_run():
         f"布局解算错误: {level.digit_cell} != 真值 {truth}"
 
     # 全部 7 格应确认到达
-    failed = [k for k, ok in done if not ok]
-    assert not failed, f"未确认到达的面板: {failed}，结果 {done}"
+    failed = [k for k, ok in level.results if not ok]
+    assert ok_all and not failed, \
+        f"未确认到达的面板: {failed}，结果 {level.results}"
+
+    # 定位次数护栏（真机时间预算的代理指标；超限说明 FSM 在空转）
+    # 基线 241 张（2026-09-08 裁切感知观测 + min_panels=1 + 20cm 切低头）
+    assert robot.n_captures < 350, \
+        f"拍照次数 {robot.n_captures} 超护栏，检查是否出现定位风暴"
 
     print(f"\n[仿真] 全部 7 格到达确认 ✓  拍照 {robot.n_captures} 张，"
           f"动作 {len(robot.action_log)} 次")
@@ -178,5 +235,6 @@ def test_sim_full_run():
 
 
 if __name__ == "__main__":
+    test_render_guard_fast()
     test_sim_full_run()
     print("数字宫格仿真集成测试通过 ✓")

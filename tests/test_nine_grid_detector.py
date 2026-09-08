@@ -8,6 +8,12 @@ HSV->BGR 转换模拟真实相机输入，断言检测器：正确分类七色�
 运行：python tests/test_nine_grid_detector.py
 """
 
+import os
+import sys
+
+# 允许从任意目录直接运行本文件（脚本目录在 sys.path[0]，仓库根不在）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 
 import cv2
