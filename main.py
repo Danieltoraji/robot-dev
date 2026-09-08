@@ -18,6 +18,7 @@ import sys
 from core.paths import RESULT_DIR
 from core.robot_core import RobotState
 from levels import goodluck as level_goodluck
+from levels import nine_grid as level_nine_grid
 
 
 # =====================================================================
@@ -39,6 +40,12 @@ LEVELS = {
         "module": level_goodluck,
         "tag_poses": level_goodluck.tag_poses,
         "run_level": level_goodluck.run_level,
+    },
+    # 数字宫格：无 AprilTag，用地面单应定位（tag_poses 留空即可）
+    "nine_grid": {
+        "module": level_nine_grid,
+        "tag_poses": {},
+        "run_level": level_nine_grid.run_level,
     },
 }
 

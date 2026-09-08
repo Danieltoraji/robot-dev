@@ -48,7 +48,7 @@ SKIP_EXTS = (".pyc", ".pyo", ".npz", ".npz.bak")
 class JupyterClient:
     """最小 Jupyter REST 客户端：密码登录 + Contents API（标准库实现）"""
 
-    def __init__(self, host, password, timeout=30):
+    def __init__(self, host, password, timeout=120):
         self.host = host.rstrip("/")
         self.timeout = timeout
         self.jar = http.cookiejar.CookieJar()
