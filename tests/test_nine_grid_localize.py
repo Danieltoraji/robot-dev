@@ -20,7 +20,6 @@ import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))   # 仓库根
-sys.path.insert(0, _HERE)                    # tests 目录（复用仿真机器人）
 
 import numpy as np
 
@@ -29,7 +28,7 @@ from levels.nine_grid import (
     NineGridLevel, PITCH_NAV, clipped_quad_centroid,
     project_ground_to_pixel, _wrap_angle,
 )
-from test_nine_grid_sim import SimNineGridRobot, SIM_LAYOUT
+from sim.nine_grid_sim import SimNineGridRobot, SIM_LAYOUT
 
 # 复现根因的位姿：导航档 + 头部右转 40.5°，一帧内 3 块面板被裁切
 SCENE_POSE = (50.0, -20.0, -18.69)
