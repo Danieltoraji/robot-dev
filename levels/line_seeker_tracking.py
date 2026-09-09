@@ -62,6 +62,52 @@ def run_action(name, times=1, with_stand=True):
     )
 
 
+def _turn_by_angle(angle_deg):
+    """按角度闭环转向：正=左转（逆时针），负=右转（顺时针）。
+
+    用「大步 turn_left/right + 小步 turn_left/right_small_step」组合逼近目标角度，
+    取代旧的「按标定值固定转 N 次」开环转弯。返回近似实际转角（度，左正右负）。
+    """
+    if abs(angle_deg) < HEADING_SMALL:
+        return 0.0
+    if angle_deg > 0:
+        big_deg, small_deg = TURN_LEFT_DEG, TURN_LEFT_SMALL_DEG
+        big_action, small_action = "turn_left", "turn_left_small_step"
+        sign = 1.0
+    else:
+        big_deg, small_deg = TURN_RIGHT_DEG, TURN_RIGHT_SMALL_DEG
+        big_action, small_action = "turn_right", "turn_right_small_step"
+        sign = -1.0
+
+    remaining = abs(angle_deg)
+    actual = 0.0
+    # 大步覆盖主体角度
+    big_count = int(remaining // big_deg)
+    remaining -= big_count * big_deg
+    # 余量用小步逼近（不足半小步则舍去，避免过度补转）
+    small_count = int(round(remaining / small_deg))
+
+    if big_count > 0:
+        run_action(big_action, times=big_count)
+        actual += big_count * big_deg
+    if small_count > 0:
+        run_action(small_action, times=small_count)
+        actual += small_count * small_deg
+
+    print(f"[转向] 目标 {angle_deg:+.1f}° → {big_action}×{big_count} + "
+          f"{small_action}×{small_count} ≈ {sign * actual:+.1f}°")
+    return sign * actual
+
+
+def _correct_heading(heading_deg):
+    """按观测 heading 闭环修朝向：heading>0=线在前方偏右 → 身体右转（负角）。
+
+    误差小用小步精修，误差大用大步粗修（由 _turn_by_angle 自适应）。
+    返回实际转向角（左正右负）。
+    """
+    return _turn_by_angle(-heading_deg)
+
+
 # =====================================================================
 # 头部舵机控制
 # =====================================================================
@@ -155,23 +201,17 @@ MAX_TOTAL_STEPS = 500     # 总步数安全上限（防死循环）
 ALIGN_MAX_STEPS = 20      # 对齐阶段最大步数（防死循环）
 ALIGN_HEADING_TOL = 15.0  # 对齐阶段 heading_deg 容忍阈值（度）
 
-# 转弯增强参数（方案1: 头部扫描 + 方案2: 穿插前进）
-CORNER_SCAN_HEAD = True        # 转弯时启用头部扫描（方案1开关）
-CORNER_FORWARD_INTERVAL = 2    # 每隔 N 次转向穿插一次前进（方案2）
-CORNER_FORWARD_STEPS = 1       # 穿插前进时执行 go_forward_one_step 的次数
-CORNER_FORWARD_SCAN_RETRY = 2  # 丢线后穿插前进+扫描的最大重试次数
-
-# 转弯出口判据（新方向线确认）
-CORNER_BODY_TURN_HEAD_DEG = 20.0  # 扫描发现线且头部偏角 ≥ 此值时，身体先转向线方向
-CORNER_EXIT_HEADING = 20.0        # 过弯出口：近臂弦向角 |heading| ≤ 此值视为已对准新方向
-CORNER_REVERSE_GUARD_DEG = 60.0   # 累计转向 ≥ 此值后，反向拐角视为看到来路（忽略）
-
-# 转弯安全参数（防止过弯后陷入 cross 线循环）
+# 转弯闭环参数（闭环决定转弯程度：按每次观测到的 heading / corner_deg 决策，
+# 不再按标定值固定转几次，也不再假设弯角为 90°）
 LOOKAHEAD_CLAMP = 200.0        # lookahead_x 绝对值钳制上限（防止多项式外推爆炸）
-CROSS_MAX_CONSECUTIVE = 3      # 转弯中连续检测到 cross 线的最大次数，超限回寻线
-
-# 转弯角度完成参数（防止过度转向）
-TARGET_TURN_ANGLE = 80.0       # 累计转向达到此角度后，看到 follow 线即认为弯已转过
+HEADING_BIG = 25.0             # |heading_deg| ≥ 此值 → 大步粗修朝向（turn_left/right）
+HEADING_SMALL = 8.0            # 此值 ≤ |heading_deg| < HEADING_BIG → 小步精修朝向
+FOLLOW_HEADING_MIN = 15.0      # follow 循迹：|heading| > 此值优先修朝向（线倾斜时 lookahead 不可靠）
+FOLLOW_HEADING_MAX = 35.0      # follow 循迹：|heading| > 此值疑为拐角误判/抖动，忽略朝向只看横向
+CORNER_EXIT_HEADING = 12.0     # 过弯出口：|heading| ≤ 此值视为已对准新方向
+CORNER_INITIAL_TURN_RATIO = 0.85  # 初始按观测拐角角 × 此比例转（略欠转，防过冲）
+CORNER_MAX_CUMULATIVE_DEG = 150.0  # 单弯累计最大转角（安全上限，适应任意弯角）
+CORNER_SEEK_FORWARD_MAX = 4    # 出口确认丢线后前进找线最大次数
 # 循迹卡死检测参数（防止 cross+丢线 循环）
 STUCK_MAX = 6                  # 循迹中连续 cross/丢线 超过此值则回寻线
 
@@ -192,8 +232,9 @@ HEAD_SCAN_SEQUENCE = [
 # 动作标定值（来自 levels/goodluck.py 实机标定）
 TURN_LEFT_DEG = 22.0
 TURN_RIGHT_DEG = 25.7
-# 单个直角弯最大转向次数（安全限；穿插前进 + 出口判据下通常 4~6 次）
-CORNER_MAX_TURNS = 8
+# 小步转向角度 = 正常转向的一半（用于闭环精修朝向）
+TURN_LEFT_SMALL_DEG = TURN_LEFT_DEG / 2    # ≈ 11.0°
+TURN_RIGHT_SMALL_DEG = TURN_RIGHT_DEG / 2  # ≈ 12.85°
 
 # 直角弯「前进接近」阶段参数
 # 检测到 corner 时拐角可能仍在视野远端（D_FAR=35cm 处），原地转弯会转错位置。
@@ -295,13 +336,12 @@ def _align_to_line(detector, context="seek"):
             if context == "seek":
                 print(f"[{tag}] 检测到拐角，直接进入循迹")
                 return True
-            # 过弯后仍见拐角：按其方向继续转一次再重新评估
-            if p.curvature < 0:
-                print(f"[{tag}] 仍是拐角（左），左转一次")
-                run_action("turn_left")
-            else:
-                print(f"[{tag}] 仍是拐角（右），右转一次")
-                run_action("turn_right")
+            # 过弯后仍见拐角：按其方向与观测拐角角继续补转（闭环，非固定一次）
+            turn_sign = -1.0 if p.curvature > 0 else 1.0
+            residual = p.corner_deg if p.corner_deg > 0 else 30.0
+            direction = "右" if turn_sign < 0 else "左"
+            print(f"[{tag}] 仍是拐角（{direction}），补转 {residual:.1f}°")
+            _turn_by_angle(turn_sign * residual * CORNER_INITIAL_TURN_RATIO)
             continue
 
         if p.orientation == "cross":
@@ -310,17 +350,12 @@ def _align_to_line(detector, context="seek"):
             continue
 
         # follow 线：优先级判断
-        # ① 大幅欠转先修朝向（|heading|>25° 时线严重倾斜，最近点与远前视点
-        #    横向方向相反，横移会左右振荡；必须先转向把线拉回近似垂直）
-        HEADING_TURN_THRESH = 25.0
-        if abs(p.heading_deg) > HEADING_TURN_THRESH:
-            if p.heading_deg > 0:
-                # 线在前方偏右 → 身体右转
-                print(f"[{tag}] heading={p.heading_deg:.1f}°，右转修朝向")
-                run_action("turn_right")
-            else:
-                print(f"[{tag}] heading={p.heading_deg:.1f}°，左转修朝向")
-                run_action("turn_left")
+        # ① 大幅欠转先修朝向（|heading| 超过容忍阈值时线严重倾斜，最近点与远
+        #    前视点横向方向相反，横移会左右振荡；先闭环修朝向把线拉回近似垂直，
+        #    误差大用大步、误差小用小步精修，不再固定单次 turn_left/right）
+        if abs(p.heading_deg) > ALIGN_HEADING_TOL:
+            print(f"[{tag}] heading={p.heading_deg:.1f}°，闭环修朝向")
+            _correct_heading(p.heading_deg)
             continue
 
         # ② 侧边出线（lateral_offset 过大说明线已在视野边缘）
@@ -427,36 +462,24 @@ def seek_line(detector):
 # =====================================================================
 
 def _handle_corner(detector, curvature):
-    """直角弯处理：前进接近拐角 → 定点转弯 → 出口确认
+    """弯道处理（闭环）：前进接近拐角 → 按观测拐角角定点转弯 → 出口确认
 
-    curvature < 0 → 左弯（turn_left）
-    curvature > 0 → 右弯（turn_right）
+    curvature < 0 → 左弯（左转，正角）
+    curvature > 0 → 右弯（右转，负角）
     返回 True 表示弯已转过（新方向线已确认），False 表示异常（丢线或超限）
 
-    策略（解决「检测到 corner 时拐角仍在视野远端 30cm 外、原地转弯转错位置」）：
-      阶段1 前进接近 — 检测到 corner 时拐角可能还在 D_FAR 处，先前进到拐角点
-              附近（elbow_px.y ≥ CORNER_APPROACH_Y 或检测到 cross），
-              保证定点转弯后新方向线就在脚下前方。
-      阶段2 定点转弯 — 到达拐角点后按方向连续转向（累计约 90°）。
-      阶段3 出口确认 — 累计角足够后看到 follow 线即认为弯已转过，
-              横向/朝向误差交给后续 _align_to_line 处理。
+    不再按标定值预设转弯次数：初始转弯量由每次观测到的拐角弯折角 corner_deg
+    决定，出口阶段按实时 heading 闭环精修，从而适应不同弯角角度与不同直线段
+    长度/间距的路线（通用化，不预设任何路线形状）。
     """
-    if curvature < 0:
-        turn_action = "turn_left"
-        reverse_action = "turn_right"
-        direction = "左"
-        prefer_side = "left"
-        turn_deg = TURN_LEFT_DEG
-    else:
-        turn_action = "turn_right"
-        reverse_action = "turn_left"
-        direction = "右"
-        prefer_side = "right"
-        turn_deg = TURN_RIGHT_DEG
+    turn_sign = -1.0 if curvature > 0 else 1.0  # 左弯 +1，右弯 -1
+    direction = "左" if turn_sign > 0 else "右"
+    prefer_side = "left" if turn_sign > 0 else "right"
 
     print(f"[转弯] {direction}弯（curvature={curvature:.2f}），先前进接近拐角")
 
-    # ---- 阶段1：前进接近拐角点 ----
+    # ---- 阶段1：前进接近拐角点，同时记录观测到的拐角弯折角 ----
+    observed_corner_deg = None
     for approach in range(CORNER_APPROACH_MAX):
         set_head(HEAD_CENTER)
         frame = capture_frame()
@@ -467,6 +490,8 @@ def _handle_corner(detector, curvature):
         if result.exists:
             p = result.primary
             if p.orientation == "corner" and p.elbow_px is not None:
+                if p.corner_deg > 0:
+                    observed_corner_deg = p.corner_deg
                 elbow_y = p.elbow_px[1]
                 if elbow_y >= CORNER_APPROACH_Y:
                     print(f"[转弯] 拐角已接近（elbow_px.y={elbow_y:.0f} ≥ "
@@ -486,24 +511,19 @@ def _handle_corner(detector, curvature):
     else:
         print("[转弯] 接近阶段前进用尽，按当前位置定点转弯")
 
-    # ---- 阶段2：定点转弯 + 朝向闭环修正 ----
-    # 先转主体角度：左弯 4×22°=88°（略欠转，线保持在右前方视野内）；
-    # 右弯 3×25.7°=77.1°（略欠转，避免 4 次超转 102.8° 导致线跑到左后方）。
-    initial_turns = 4 if curvature < 0 else 3
-    cumulative_angle = 0.0
-    for i in range(initial_turns):
-        run_action(turn_action)
-        cumulative_angle += turn_deg
-        print(f"[转弯] 第 {i + 1}/{initial_turns} 次 {turn_action}"
-              f"（累计 {cumulative_angle:.1f}°）")
+    # ---- 阶段2：按观测拐角角定点转弯（闭环初始量，非固定次数） ----
+    if observed_corner_deg is None:
+        observed_corner_deg = 90.0  # 未观测到拐角角时的保守默认
+        print(f"[转弯] 未观测到拐角角，用默认 {observed_corner_deg:.0f}°")
+    required = turn_sign * observed_corner_deg * CORNER_INITIAL_TURN_RATIO
+    cumulative_angle = _turn_by_angle(required)
+    print(f"[转弯] 定点转弯：观测角 {observed_corner_deg:.1f}° × "
+          f"{CORNER_INITIAL_TURN_RATIO} ≈ 目标 {required:+.1f}°，"
+          f"实际 {cumulative_angle:+.1f}°")
 
-    # ---- 阶段3：出口确认（找新方向线，确认弯已转过）----
-    # 关键：转主体角度后只要看到 follow 线即认为弯已转过，直接返回。
-    # 横向/朝向误差交给后续 _align_to_line 处理（横向对齐后 heading 会自然
-    # 收敛）。此处不做 heading 闭环修正——turn 粒度粗（22°/25.7°），转弯后
-    # heading 常处临界值（20~24°），再补转一次会过冲导致线跑到身体侧后方
-    # （诊断：转 3 次 heading=24° 补右转一次后 lateral 从 -10 恶化到 -115）。
-    for confirm in range(CORNER_MAX_TURNS):
+    # ---- 阶段3：出口确认（按实时 heading 闭环精修，不再固定次数） ----
+    forward_seek_count = 0
+    for confirm in range(CORNER_APPROACH_MAX):
         set_head(HEAD_CENTER)
         frame = capture_frame()
         if frame is not None:
@@ -516,7 +536,13 @@ def _handle_corner(detector, curvature):
             found, _, _, result = _scan_head(detector, prefer_side=prefer_side)
             set_head(HEAD_CENTER)
             if not found:
-                print(f"[转弯] 出口确认 {confirm + 1}: 丢线，前进一步再找")
+                if forward_seek_count >= CORNER_SEEK_FORWARD_MAX:
+                    print("[转弯] 出口确认丢线前进找线用尽，返回异常")
+                    return False
+                forward_seek_count += 1
+                print(f"[转弯] 出口确认 {confirm + 1}: 丢线，"
+                      f"前进一步再找（{forward_seek_count}/"
+                      f"{CORNER_SEEK_FORWARD_MAX}）")
                 run_action("go_forward_one_step")
                 continue
 
@@ -526,8 +552,30 @@ def _handle_corner(detector, curvature):
               f"lookahead_x={lx:.1f} heading={p.heading_deg:.1f}")
 
         if p.orientation == "follow":
-            print(f"[转弯] 已转 {cumulative_angle:.1f}° 且见 follow 线，弯已转过"
-                  f"（heading={p.heading_deg:.1f}°，误差交给对齐阶段）")
+            # 见 follow 线但 heading 仍偏：闭环精修朝向，再确认
+            if abs(p.heading_deg) > CORNER_EXIT_HEADING:
+                correction = -p.heading_deg  # 修朝向的转向量（正=左，负=右）
+                # 拐角刚转过时 heading 不可靠（L 形拐角会被误判成 follow，heading
+                # 符号可能与真实朝向相反）。若修朝向方向与过弯方向强烈相反，说明
+                # 大概率是「尚未转过的拐角」被误判成 follow，此时不能反向转，否则
+                # 会把刚转过去的弯又转回来，导致来回振荡。改为继续按原方向补转。
+                if turn_sign * correction < -CORNER_EXIT_HEADING:
+                    print(f"[转弯] follow 但 heading={p.heading_deg:+.1f}° 与"
+                          f"过弯方向相反，疑为拐角误判，继续按{direction}转")
+                    cumulative_angle += _turn_by_angle(turn_sign * 30.0)
+                    if abs(cumulative_angle) >= CORNER_MAX_CUMULATIVE_DEG:
+                        print("[转弯] 累计转角超安全上限，返回异常")
+                        return False
+                    continue
+                print(f"[转弯] 见 follow 线 heading={p.heading_deg:.1f}° 偏，"
+                      f"精修朝向")
+                cumulative_angle += _correct_heading(p.heading_deg)
+                if abs(cumulative_angle) >= CORNER_MAX_CUMULATIVE_DEG:
+                    print("[转弯] 累计转角超安全上限，返回异常")
+                    return False
+                continue
+            print(f"[转弯] 弯已转过（heading={p.heading_deg:.1f}° ≤ "
+                  f"{CORNER_EXIT_HEADING}°），横向误差交给对齐阶段）")
             return True
 
         if p.orientation == "cross":
@@ -535,12 +583,15 @@ def _handle_corner(detector, curvature):
             run_action("go_forward_one_step")
             continue
 
-        # 仍是 corner：继续按原方向转
-        print(f"[转弯] 出口确认仍见拐角，继续 {turn_action}")
-        run_action(turn_action)
-        cumulative_angle += turn_deg
+        # 仍是 corner：按观测拐角角继续补余量
+        residual_deg = p.corner_deg if p.corner_deg > 0 else 30.0
+        print(f"[转弯] 出口确认仍见拐角，继续补转 {residual_deg:.1f}°")
+        cumulative_angle += _turn_by_angle(turn_sign * residual_deg)
+        if abs(cumulative_angle) >= CORNER_MAX_CUMULATIVE_DEG:
+            print("[转弯] 累计转角超安全上限，返回异常")
+            return False
 
-    print(f"[转弯] 出口确认超过 {CORNER_MAX_TURNS} 次，返回异常")
+    print(f"[转弯] 出口确认超过 {CORNER_APPROACH_MAX} 次，返回异常")
     return False
 
 
@@ -668,6 +719,21 @@ def track_line(detector):
             print(f"[循迹] 到达线末端（终点前进 {forward_steps} 步），循迹结束")
             return True
         lx = lx_clamped
+        # 朝向误差优先：线明显倾斜时，lookahead 的横向符号可能与真实朝向相反
+        # （线在机器人正前方斜穿时尤为明显），若仍按 lookahead 转向会与朝向修正
+        # 互相打架导致来回振荡。故只要 heading 明显偏，就先闭环修朝向。
+        #
+        # 但 heading 异常大（> FOLLOW_HEADING_MAX）时多半是拐角被误判成 follow
+        # 或分割抖动——真实直线循迹几乎不会出现 35°+ 的朝向误差。此时 heading
+        # 不可信，不能按其做大步转向（否则会把刚对准的方向又打歪），改由下方
+        # lookahead/lateral 横向逻辑兜底，并借横移改变视角让拐角重新被正确识别。
+        if FOLLOW_HEADING_MIN < abs(p.heading_deg) <= FOLLOW_HEADING_MAX:
+            print(f"[循迹] heading={p.heading_deg:.1f}° 偏，闭环修朝向")
+            _correct_heading(p.heading_deg)
+            continue
+        if abs(p.heading_deg) > FOLLOW_HEADING_MAX:
+            print(f"[循迹] heading={p.heading_deg:.1f}° 过大（疑拐角/抖动），"
+                  f"忽略朝向，按横向处理")
         if abs(lx) > T_BIG:
             if lx > 0:
                 print(f"[循迹] lookahead_x={lx:.1f} > {T_BIG}，右转修朝向")

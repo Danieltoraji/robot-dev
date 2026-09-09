@@ -314,9 +314,11 @@ class LineDetector:
                 else:
                     seg_obj.lookahead_x = lookahead_fit
         elif orientation == "corner":
-            _, elbow_idx = elbow
+            elbow_turn_deg, elbow_idx = elbow
             elbow_pt = pts[elbow_idx]
             seg_obj.elbow_px = (float(elbow_pt[0]), float(elbow_pt[1]))
+            # 观测到的拐角弯折角（0~180°，恒正），供闭环决定转弯程度
+            seg_obj.corner_deg = float(elbow_turn_deg)
             # 转向方向：远臂末端相对肘点的横向符号（右=+1，左=-1）
             far_end = pts[-1]
             seg_obj.curvature = 1.0 if far_end[0] > elbow_pt[0] else -1.0

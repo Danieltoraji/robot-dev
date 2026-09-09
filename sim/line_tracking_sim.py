@@ -767,6 +767,10 @@ def run_decision_test():
                     sim_state.apply_turn(TURN_LEFT_DEG, name)
                 elif name == "turn_right":
                     sim_state.apply_turn(-TURN_RIGHT_DEG, name)
+                elif name == "turn_left_small_step":
+                    sim_state.apply_turn(TURN_LEFT_DEG / 2, name)
+                elif name == "turn_right_small_step":
+                    sim_state.apply_turn(-TURN_RIGHT_DEG / 2, name)
                 else:
                     sim_state._record(name)
                 viz.update(sim_state, frame=None,
@@ -860,6 +864,10 @@ def run_full_test():
                 sim_state.apply_turn(TURN_LEFT_DEG, name)
             elif name == "turn_right":
                 sim_state.apply_turn(-TURN_RIGHT_DEG, name)
+            elif name == "turn_left_small_step":
+                sim_state.apply_turn(TURN_LEFT_DEG / 2, name)
+            elif name == "turn_right_small_step":
+                sim_state.apply_turn(-TURN_RIGHT_DEG / 2, name)
             else:
                 sim_state._record(name)
 

@@ -39,6 +39,8 @@ class LineSegment:
                      corner 时为近臂弦向角（机器人当前与来线的夹角）
     curvature      : follow 时为拟合曲率（正=向右弯）；corner 时为转向方向（+1 右 / -1 左，
                      由远臂末端相对肘点的横向符号决定）
+    corner_deg     : corner 时观测到的拐角弯折角（近臂→远臂方向变化角，0~180°，恒正），
+                     由肘部检测返回，用于闭环决定转弯程度；非 corner 为 0
     straightness   : 直线度 0~1（1=完全直线，趋近 0=拐角 / 急弧）；仅作 cross 判据与置信度，
                      corner 判据为肘部检测（弦向角突变），见 line_detector.py
     lateral_offset : 机器人处横向偏移（像素，右正左负）；follow/corner 均为最近点实测 rx，
@@ -54,6 +56,7 @@ class LineSegment:
     orientation: str = "none"
     heading_deg: float = 0.0
     curvature: float = 0.0
+    corner_deg: float = 0.0
     straightness: float = 0.0
     lateral_offset: float = 0.0
     lookahead_x: float = 0.0
