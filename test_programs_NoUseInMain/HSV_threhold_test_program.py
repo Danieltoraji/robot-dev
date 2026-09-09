@@ -22,15 +22,15 @@ import glob
 
 # 方式1：直接列出所有图片的完整路径（推荐）
 IMAGE_PATHS = [
-    "E:/Robot_Competition_others/test_pictures_HSV/1.png",
-    "E:/Robot_Competition_others/test_pictures_HSV/2.png",
-    "E:/Robot_Competition_others/test_pictures_HSV/3.png",
-    "E:/Robot_Competition_others/test_pictures_HSV/4.png",
-    "E:/Robot_Competition_others/test_pictures_HSV/5.png",
-    "E:/Robot_Competition_others/test_pictures_HSV/6.png",
-    "E:/Robot_Competition_others/test_pictures_HSV/7.png",
-    "E:/Robot_Competition_others/test_pictures_HSV/8.png",
-    "E:/Robot_Competition_others/test_pictures_HSV/9.png",
+    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940175.jpg",
+    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940176.jpg",
+    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940179.jpg",
+    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940182.jpg",
+    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940190.jpg",
+    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940192.jpg",
+    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940195.jpg",
+    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940207.jpg",
+    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940211.jpg",
 ]
 
 # 方式2：自动读取某个文件夹下的所有图片（取消注释并注释掉上面的列表）
@@ -46,13 +46,13 @@ IMAGE_PATHS = [
 
 # HSV默认值（针对红色路径优化）
 DEFAULT_H_LOW = 0
-DEFAULT_H_HIGH = 10
-DEFAULT_S_LOW = 50
+DEFAULT_H_HIGH = 17
+DEFAULT_S_LOW = 0
 DEFAULT_S_HIGH = 255
 DEFAULT_V_LOW = 50
 DEFAULT_V_HIGH = 255
 
-DEFAULT_H2_LOW = 170
+DEFAULT_H2_LOW = 149
 DEFAULT_H2_HIGH = 180
 
 # 窗口名称

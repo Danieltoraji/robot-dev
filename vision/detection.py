@@ -51,6 +51,10 @@ class LineSegment:
                      视野远尽头时 ≈ roi_h；线末端进入视野（线快走完）时显著变小。
                      用于终点判定（线末端接近）。cross 时为 0。
     elbow_px       : corner 时肘点（拐点）图像坐标 (x, y)，非 corner 为 None
+    elbow_ry       : corner 时肘点（拐角点）的前向距离（像素，roi_h - elbow_y）。
+                     越小越近（拐角点接近脚下）。用于「前进接近拐角」阶段的终止
+                     判据：肘点 ry 降到阈值以下说明拐角点已到脚下，可开始定点转弯。
+                     非 corner 为 0
     points         : 中心线像素点列 [(x, y), ...]，调试可视化用
     """
     orientation: str = "none"
@@ -62,6 +66,7 @@ class LineSegment:
     lookahead_x: float = 0.0
     far_ry: float = 0.0
     elbow_px: Optional[Tuple[float, float]] = None
+    elbow_ry: float = 0.0
     points: List[Tuple[float, float]] = field(default_factory=list)
 
 

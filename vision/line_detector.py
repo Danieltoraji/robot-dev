@@ -317,6 +317,8 @@ class LineDetector:
             elbow_turn_deg, elbow_idx = elbow
             elbow_pt = pts[elbow_idx]
             seg_obj.elbow_px = (float(elbow_pt[0]), float(elbow_pt[1]))
+            # 拐角点前向距离：roi 底部=机器人处(ry≈0)，顶部=视野远端(ry≈roi_h)
+            seg_obj.elbow_ry = float(roi_h - elbow_pt[1])
             # 观测到的拐角弯折角（0~180°，恒正），供闭环决定转弯程度
             seg_obj.corner_deg = float(elbow_turn_deg)
             # 转向方向：远臂末端相对肘点的横向符号（右=+1，左=-1）
