@@ -5,10 +5,15 @@ debug_server.py —— 闯关运行中的被动镜像调试服务器（机器人
 
 设计原则（详见《视觉调试指南》三工具分工）：
   - 不占摄像头：只监视关卡正常拍照落盘的照片（默认 /home/pi/Pictures/photo_*.jpg）；
-  - 零侵入：不 import core.robot_core（其模块级会连舵机串口，与闯关的 main.py
-    双进程抢串口会干扰舵机指令）；PnP 数学用 camera_config 常量本地复刻；
-  - 事件驱动：只有新照片才触发分析（一张只分析一次），无新照片时看门狗仅扫目录名；
-  - 分析在机器人端（部署真实形态），叠加绘制在 PC 浏览器（前端 canvas，可分层开关）。
+  - 零侵入：不改 core/levels/main.py 任何调用链；tag 分析器**复用关卡内部
+    逻辑**（core.robot_core 的同款 apriltag 检测 / solve_pnp_pose / 完整
+    pnp_pose_problems 门控）——import 会打开串口句柄（SDK 可导入时）但调试
+    服务器从不写串口，与 TonyPi.py/main.py 共持串口的现状一致；异常或
+    --no-core 时自动降级本地简化实现；yolo/digit/line 复用 vision/ 共享包；
+  - 事件驱动：只有新照片才触发分析（一张只分析一次），无新照片时看门狗仅扫
+    目录名；
+  - 分析在机器人端（部署真实形态），叠加绘制在 PC 浏览器（前端 canvas，可分
+    层开关）。
 
 用法（机器人上，jupyter-env 解释器以获得 apriltag/onnxruntime/cv2）：
     /home/pi/jupyter-env/bin/python3 tools/debug_server.py --port 8081
@@ -106,11 +111,32 @@ class Analyzers:
         self._yolo = None
         self._digit = None
         self._line = None
+        self.mode = None      # tag 分析模式："core"（复用关卡逻辑）/"local"（降级）
+        self._rc = None
+        self._state = None
         self.status = {"tag": "未加载", "yolo": "未加载",
                        "digit": "未加载", "line": "未加载"}
 
     # ---- tag：apriltag + 可选 PnP（levels.goodluck.tag_poses 存在时）----
     def _load_tag(self):
+        """双模式：首选复用关卡内部逻辑（core.robot_core 的同款 apriltag 检测、
+        solve_pnp_pose、完整 pnp_pose_problems 门控）；core 不可用（PC 无 SDK、
+        apriltag 缺失或 --no-core）时降级为本地简化实现。"""
+        self.mode = "local"
+        if not self.args.no_core:
+            try:
+                import core.robot_core as rc
+                from levels.goodluck import tag_poses
+                if rc.apriltag is None:
+                    raise RuntimeError("core.apriltag 不可用")
+                self._rc = rc
+                self._state = rc.RobotState(tag_poses=tag_poses)
+                self._tag_poses = {str(k): v for k, v in tag_poses.items()}
+                self.mode = "core"
+                self.status["tag"] = "core 复用模式"
+                return
+            except Exception as e:
+                self.status["tag"] = f"core 不可用({e})，降级本地实现"
         import apriltag
         self._tag_det = apriltag.Detector(
             apriltag.DetectorOptions(families="tag36h11"))
@@ -121,9 +147,57 @@ class Analyzers:
             self._tag_poses = None
             self.status["tag"] += f"（无关卡 tag_poses，跳过 PnP: {e}）"
 
-    def run_tag(self, frame):
-        if self._tag_det is None:
+    def run_tag(self, frame, photo_path=None):
+        if self.mode is None:
             self._load_tag()
+        if self.mode == "core":
+            return self._run_tag_core(photo_path)
+        return self._run_tag_local(frame)
+
+    def _run_tag_core(self, photo_path):
+        """复用关卡内部逻辑：RobotState.detect_apriltag + solve_pnp_pose +
+        pnp_pose_problems（完整门控），与闯关看到的结果同源。"""
+        rc, state = self._rc, self._state
+        if not photo_path or not os.path.exists(photo_path):
+            return {"tags": [], "pose": None}  # 照片已被清理（如 tjz 滚动删除）
+        try:
+            dets = state.detect_apriltag(photo_path) or []
+        except Exception as e:
+            self.status["tag"] = f"检测异常: {e}"
+            dets = []
+        tags, objlist, imglist, known = [], [], [], 0
+        for r in dets:
+            corners = [[round(float(x), 1), round(float(y), 1)]
+                       for x, y in r.corners]
+            tags.append({"id": int(r.tag_id), "corners": corners})
+            tid = str(r.tag_id)
+            if tid in state.tag_poses:
+                known += 1
+                objlist.extend(state.tag_poses[tid])
+                imglist.extend(
+                    np.asarray(r.corners, dtype=np.float64)[rc.TAG_CORNER_PERM])
+        pose = None
+        if known:
+            res = rc.solve_pnp_pose(objlist, imglist)
+            if res:
+                pos, ori, reproj = res
+                pose = {"position": [round(float(pos[0]), 1),
+                                     round(float(pos[1]), 1)],
+                        "cam_z": round(float(pos[2]), 1),
+                        "orientation": [round(float(ori[0]), 3),
+                                        round(float(ori[1]), 3)],
+                        "reproj": round(reproj, 2),
+                        "tags_used": known,
+                        "problems": rc.pnp_pose_problems(
+                            pos, ori, reproj, n_tags=known)}
+        return {"tags": tags, "pose": pose}
+
+    def _run_tag_local(self, frame):
+        """降级路径：本地 apriltag 检测 + camera_config 常量的简化 PnP 复刻"""
+        if self._tag_det is None:
+            import apriltag
+            self._tag_det = apriltag.Detector(
+                apriltag.DetectorOptions(families="tag36h11"))
         gray = _cv().cvtColor(frame, _cv().COLOR_BGR2GRAY)
         tags, pose = [], None
         objlist, imglist = [], []
@@ -237,12 +311,17 @@ class Analyzers:
                          "others": len(r.others),
                          "points": pts}}
 
-    def run(self, name, frame):
-        runner = {"tag": self.run_tag, "yolo": self.run_yolo,
-                  "digit": self.run_digit, "line": self.run_line}[name]
+    def run(self, name, frame, photo_path=None):
         t0 = time.perf_counter()
         try:
-            out = runner(frame)
+            if name == "tag":
+                out = self.run_tag(frame, photo_path)
+            elif name == "yolo":
+                out = self.run_yolo(frame)
+            elif name == "digit":
+                out = self.run_digit(frame)
+            else:
+                out = self.run_line(frame)
             self.status[name] = "ok"
             return out, round((time.perf_counter() - t0) * 1000)
         except Exception as e:
@@ -328,6 +407,13 @@ class Hub:
     def analyze(self, path, mtime_s):
         frame = _cv().imread(path)
         if frame is None:
+            time.sleep(0.4)
+            frame = _cv().imread(path)
+        if frame is None:
+            # 照片在落盘/清理竞争中暂不可读（如 tjz 进程滚动删除）：
+            # 清除断点标记，下轮扫描会分析当时最新的完整照片
+            self._last_identity = None
+            print(f"[analyze] 照片暂不可读，下轮重试: {path}")
             return
         with open(path, "rb") as f:
             jpeg = f.read()
@@ -335,7 +421,7 @@ class Hub:
         for name, on in list(self.analyzers.enabled.items()):
             if not on:
                 continue
-            out, cost = self.analyzers.run(name, frame)
+            out, cost = self.analyzers.run(name, frame, self.photo_path)
             if out:
                 results.update(out)   # 异常时 run 返回 {name: 文本}，由状态栏展示
             ms[name] = cost
@@ -418,6 +504,7 @@ class Hub:
                 "image_height": getattr(self, "display_h", None) or 1944,
                 "analyzers": dict(self.analyzers.enabled),
                 "analyzer_status": dict(self.analyzers.status),
+                "tag_mode": self.analyzers.mode,
                 "capturing": self._capturing,
                 "capture_note": self.capture_note,
                 "results": self.results,
@@ -548,6 +635,7 @@ function updateStatus() {
   const lines = [`照片: ${state.photo_file || '无'} (年龄 ${state.photo_age_s}s)`];
   for (const k of ['tag', 'yolo', 'digit', 'line'])
     lines.push(`${k}: ${state.analyzers[k] ? '开' : '关'} | ${state.analyzer_status[k] || ''} | ${state.analysis_ms[k] ? state.analysis_ms[k] + 'ms' : '-'}`);
+  if (state.tag_mode) lines.push(`tag 模式: ${state.tag_mode}`);
   if (state.errors && Object.keys(state.errors).length)
     lines.push('错误: ' + JSON.stringify(state.errors));
   s.textContent = lines.join('\\n');
@@ -653,6 +741,8 @@ def main():
     ap.add_argument("--no-tag", action="store_true", help="初始关闭 tag 分析器")
     ap.add_argument("--no-yolo", action="store_true", help="初始关闭 yolo 分析器")
     ap.add_argument("--enable-digit", action="store_true", help="初始启用 digit 分析器")
+    ap.add_argument("--no-core", action="store_true",
+                    help="tag 分析不复用 core.robot_core，强制本地简化实现")
     ap.add_argument("--no-line", action="store_true", help="初始关闭 line 巡线分析器")
     ap.add_argument("--line-hsv", default="0,90,80:10,255,255",
                     help="巡线 HSV 范围 'h,s,v:h,s,v'（默认红线，自动补 170~180 段）")
