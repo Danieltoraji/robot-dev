@@ -20,6 +20,7 @@ exec_on_robot.py —— 在机器人上远程执行代码（Jupyter 内核会话
 import argparse
 import http.cookiejar
 import json
+import os
 import re
 import sys
 import time
@@ -28,7 +29,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-DEFAULT_HOST = "http://192.168.31.209:8888"
+DEFAULT_HOST = os.environ.get("ROBOT_HOST", "http://192.168.43.81:8888")
 DEFAULT_PASSWORD = "pi"
 
 

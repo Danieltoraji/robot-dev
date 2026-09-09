@@ -21,7 +21,8 @@ sync_to_robot.py —— PC → 机器人代码同步（Jupyter Contents API，�
     python tools/sync_to_robot.py --host http://IP:8888 --password xxx
 
 默认同步集合: main.py + core/ vision/ levels/ tools/ models/
-（sim/ docs/ tests/ archive/ release/ 仅 PC 使用，不进机器人。）
+（sim/ docs/ tests/ archive/ release/ 仅 PC 使用，不进机器人；
+  例外：archive/result/ninegrid_homography.json 是数字宫格运行时标定产物，附加同步。）
 """
 
 import argparse
@@ -36,10 +37,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-DEFAULT_HOST = "http://192.168.31.209:8888"
+DEFAULT_HOST = os.environ.get("ROBOT_HOST", "http://192.168.43.81:8888")
 DEFAULT_PASSWORD = "pi"
 DEFAULT_REMOTE_ROOT = "Robot_control_self_module"
-DEFAULT_PATHS = ["main.py", "core", "vision", "levels", "tools", "models"]
+DEFAULT_PATHS = ["main.py", "debug.sh", "core", "vision", "levels", "tools", "models"]
+
+# 机器人运行时需要的标定产物：archive/ 默认不同步（PC 专用），这些文件例外。
+# 数字宫格的地面单应按俯仰档存于 archive/result/ninegrid_homography.json，
+# 缺失会退回 from_pose 解析自举（布局归属精度下降）——必须随代码一起上机。
+EXTRA_FILES = [
+    "archive/result/ninegrid_homography.json",
+]
 
 SKIP_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", ".zcode", "archive", "release"}
 SKIP_EXTS = (".pyc", ".pyo", ".npz", ".npz.bak")
@@ -48,7 +56,7 @@ SKIP_EXTS = (".pyc", ".pyo", ".npz", ".npz.bak")
 class JupyterClient:
     """最小 Jupyter REST 客户端：密码登录 + Contents API（标准库实现）"""
 
-    def __init__(self, host, password, timeout=30):
+    def __init__(self, host, password, timeout=120):
         self.host = host.rstrip("/")
         self.timeout = timeout
         self.jar = http.cookiejar.CookieJar()
@@ -57,8 +65,8 @@ class JupyterClient:
         self._login(password)
 
     def _login(self, password):
-        resp = self._open_with_retry(self.host + "/login")
-        html = resp.read().decode("utf-8", "replace")
+        _status, body = self._open_with_retry(self.host + "/login")
+        html = body.decode("utf-8", "replace")
         m = re.search(r'name="_xsrf" value="([^"]+)"', html)
         token = m.group(1) if m else self._cookie("_xsrf")
         self._open_with_retry(urllib.request.Request(
@@ -70,16 +78,16 @@ class JupyterClient:
         self.xsrf = token
 
     def _open_with_retry(self, req, tries=3):
-        """链路抖动重试（2026-09-05：机器人 WiFi 省电导致的频繁超时，已关省电，
-        但仍保留重试兜底）"""
+        """链路抖动重试：请求与响应体读取都在保护范围内
+        （2026-09-07 教训：大文件 GET 的 body 读取中途超时，仅包 open 不够）"""
         last = None
         for i in range(tries):
             try:
-                return self.opener.open(req, timeout=self.timeout)
-            except (urllib.error.URLError, urllib.error.HTTPError,
-                    TimeoutError, OSError) as e:
-                if isinstance(e, urllib.error.HTTPError) and e.code < 500:
-                    raise  # 4xx 是业务错误，重试无意义
+                resp = self.opener.open(req, timeout=self.timeout)
+                return resp.status, resp.read()
+            except urllib.error.HTTPError:
+                raise  # 4xx/5xx 是业务结果，重试无意义
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
                 last = e
                 time.sleep(1.5 * (i + 1))
         raise last
@@ -99,10 +107,16 @@ class JupyterClient:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            resp = self._open_with_retry(req)
-            return resp.status, resp.read()
+            return self._open_with_retry(req)
         except urllib.error.HTTPError as e:
             return e.code, e.read()
+
+    def remote_meta(self, remote_path):
+        """远端文件元信息（含 size）；不存在返回 None"""
+        s, b = self._request("GET", f"/api/contents/{urllib.parse.quote(remote_path)}")
+        if s != 200:
+            return None
+        return json.loads(b)
 
     def get_file_bytes(self, remote_path):
         """读远端文件原始字节；不存在返回 None"""
@@ -162,6 +176,12 @@ def main():
                         help="要同步的本地文件/目录（相对仓库根）")
     parser.add_argument("--check", action="store_true",
                         help="干跑：只显示会新增/更新哪些文件，不写远端")
+    parser.add_argument("--no-manifest", action="store_true",
+                        help="不用本地清单，退回远端逐字节比对（慢，不推荐）")
+    parser.add_argument("--full", action="store_true",
+                        help="忽略清单全量重传（结束后重建清单）")
+    parser.add_argument("--request-timeout", type=int, default=30,
+                        help="单请求超时秒（默认 30；大文件弱链路可调大，如 150）")
     args = parser.parse_args()
 
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -171,42 +191,75 @@ def main():
             print(f"[WARN] 本地不存在，跳过: {rel}")
             continue
         pairs.extend(collect_local_files(base, rel))
+    # 标定产物例外（archive/ 默认跳过，但机器人运行时需要）
+    for rel in EXTRA_FILES:
+        local = os.path.join(base, rel)
+        if os.path.isfile(local):
+            print(f"[标定产物] 附加同步: {rel}")
+            pairs.append((local, rel.replace(os.sep, "/")))
     if not pairs:
         print("没有可同步的文件")
         sys.exit(1)
 
-    client = JupyterClient(args.host, args.password)
+    client = JupyterClient(args.host, args.password, timeout=args.request_timeout)
     print(f"已登录 {args.host}，目标 {args.remote_root}/，"
           f"待同步 {len(pairs)} 个文件{'（干跑）' if args.check else ''}")
 
+    # 本地同步清单：记录每个已推送文件的 (size, mtime_ns)。
+    # 命中清单 = 本地直接跳过，零远端请求——根因：每文件 2 个远端比对请求 ×
+    # 几十个文件，在忙于跑框架的机器人 Jupyter 上是分钟级的卡顿源。
     added = updated = unchanged = failed = 0
+    manifest_path = os.path.join(base, "archive", "sync_manifest.json")
+    manifest = {}
+    if not args.no_manifest and os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (ValueError, OSError):
+            manifest = {}
+
     for local_path, rel in pairs:
         remote_path = f"{args.remote_root}/{rel}"
+        st = os.stat(local_path)
+        entry = manifest.get(rel)
+        if (not args.full and entry is not None
+                and entry.get("size") == st.st_size
+                and entry.get("mtime_ns") == st.st_mtime_ns):
+            unchanged += 1
+            continue
         with open(local_path, "rb") as f:
             data = f.read()
         if len(data) > 80 * 1024 * 1024:
             print(f"[WARN] 超大文件跳过: {rel} ({len(data) // 1024 // 1024}MB)")
             failed += 1
             continue
-        remote = client.get_file_bytes(remote_path)
-        if remote == data:
-            unchanged += 1
-            continue
-        tag = "新增" if remote is None else "更新"
-        if args.check:
-            print(f"[将{tag}] {rel} ({len(data)} 字节)")
-        else:
-            parent = remote_path.rsplit("/", 1)[0]
-            if "/" in remote_path:
-                client.ensure_remote_dir(parent)
-            if client.put_file_bytes(remote_path, data):
-                print(f"[已{tag}] {rel} ({len(data)} 字节)")
+        is_new = entry is None
+        tag = "新增" if is_new else "更新"
+        # 单文件网络隔离：一个文件的超时/失败只计失败并继续，
+        # 不中止整个同步（2026-09-07 教训：弱链路上大文件 PUT 反复超时曾卡死全局）
+        try:
+            if args.check:
+                print(f"[将{tag}] {rel} ({st.st_size} 字节)", flush=True)
             else:
-                print(f"[失败] {rel}")
-                failed += 1
-                continue
-        added += (remote is None)
-        updated += (remote is not None)
+                parent = remote_path.rsplit("/", 1)[0]
+                if "/" in remote_path:
+                    client.ensure_remote_dir(parent)
+                if not client.put_file_bytes(remote_path, data):
+                    print(f"[失败] {rel}")
+                    failed += 1
+                    continue
+                manifest[rel] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+            added += is_new
+            updated += not is_new
+        except (TimeoutError, urllib.error.URLError, OSError) as e:
+            print(f"[网络失败，跳过] {rel}: {e}")
+            failed += 1
+            continue
+
+    if not args.check:
+        os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=1)
 
     print("-" * 56)
     print(f"完成: 新增 {added} / 更新 {updated} / 无变化 {unchanged} / 失败 {failed}"

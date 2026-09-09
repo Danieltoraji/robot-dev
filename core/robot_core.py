@@ -186,6 +186,7 @@ class RobotState:
         self.current_position = None
         self.current_orientation = None
         self.current_head_pulse = HEAD_CENTER
+        self.current_pitch_pulse = 1500  # 俯仰舵机（ID1），1500=水平，越小越低头
         self.tag_poses = tag_poses if tag_poses is not None else {}
         # 多视角外参：优先读 survey_field.py 标定产物；缺失则用缺省值
         # （e=0 即「光心=机体中心」假设），首次联合求解时打印告警
@@ -255,6 +256,20 @@ class RobotState:
     def raise_head(self):
         """转动头部至 PITCH_UP_PULSE（固定抬头；外参标定须与此俯仰一致）"""
         ctl.set_pwm_servo_pulse(1, PITCH_UP_PULSE, 500)
+
+    def set_pitch(self, pulse, move_time_ms=500):
+        """俯仰舵机（ID1）通用控制：1500=水平，可调约 950~2000，越小越低头
+
+        与目标脉宽相同则跳过；转动后按转动时长等待舵机到位。
+        （数字宫格等需要多俯仰档切换的关卡使用；AprilTag 关卡仍用 raise_head。）
+        """
+        if ctl is None:
+            return
+        if pulse == self.current_pitch_pulse:
+            return
+        ctl.set_pwm_servo_pulse(1, pulse, move_time_ms)
+        time.sleep(move_time_ms / 1000.0 + 0.3)
+        self.current_pitch_pulse = pulse
 
     def pulse_to_angle(self, pulse):
         """舵机脉宽→角度（度），右转为负，左转为正"""

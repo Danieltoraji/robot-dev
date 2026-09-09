@@ -18,7 +18,7 @@ corner 判据（肘部检测，替代旧 PCA 直线度判据）：
 import cv2
 import numpy as np
 
-from detection import LineResult, LineSegment
+from vision.detection import LineResult, LineSegment
 
 # 肘部检测参数（corner 判据）
 ELBOW_ANGLE_THRESH = 45.0   # 弦向角变化超过此值（度）判为肘部（拐角）

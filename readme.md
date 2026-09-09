@@ -2,8 +2,10 @@
 
 啊，伟大的搭档！我又来了！
 
-本仓库用于放置 TonyPi 机器人上运行的代码。目前有一个已实现的关卡 `goodluck`，
-采用 **AprilTag 视觉定位 + 固定路点闭环导航** 的稳定方案。
+本仓库用于放置 TonyPi 机器人上运行的代码。目前有两个已实现的关卡：
+
+- `goodluck`：AprilTag 视觉定位 + 固定路点闭环导航（稳定方案）；
+- `nine_grid`（数字宫格）：颜色主判 + GN 地图定位，按 1→7 顺序到达随机布局的七块数字面板。
 
 ## 这是什么
 
@@ -35,10 +37,17 @@ python main.py goodluck
 # 走到停靠点 4 后提前结束（出口段交给其它方法）
 python main.py goodluck --end-at-last-stop
 
-# 运行模拟器（PC，验证算法）
-python -m sim.goodluck_sim
+# 运行数字宫格关卡（真机）
+python main.py nine_grid
 
-# 批量跑模拟变体（可选）
+# 运行模拟器（PC，验证算法）
+python -m sim.goodluck_sim            # goodluck：2D 可视化 + 位姿桩
+python -m sim.nine_grid_sim           # 数字宫格：合成相机图像，跑真实视觉链路
+python -m sim.nine_grid_sim --random-layout --seed 11   # 随机布局探索
+python -m sim.nine_grid_view          # 数字宫格图形界面（相机窗格 + 俯视图，可暂停/单步）
+python -m sim.nine_grid_view --headless   # 无图形环境（SSH）退回无头运行
+
+# 批量跑模拟变体（可选，goodluck）
 python -m sim.run_sim_variants ideal 1
 ```
 
@@ -53,21 +62,31 @@ robot-dev/
 ├── core/              # 运行共享核心
 │   ├── robot_core.py      # RobotState（定位/动作/头部/几何/取帧）
 │   ├── camera_config.py   # 相机内参/头部舵机常量
+│   ├── ground_homography.py # 地面单应（数字宫格定位基础）
 │   ├── multiview_pose.py  # 多视角联合位姿求解
 │   ├── trace.py           # 真机轨迹记录
 │   └── paths.py           # 项目路径 / RESULT_DIR 统一入口
-├── levels/            # 关卡层：goodluck.py（赛道数据 + ROUTE + 导航算法）
-├── vision/            # 视觉识别能力：巡线/颜色/数字/YOLO 检测器
-├── sim/               # 模拟器
-│   ├── goodluck_sim.py    # SimRobotState 继承重写 I/O
+├── levels/            # 关卡层
+│   ├── goodluck.py        # 赛道数据 + ROUTE + 导航算法
+│   └── nine_grid.py       # 数字宫格：布局扫 + GN 定位 + FSM
+├── vision/            # 视觉识别能力：巡线/颜色/数字/九宫格/YOLO 检测器
+│   └── nine_grid_detector.py  # 七色面板 + HOG/SVM 数字仲裁
+├── sim/               # 模拟器（只提供世界/传感器/带噪声动作，算法走真实代码）
+│   ├── goodluck_sim.py    # goodluck：位姿桩 + matplotlib 可视化
+│   ├── nine_grid_sim.py   # 数字宫格：合成相机图像 + 真实视觉链路
+│   ├── nine_grid_view.py  # 数字宫格图形界面（相机窗格 + 俯视图，暂停/单步/重开）
 │   └── run_sim_variants.py
+├── tests/             # 单测 + 仿真集成测试（断言在 tests/，环境在 sim/）
 ├── tools/             # 开发/调试/标定工具
 │   ├── debug_vision.py / gen_digit_templates.py
+│   ├── calib_ninegrid.py  # 数字宫格地面单应点击标定
 │   ├── camera_preview.py
-│   ├── simple_pnp_run.py
+│   ├── sync_to_robot.py / exec_on_robot.py / pull_from_robot.py
 │   └── field_calib/       # 真机标定/多视角/场地工具
-├── archive/           # 归档：backup/（历史快照）+ result/（运行产物，gitignore）
+├── models/            # 模型权重（含 nine_grid/digit_classifier_mask.pkl）
 ├── docs/              # 文档（见 docs/README.md）
+├── reference code/    # 赛道方/参考队代码（只读）
+├── archive/           # 归档：backup/（历史快照）+ result/（运行产物，gitignore）
 └── .zcode/            # 本地会话计划（一般不动）
 ```
 

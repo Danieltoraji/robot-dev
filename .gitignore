@@ -1,4 +1,4 @@
-/archive/result/
+/archive/
 /datasets/
 
 # release 打包产物（不入库）
@@ -7,3 +7,6 @@
 # Python 缓存
 __pycache__/
 *.pyc
+
+# 编辑器
+.vscode/
