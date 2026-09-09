@@ -99,12 +99,15 @@ class Analyzers:
         self.args = args
         self.enabled = {"tag": not args.no_tag,
                         "yolo": not args.no_yolo,
-                        "digit": args.enable_digit}
+                        "digit": args.enable_digit,
+                        "line": not args.no_line}
         self._tag_det = None
         self._tag_poses = None
         self._yolo = None
         self._digit = None
-        self.status = {"tag": "未加载", "yolo": "未加载", "digit": "未加载"}
+        self._line = None
+        self.status = {"tag": "未加载", "yolo": "未加载",
+                       "digit": "未加载", "line": "未加载"}
 
     # ---- tag：apriltag + 可选 PnP（levels.goodluck.tag_poses 存在时）----
     def _load_tag(self):
@@ -195,9 +198,48 @@ class Analyzers:
         return {"digit": {"digits": r.digits, "conf": round(r.confidence, 3),
                           "center": list(r.center_px) if r.center_px else None}}
 
+    def _load_line(self):
+        # 兼容两种导入风格：仓库版 line_detector 用 `from vision.detection
+        # import ...`；机器人上的并行会话版本用平铺 `from detection import ...`
+        # （需将 vision/ 目录加入 sys.path 才能解析）。
+        vdir = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "vision")
+        if vdir not in sys.path:
+            sys.path.insert(0, vdir)
+        try:
+            from vision.line_detector import LineDetector
+        except ModuleNotFoundError:
+            from line_detector import LineDetector
+        a, b = self.args.line_hsv.split(":")
+        hsv = (tuple(int(v) for v in a.split(",")),
+               tuple(int(v) for v in b.split(",")))
+        # 颜色模式认红线（line_detector 对 h≤10 自动补 170~180 段）；
+        # roi_ratio=1.0：调试要观察全画面的线，而非巡线关卡的下半幅
+        self._line = LineDetector(line_color="color", hsv_range=hsv,
+                                  roi_ratio=1.0, work_width=640)
+
+    def run_line(self, frame):
+        if self._line is None:
+            self._load_line()
+        h, w = frame.shape[:2]
+        r = self._line.detect(frame)
+        if not r.exists or r.primary is None:
+            return {"line": None}
+        # 工作坐标（640 宽、ROI 自 h*(1-roi_ratio) 起）→ 原图坐标
+        s = w / self._line.work_width
+        roi_top = h * (1.0 - self._line.roi_ratio)
+        prim = r.primary
+        pts = [[round(px * s, 1), round(roi_top + py * s, 1)]
+               for px, py in prim.points]
+        return {"line": {"orientation": prim.orientation,
+                         "heading_deg": round(prim.heading_deg, 1),
+                         "confidence": round(r.confidence, 3),
+                         "others": len(r.others),
+                         "points": pts}}
+
     def run(self, name, frame):
         runner = {"tag": self.run_tag, "yolo": self.run_yolo,
-                  "digit": self.run_digit}[name]
+                  "digit": self.run_digit, "line": self.run_line}[name]
         t0 = time.perf_counter()
         try:
             out = runner(frame)
@@ -294,9 +336,8 @@ class Hub:
             if not on:
                 continue
             out, cost = self.analyzers.run(name, frame)
-            results.update(out if out else {})
-            if out and out.get(name) is None:
-                errors[name] = "分析失败"
+            if out:
+                results.update(out)   # 异常时 run 返回 {name: 文本}，由状态栏展示
             ms[name] = cost
 
         # /photo 服务降采样小图（弱上行链路友好），结果坐标同步缩放
@@ -317,6 +358,10 @@ class Hub:
             dg = results.get("digit")
             if dg and dg.get("center"):
                 dg["center"] = [round(v * scale, 1) for v in dg["center"]]
+            ln = results.get("line")
+            if ln and ln.get("points"):
+                ln["points"] = [[round(x * scale, 1), round(y * scale, 1)]
+                                for x, y in ln["points"]]
 
         with self.lock:
             self.photo_path = path
@@ -408,7 +453,8 @@ PAGE_HTML = """<!DOCTYPE html>
  <fieldset><legend>分析器（机器人端）</legend>
   <label><input type="checkbox" id="en_tag" checked> tag 定位</label><br>
   <label><input type="checkbox" id="en_yolo" checked> yolo 球/门</label><br>
-  <label><input type="checkbox" id="en_digit"> digit 数字</label>
+  <label><input type="checkbox" id="en_digit"> digit 数字</label><br>
+  <label><input type="checkbox" id="en_line" checked> line 巡线</label>
  </fieldset>
  <fieldset><legend>图层显示</legend>
   <label><input type="checkbox" id="ly_tagbox" checked> tag 角点</label><br>
@@ -416,7 +462,8 @@ PAGE_HTML = """<!DOCTYPE html>
   <label><input type="checkbox" id="ly_pose" checked> 定位信息</label><br>
   <label><input type="checkbox" id="ly_yolo" checked> yolo 框</label><br>
   <label><input type="checkbox" id="ly_conf" checked> 置信度文本</label><br>
-  <label><input type="checkbox" id="ly_digit" checked> digit</label>
+  <label><input type="checkbox" id="ly_digit" checked> digit</label><br>
+  <label><input type="checkbox" id="ly_line" checked> 巡线（红）</label>
  </fieldset>
  <fieldset><legend>状态</legend><div id="status">连接中...</div></fieldset>
  <fieldset><legend>机器人拍照</legend>
@@ -477,6 +524,16 @@ function draw() {
     if (dg.center) box([dg.center[0]-60, dg.center[1]-60, 120, 120], '#ff8800', 4);
     text('digit ' + dg.digits + ' ' + dg.conf.toFixed(2), 20, canvas.height - 20, '#ff8800');
   }
+  if (ly('ly_line') && state.results.line && state.results.line.points) {
+    const L = state.results.line;
+    ctx.strokeStyle = '#ff5555'; ctx.lineWidth = 5; ctx.beginPath();
+    L.points.forEach((p, i) => i ? ctx.lineTo(p[0]*k, p[1]*k)
+                                 : ctx.moveTo(p[0]*k, p[1]*k));
+    ctx.stroke();
+    const p0 = L.points[0];
+    text(`line ${L.orientation} ${L.heading_deg}° (${L.points.length}点)`,
+         Math.max(p0[0]-10, 10), Math.max(p0[1]-14, 30), '#ff5555');
+  }
 }
 
 function updateStatus() {
@@ -489,7 +546,7 @@ function updateStatus() {
   }
   if (!state) { s.textContent = '无数据'; return; }
   const lines = [`照片: ${state.photo_file || '无'} (年龄 ${state.photo_age_s}s)`];
-  for (const k of ['tag', 'yolo', 'digit'])
+  for (const k of ['tag', 'yolo', 'digit', 'line'])
     lines.push(`${k}: ${state.analyzers[k] ? '开' : '关'} | ${state.analyzer_status[k] || ''} | ${state.analysis_ms[k] ? state.analysis_ms[k] + 'ms' : '-'}`);
   if (state.errors && Object.keys(state.errors).length)
     lines.push('错误: ' + JSON.stringify(state.errors));
@@ -510,13 +567,13 @@ img.onload = () => { photoLoading = false; draw(); };
 img.onerror = () => { photoLoading = false; };
 setInterval(refreshState, 1000);
 setInterval(refreshPhoto, 2000);
-for (const id of ['en_tag', 'en_yolo', 'en_digit'])
+for (const id of ['en_tag', 'en_yolo', 'en_digit', 'en_line'])
   document.getElementById(id).onchange = () => {
     fetch('/config', {method: 'POST',
       body: JSON.stringify({analyzers: {tag: en_tag.checked, yolo: en_yolo.checked,
-                                        digit: en_digit.checked}})});
+                                        digit: en_digit.checked, line: en_line.checked}})});
   };
-for (const id of ['ly_tagbox', 'ly_tagid', 'ly_pose', 'ly_yolo', 'ly_conf', 'ly_digit'])
+for (const id of ['ly_tagbox', 'ly_tagid', 'ly_pose', 'ly_yolo', 'ly_conf', 'ly_digit', 'ly_line'])
   document.getElementById(id).onchange = draw;
 refreshState();
 refreshPhoto();
@@ -596,6 +653,9 @@ def main():
     ap.add_argument("--no-tag", action="store_true", help="初始关闭 tag 分析器")
     ap.add_argument("--no-yolo", action="store_true", help="初始关闭 yolo 分析器")
     ap.add_argument("--enable-digit", action="store_true", help="初始启用 digit 分析器")
+    ap.add_argument("--no-line", action="store_true", help="初始关闭 line 巡线分析器")
+    ap.add_argument("--line-hsv", default="0,90,80:10,255,255",
+                    help="巡线 HSV 范围 'h,s,v:h,s,v'（默认红线，自动补 170~180 段）")
     args = ap.parse_args()
 
     hub = Hub(args)
