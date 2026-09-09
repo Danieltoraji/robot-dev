@@ -18,6 +18,7 @@ debug_server.py —— 闯关运行中的被动镜像调试服务器（机器人
 import argparse
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -31,7 +32,7 @@ if __package__ in (None, ""):
 import numpy as np
 
 from core.camera_config import (
-    CAMERA_INTRINSIC, CAMERA_DISTORTION,
+    CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_INTRINSIC, CAMERA_DISTORTION,
     PNP_FIELD_MIN, PNP_FIELD_MAX, PNP_CAM_Z_MIN, PNP_CAM_Z_MAX,
     reproj_gate_px,
 )
@@ -131,7 +132,9 @@ class Analyzers:
             if self._tag_poses and str(r.tag_id) in self._tag_poses:
                 known += 1
                 objlist.extend(self._tag_poses[str(r.tag_id)])
-                imglist.append(np.asarray(r.corners, dtype=np.float64))
+                # 注意 extend（逐点拼接）而非 append——append 会把 4×2 整块塞成
+                # 一项，solvePnP 收到畸形点集直接断言崩溃（真机踩坑 2026-09-08）
+                imglist.extend(np.asarray(r.corners, dtype=np.float64))
         if known:
             res = pnp_pose(objlist, imglist)
             if res:
@@ -212,6 +215,8 @@ class Analyzers:
 class Hub:
     """共享状态 + 照片看门狗（事件驱动分析）"""
 
+    DISPLAY_WIDTH = 960  # /photo 服务的降采样宽度（弱上行链路友好，~150KB）
+
     def __init__(self, args):
         self.args = args
         self.lock = threading.Lock()
@@ -224,6 +229,9 @@ class Hub:
         self.errors = {}
         self.analysis_ms = {}
         self._last_identity = None
+        self._warned_corrupt = set()
+        self._capturing = False
+        self.capture_note = "就绪"
 
     def _jpeg_complete(self, path):
         try:
@@ -245,7 +253,7 @@ class Hub:
         d = self.args.photo_dir
         if not os.path.isdir(d):
             return
-        newest, newest_key = None, None
+        entries = []
         for fn in os.listdir(d):
             if not (fn.startswith(PHOTO_PREFIX) and fn.endswith(".jpg")):
                 continue
@@ -254,15 +262,26 @@ class Hub:
                 st = os.stat(p)
             except OSError:
                 continue
-            key = (st.st_mtime_ns, st.st_size)
-            if newest_key is None or key > newest_key:
-                newest, newest_key = p, key
-        if newest is None or newest_key == self._last_identity:
+            if st.st_size < 1024:
+                continue  # 0 字节/明显废件，直接无视
+            entries.append(((st.st_mtime_ns, st.st_size), p))
+        if not entries:
             return
-        if not self._jpeg_complete(newest):
-            return  # 还没写完，下轮再见
-        self._last_identity = newest_key
-        self.analyze(newest, newest_key[0] / 1e9)
+        entries.sort(reverse=True)
+        # 取最新的“完整”照片：损坏文件（无 FFD9）跳过并继续向前找，
+        # 避免一张损坏的最新文件永久阻塞分析（真机踩坑 2026-09-08：
+        # 重启瞬间正在写的照片被截断，mtime 恰好最新）
+        for key, path in entries:
+            if key == self._last_identity:
+                return  # 最新完整照片已分析过 → 无新内容
+            if self._jpeg_complete(path):
+                self._last_identity = key
+                self.analyze(path, key[0] / 1e9)
+                return
+            if path not in self._warned_corrupt:
+                self._warned_corrupt.add(path)
+                print(f"[watchdog] 跳过损坏文件: {path}", flush=True)
+        # 全部损坏：本轮什么都不做
 
     def analyze(self, path, mtime_s):
         frame = _cv().imread(path)
@@ -279,6 +298,26 @@ class Hub:
             if out and out.get(name) is None:
                 errors[name] = "分析失败"
             ms[name] = cost
+
+        # /photo 服务降采样小图（弱上行链路友好），结果坐标同步缩放
+        h, w = frame.shape[:2]
+        scale = min(1.0, self.DISPLAY_WIDTH / w)
+        if scale < 1.0:
+            small = _cv().resize(frame, (int(w * scale), int(h * scale)),
+                                 interpolation=_cv().INTER_AREA)
+            ok, buf = _cv().imencode(".jpg", small,
+                                     [_cv().IMWRITE_JPEG_QUALITY, 70])
+            jpeg = buf.tobytes() if ok else jpeg
+        if scale < 1.0:
+            for t in results.get("tags", []):
+                t["corners"] = [[round(x * scale, 1), round(y * scale, 1)]
+                                for x, y in t["corners"]]
+            for d in results.get("yolo", []):
+                d["bbox"] = [round(v * scale, 1) for v in d["bbox"]]
+            dg = results.get("digit")
+            if dg and dg.get("center"):
+                dg["center"] = [round(v * scale, 1) for v in dg["center"]]
+
         with self.lock:
             self.photo_path = path
             self.photo_jpeg = jpeg
@@ -287,10 +326,42 @@ class Hub:
             self.results = results
             self.errors = errors
             self.analysis_ms = ms
+            self.display_w = int(w * scale)
+            self.display_h = int(h * scale)
         print(f"[analyze] {os.path.basename(path)} "
               f"tags={len(results.get('tags', []))} "
               f"yolo={len(results.get('yolo', []))} "
               f"pose={'有' if results.get('pose') else '无'} {ms}")
+
+    def trigger_capture(self):
+        """网页按钮触发机器人拍照（fswebcam 直拍，与关卡拍照同款命令）。
+        ⚠ 闯关运行时点击可能与关卡抢相机——仅供关卡未运行时手动观察用。"""
+        if self._capturing:
+            self.capture_note = "上一次拍照还在进行中"
+            return
+        self._capturing = True
+        self.capture_note = "拍照中（约 3 秒）..."
+        threading.Thread(target=self._do_capture, daemon=True).start()
+
+    def _do_capture(self):
+        try:
+            path = os.path.join(self.args.photo_dir,
+                                f"photo_debug_{int(time.time() * 1000)}.jpg")
+            cmd = (f"fswebcam -r {CAMERA_WIDTH}x{CAMERA_HEIGHT} "
+                   f"--no-banner -S 3 {path}")
+            r = subprocess.run(cmd, shell=True, capture_output=True,
+                               text=True, timeout=30)
+            if (r.returncode == 0 and os.path.exists(path)
+                    and self._jpeg_complete(path)):
+                self.capture_note = "拍照完成，画面即将更新"
+                return
+            if os.path.exists(path):
+                os.remove(path)
+            self.capture_note = "拍照失败（相机被占用？闯关中请勿点此按钮）"
+        except Exception as e:
+            self.capture_note = f"拍照异常: {e}"
+        finally:
+            self._capturing = False
 
     def state_payload(self):
         with self.lock:
@@ -298,8 +369,12 @@ class Hub:
                 "photo_age_s": round(time.time() - self.photo_ts, 1)
                                if self.photo_ts else None,
                 "photo_file": os.path.basename(self.photo_path) if self.photo_path else None,
+                "image_width": getattr(self, "display_w", None) or 2592,
+                "image_height": getattr(self, "display_h", None) or 1944,
                 "analyzers": dict(self.analyzers.enabled),
                 "analyzer_status": dict(self.analyzers.status),
+                "capturing": self._capturing,
+                "capture_note": self.capture_note,
                 "results": self.results,
                 "errors": self.errors,
                 "analysis_ms": self.analysis_ms,
@@ -339,16 +414,28 @@ PAGE_HTML = """<!DOCTYPE html>
   <label><input type="checkbox" id="ly_tagbox" checked> tag 角点</label><br>
   <label><input type="checkbox" id="ly_tagid" checked> tag id</label><br>
   <label><input type="checkbox" id="ly_pose" checked> 定位信息</label><br>
-  <label><input type="checkbox" id="ly_yolo" checked> yolo 框+置信度</label><br>
+  <label><input type="checkbox" id="ly_yolo" checked> yolo 框</label><br>
+  <label><input type="checkbox" id="ly_conf" checked> 置信度文本</label><br>
   <label><input type="checkbox" id="ly_digit" checked> digit</label>
  </fieldset>
  <fieldset><legend>状态</legend><div id="status">连接中...</div></fieldset>
+ <fieldset><legend>机器人拍照</legend>
+  <button id="btn_capture" style="padding:6px 14px;">📷 触发拍照</button>
+  <div id="cap_note" style="margin-top:6px;font-size:13px;color:#aaa;">
+   闯关运行时勿点（会与关卡抢相机）</div>
+ </fieldset>
 </div>
 <div class="wrap">
  <img id="photo" alt="">
  <canvas id="overlay"></canvas>
 </div>
 <script>
+const capBtn = document.getElementById('btn_capture');
+capBtn.onclick = () => {
+  capBtn.disabled = true;
+  document.getElementById('cap_note').textContent = '拍照中（约 3 秒）...';
+  fetch('/capture', {method: 'POST'}).then(r => r.json()).catch(() => {});
+};
 const img = document.getElementById('photo');
 const canvas = document.getElementById('overlay');
 let state = null;
@@ -394,6 +481,12 @@ function draw() {
 
 function updateStatus() {
   const s = document.getElementById('status');
+  const note = document.getElementById('cap_note');
+  const capBtn = document.getElementById('btn_capture');
+  if (state) {
+    if (state.capture_note) note.textContent = state.capture_note;
+    capBtn.disabled = !!state.capturing;
+  }
   if (!state) { s.textContent = '无数据'; return; }
   const lines = [`照片: ${state.photo_file || '无'} (年龄 ${state.photo_age_s}s)`];
   for (const k of ['tag', 'yolo', 'digit'])
@@ -403,13 +496,20 @@ function updateStatus() {
   s.textContent = lines.join('\\n');
 }
 
-function refresh() {
+let photoLoading = false;
+function refreshState() {
   fetch('/api/state').then(r => r.json()).then(s => { state = s; updateStatus(); })
-                      .catch(() => { document.getElementById('status').textContent = '连接断开...'; });
+                      .catch(() => { document.getElementById('status').textContent = '连接断开（重试中）...'; });
+}
+function refreshPhoto() {
+  if (photoLoading) return;   // 上一张没加载完不再发请求（弱链路防连接池耗尽）
+  photoLoading = true;
   img.src = '/photo?t=' + Date.now();
 }
-img.onload = draw;
-img.onerror = () => { /* 无照片时静默 */ };
+img.onload = () => { photoLoading = false; draw(); };
+img.onerror = () => { photoLoading = false; };
+setInterval(refreshState, 1000);
+setInterval(refreshPhoto, 2000);
 for (const id of ['en_tag', 'en_yolo', 'en_digit'])
   document.getElementById(id).onchange = () => {
     fetch('/config', {method: 'POST',
@@ -418,8 +518,8 @@ for (const id of ['en_tag', 'en_yolo', 'en_digit'])
   };
 for (const id of ['ly_tagbox', 'ly_tagid', 'ly_pose', 'ly_yolo', 'ly_conf', 'ly_digit'])
   document.getElementById(id).onchange = draw;
-setInterval(refresh, 1000);
-refresh();
+refreshState();
+refreshPhoto();
 </script>
 </body></html>
 """
@@ -427,6 +527,7 @@ refresh();
 
 class Handler(BaseHTTPRequestHandler):
     hub = None
+    timeout = 30  # 挂起的慢客户端（弱上行写 1MB 图）30s 强制断开，防线程耗尽
 
     def log_message(self, fmt, *args):  # 静默访问日志
         pass
@@ -452,15 +553,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, data, "image/jpeg")
         elif path == "/api/state":
             payload = self.hub.state_payload()  # state_payload 内部已持锁（Lock 不可重入，勿外层再包）
-            payload["image_width"] = 2592  # 前端坐标基准（photo 恒为原生分辨率）
-            payload["image_height"] = 1944
             self._send(200, json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                        "application/json")
         else:
             self._send(404, b"not found", "text/plain")
 
     def do_POST(self):
-        if self.path.split("?")[0] != "/config":
+        path = self.path.split("?")[0]
+        if path == "/capture":
+            self.hub.trigger_capture()
+            self._send(200, b'{"ok": true}', "application/json")
+            return
+        if path != "/config":
             self._send(404, b"not found", "text/plain")
             return
         n = int(self.headers.get("Content-Length", 0))
@@ -486,8 +590,9 @@ def main():
     ap.add_argument("--model", default=DEFAULT_MODEL,
                     help=f"YOLO onnx 模型（默认 {DEFAULT_MODEL}）")
     ap.add_argument("--conf", type=float, default=0.45, help="YOLO 置信度阈值")
-    ap.add_argument("--digit-templates", default="tools/digit_templates",
-                    help="数字模板目录（缺失则 digit 分析器禁用）")
+    ap.add_argument("--digit-templates",
+                    default="tools/digit_templates/arial40",
+                    help="数字模板目录（0.png~9.png；缺失则 digit 分析器禁用）")
     ap.add_argument("--no-tag", action="store_true", help="初始关闭 tag 分析器")
     ap.add_argument("--no-yolo", action="store_true", help="初始关闭 yolo 分析器")
     ap.add_argument("--enable-digit", action="store_true", help="初始启用 digit 分析器")
