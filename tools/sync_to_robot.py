@@ -40,7 +40,7 @@ import urllib.request
 DEFAULT_HOST = "http://192.168.31.209:8888"
 DEFAULT_PASSWORD = "pi"
 DEFAULT_REMOTE_ROOT = "Robot_control_self_module"
-DEFAULT_PATHS = ["main.py", "core", "vision", "levels", "tools", "models"]
+DEFAULT_PATHS = ["main.py", "debug.sh", "core", "vision", "levels", "tools", "models"]
 
 # 机器人运行时需要的标定产物：archive/ 默认不同步（PC 专用），这些文件例外。
 # 数字宫格的地面单应按俯仰档存于 archive/result/ninegrid_homography.json，
