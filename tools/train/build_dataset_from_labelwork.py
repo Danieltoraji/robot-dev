@@ -78,36 +78,49 @@ def main():
 
         jsn = os.path.join(img_dir, stem + ".json")
         boxes, labels_seen = [], set()
+        skip_reason = None  # 整图排除原因（JSON/读图失败）
+        data = {"shapes": []}
         if os.path.exists(jsn):
-            data = json.load(open(jsn, encoding="utf-8"))
-            img = None  # 尺寸懒加载（仅在需要裁剪/校验时读图）
-            W = H = None
-            for shp in data.get("shapes", []):
-                lbl = str(shp.get("label", "")).strip().lower()
-                if lbl != LABEL:
-                    labels_seen.add(lbl or "<空>")
-                    continue
-                pts = shp.get("points", [])
-                if shp.get("shape_type") != "rectangle" or len(pts) < 2:
-                    warnings.append(f"[格式异常] {stem}: 非矩形/点数异常的框被剔除")
-                    continue
-                if W is None:
-                    import cv2
-                    im = cv2.imread(jpg)
-                    H, W = im.shape[:2]
-                # 兼容两种存法：2 点对角线（labelme 经典）/ 4 点四角（X-AnyLabeling v4）
-                xs = [float(p[0]) for p in pts]
-                ys = [float(p[1]) for p in pts]
-                x1, x2 = max(0.0, min(xs)), min(float(W), max(xs))
-                y1, y2 = max(0.0, min(ys)), min(float(H), max(ys))
-                bw, bh = x2 - x1, y2 - y1
-                if bw < 1 or bh < 1:
-                    warnings.append(f"[退化框] {stem}: 宽高<1px 被剔除")
-                    continue
-                boxes.append(((x1 + bw / 2) / W, (y1 + bh / 2) / H,
-                              bw / W, bh / H))
-            if labels_seen:
-                warnings.append(f"[非 football 标签] {stem}: {sorted(labels_seen)}（框已剔除）")
+            try:
+                with open(jsn, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (ValueError, OSError) as e:
+                skip_reason = f"JSON 解析失败({e})"
+                data = {"shapes": []}
+        img = None  # 尺寸懒加载（仅在需要裁剪/校验时读图）
+        W = H = None
+        for shp in data.get("shapes", []):
+            lbl = str(shp.get("label", "")).strip().lower()
+            if lbl != LABEL:
+                labels_seen.add(lbl or "<空>")
+                continue
+            pts = shp.get("points", [])
+            if shp.get("shape_type") != "rectangle" or len(pts) < 2:
+                warnings.append(f"[格式异常] {stem}: 非矩形/点数异常的框被剔除")
+                continue
+            if W is None:
+                import cv2
+                img = cv2.imread(jpg)
+                if img is None:
+                    skip_reason = "cv2.imread 失败（文件损坏/编码异常）"
+                    break
+                H, W = img.shape[:2]
+            # 兼容两种存法：2 点对角线（labelme 经典）/ 4 点四角（X-AnyLabeling v4）
+            xs = [float(p[0]) for p in pts]
+            ys = [float(p[1]) for p in pts]
+            x1, x2 = max(0.0, min(xs)), min(float(W), max(xs))
+            y1, y2 = max(0.0, min(ys)), min(float(H), max(ys))
+            bw, bh = x2 - x1, y2 - y1
+            if bw < 1 or bh < 1:
+                warnings.append(f"[退化框] {stem}: 宽高<1px 被剔除")
+                continue
+            boxes.append(((x1 + bw / 2) / W, (y1 + bh / 2) / H,
+                          bw / W, bh / H))
+        if labels_seen:
+            warnings.append(f"[非 football 标签] {stem}: {sorted(labels_seen)}（框已剔除）")
+        if skip_reason:
+            warnings.append(f"[整图排除] {stem}: {skip_reason}")
+            continue
 
         n = len(boxes)
         n_box_total += n

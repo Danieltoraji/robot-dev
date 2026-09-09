@@ -31,10 +31,6 @@
 集成测试：python tests/test_nine_grid_sim.py
 """
 
-import sys
-print("当前脚本使用的 Python 路径：", sys.executable)
-
-
 import argparse
 import contextlib
 import io
