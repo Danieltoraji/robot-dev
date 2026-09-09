@@ -10,7 +10,9 @@ case "${1:-start}" in
   start)
     pkill -f "[d]ebug_server" 2>/dev/null   # 方括号防自匹配；杀掉旧实例
     sleep 1
-    nohup $PY tools/debug_server.py --port $PORT > /tmp/debug_server.log 2>&1 &
+    nohup $PY tools/debug_server.py --port $PORT \
+      --digit-templates tools/digit_templates/arial40 \
+      > /tmp/debug_server.log 2>&1 &
     sleep 3
     IP=$(hostname -I | awk '{print $1}')
     if curl -s --max-time 5 "http://127.0.0.1:$PORT/api/state" > /dev/null; then
