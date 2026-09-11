@@ -160,10 +160,14 @@ def quad_center(cnt):
         if abs(denom) > 1e-6:
             t = ((p[1][0] - p[0][0]) * d2[1] - (p[1][1] - p[0][1]) * d2[0]) / denom
             return (float(p[0][0] + t * d1[0]), float(p[0][1] + t * d1[1]))
+    # 兜底：approx != 4 时用实心轮廓一阶矩质心。
+    # 注意 _filled_contour 返回的是 **bbox 局部坐标掩膜**，质心必须加回
+    # bbox 原点——漏加会让观测中心系统性偏移数百~上千 px（现场实测：
+    # 2701 橙 2 的 bbox 原点 (1862,580)、返回值却是掩膜内的 (382,239)）。
+    x, y, w, h = cv2.boundingRect(cnt)
     m = cv2.moments(_filled_contour(cnt))
     if m["m00"] > 0:
-        return (float(m["m10"] / m["m00"]), float(m["m01"] / m["m00"]))
-    x, y, w, h = cv2.boundingRect(cnt)
+        return (x + float(m["m10"] / m["m00"]), y + float(m["m01"] / m["m00"]))
     return (x + w / 2.0, y + h / 2.0)
 
 
