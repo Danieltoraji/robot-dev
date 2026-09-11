@@ -19,6 +19,7 @@ from core.paths import RESULT_DIR
 from core.robot_core import RobotState
 from levels import goodluck as level_goodluck
 from levels import nine_grid as level_nine_grid
+from levels import stairs_hurdle as level_stairs_hurdle
 
 
 # =====================================================================
@@ -46,6 +47,12 @@ LEVELS = {
         "module": level_nine_grid,
         "tag_poses": {},
         "run_level": level_nine_grid.run_level,
+    },
+    # 上下楼梯与识别跨障：无 AprilTag，红色带 + 本地系地面单应
+    "stairs_hurdle": {
+        "module": level_stairs_hurdle,
+        "tag_poses": {},
+        "run_level": level_stairs_hurdle.run_level,
     },
 }
 

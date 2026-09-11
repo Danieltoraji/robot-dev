@@ -75,9 +75,14 @@ MULTIVIEW_EXTRINSICS_PATH = os.path.join(RESULT_DIR, "multiview_extrinsics.json"
 # 「动作位移预算 + 裕度」则拒绝本次解，扫描换下一档重试。
 # 预算是粗略上界（含动作误差与定位噪声），不用关卡层的标定精值。
 MOTION_BUDGET_CM = {
-    "go_forward": 5.5, "go_forward_one_step": 2.5, "back_one_step": 3.5,
+    "go_forward": 5.5, "go_forward_one_step": 2.5,
+    "go_forward_one_small_step": 1.5,
+    "back_one_step": 3.5,
     "back": 3.5, "left_move": 2.5, "right_move": 2.5,
     "turn_left": 8.0, "turn_right": 8.0, "stand": 0.0,
+    # 上下楼梯与识别跨障关卡的场景动作（净水平位移上界，M3 实测后修正；
+    # 预算仅用于连续性日志，不拦截动作）
+    "climb_stairs": 20.0, "down_floor": 20.0, "hurdles": 15.0,
 }
 CONTINUITY_MARGIN_CM = 5.0  # 预算之外的额外裕度（定位噪声 + 动作散布）
 

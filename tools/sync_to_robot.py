@@ -47,6 +47,9 @@ DEFAULT_PATHS = ["main.py", "debug.sh", "core", "vision", "levels", "tools", "mo
 # 缺失会退回 from_pose 解析自举（布局归属精度下降）——必须随代码一起上机。
 EXTRA_FILES = [
     "archive/result/ninegrid_homography.json",
+    # 上下楼梯与识别跨障：本地系地面单应标定（缺失退回 from_pose 自举，
+    # 测距精度下降到 ±3cm 级）——必须随代码一起上机
+    "archive/result/stairs_hurdle_calib.json",
 ]
 
 SKIP_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", ".zcode", "archive", "release"}
