@@ -1,5 +1,6 @@
 /archive/
 /datasets/
+/reference code/
 
 # release 打包产物（不入库）
 /release/
