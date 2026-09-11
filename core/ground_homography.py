@@ -56,6 +56,27 @@ HOMOGRAPHY_PATH = os.path.join(RESULT_DIR, "ninegrid_homography.json")
 CAMERA_TO_BODY_FORWARD_CM = 4.0
 
 
+# =====================================================================
+# 宫格标号约定（单一真源；现场若确认与裁判 .ino 不一致，只改这两开关）
+# =====================================================================
+# 约定来自裁判 .ino："位置 6（左下）恒空"，视角 = 站在入口朝场内看：
+#   row0 = 最远排、row2 = 入口排（机器人扫描时所在一侧）；
+#   col0 = 入口视角左手边。
+# 注意：layout_scan 的"入口侧谓词"把 row2 定义成机器人所在那一侧，因此
+# 只要机器人确实从入口进场，row 方向自动成立；剩下唯一可能出错的是
+# 列方向（COL0_IS_LEFT）。此时扫描结果会在"格6 被占"上自曝，由
+# levels/nine_grid.layout_scan 的规则自检给出显式告警。
+ROW0_IS_FAR = True    # True: 位置 0/1/2 是最远排；False: 是最靠入口的排
+COL0_IS_LEFT = True   # True: 位置 0/3/6 在入口视角左手边；False: 右手边
+
+
+def cell_index(row, col):
+    """(row, col) 行列序号 -> 宫格位置编号 0..8（遵守上面的标号约定）"""
+    r = row if ROW0_IS_FAR else 2 - row
+    c = col if COL0_IS_LEFT else 2 - col
+    return r * 3 + c
+
+
 def grid_cell_center(grid_pos):
     """ESP32 位置编号 0..8 -> 场地系格中心 (x, y) cm。
 
@@ -64,8 +85,10 @@ def grid_cell_center(grid_pos):
         3 4 5
         6 7 8   （最近排；6=左下恒空）
     """
-    col = grid_pos % 3
-    row = grid_pos // 3  # 0 = 最远排
+    r = grid_pos // 3
+    c = grid_pos % 3
+    row = r if ROW0_IS_FAR else 2 - r
+    col = c if COL0_IS_LEFT else 2 - c
     x = (col + 0.5) * GRID_CELL_CM
     y = (2 - row + 0.5) * GRID_CELL_CM
     return np.array([x, y], dtype=np.float64)
@@ -113,16 +136,28 @@ class GroundHomography:
 
     @classmethod
     def from_pose(cls, cam_xy, cam_z, pitch_pulse, bearing_deg=0.0,
-                  head_pulse=HEAD_CENTER):
+                  head_pulse=HEAD_CENTER, pitch_offset_deg=0.0,
+                  head_in_pose=True):
         """由已知相机位姿解析构造 H（无标定文件时的开机自举）
 
-        cam_xy: 光心地面投影 (场地系 cm)；cam_z: 相机高度 cm（实测 ≈39）
+        cam_xy: 光心地面投影 (场地系 cm)；cam_z: 相机高度 cm
         pitch_pulse: 俯仰舵机脉宽（(1500-pulse)*0.09 = 俯角，越小越低头）
-        精度受位姿假设限制（±3cm 级），只够布局扫的格归属判断；
-        精确度量用 tools/calib_ninegrid.py 点击标定覆盖。
+        head_in_pose=True（缺省，2026-09-11 起）：把**头部偏航并入相机朝向**
+        （相机方位角 = bearing_deg − 头部角，与 levels/nine_grid._camera_rotation
+        同一约定）。于是 `from_pose(h, pitch, head_pulse=δ)` +
+        `pixels_to_ground(px, head_pulse=δ)` 得到的就是**该头部档下的机器人系
+        地面坐标**。
+        历史 bug（P0）：head_pulse 以前只存进 self.head_pulse、构造里不含偏航，
+        调用方再传同一个 pulse 时差分补偿恒为 0 → 宽扫档（±40.5°/±63°）的观测
+        被当成中位档映射，跨帧聚合偏差可达 8cm~1m（布局扫不收敛的直接原因）。
+        head_in_pose=False 保留旧的"先按中位档建 H、后续差分补偿"语义。
+        精度受位姿假设限制（±3cm 级），只够布局扫的格归属判断。
         """
-        alpha = np.radians((1500 - pitch_pulse) * SERVO_DEG_PER_US)
+        alpha = np.radians((1500 - pitch_pulse) * SERVO_DEG_PER_US
+                           + pitch_offset_deg)
         f = np.radians(bearing_deg)
+        if head_in_pose:
+            f -= np.radians(head_pulse_to_angle_deg(head_pulse))
         sa, ca = np.sin(alpha), np.cos(alpha)
         sf, cf = np.sin(f), np.cos(f)
         # 世界->相机旋转的行 = 相机三轴在世界系方向（见 tests/test_ground_homography）
