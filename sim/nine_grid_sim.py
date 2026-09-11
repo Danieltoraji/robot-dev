@@ -48,6 +48,7 @@ import cv2
 
 from core.camera_config import (
     CAMERA_INTRINSIC, CAMERA_DISTORTION, HEAD_CENTER, SERVO_DEG_PER_US,
+    CAM_PITCH_MOUNT_OFFSET_DEG, CAM_HEIGHT_STANDING_CM,
 )
 from core.ground_homography import grid_cell_center
 from core.robot_core import RobotState
@@ -79,13 +80,19 @@ PANEL_BGR = {COLOR_TO_ID[c]: cv2.cvtColor(np.full((1, 1, 3), hsv, np.uint8),
 SIM_LAYOUT = {0: 5, 1: 2, 2: 7, 3: 1, 4: 4, 5: 6, 6: None, 7: 3, 8: None}
 
 
-def camera_rotation(bearing_deg, pitch_pulse):
+def camera_rotation(bearing_deg, pitch_pulse,
+                    pitch_offset_deg=CAM_PITCH_MOUNT_OFFSET_DEG):
     """世界->相机旋转矩阵（与 tests/test_ground_homography 同一构造，已验证）
 
     刻意保留本模块的独立副本：仿真是"世界的替身"，与生产投影实现
     （levels/nine_grid._camera_rotation）互为交叉验证，不共享代码。
+    **但相机安装下俯偏移与高度必须与 camera_config 同源**（2026-09-11）：
+    历史上 sim 用名义舵机角、关卡用名义角+安装偏移，渲染与投影不一致，
+    端到端仿真必然失败（实测 pitch1200：27.0° vs 45.5°）。
+    有效俯角 = 名义脉宽角 + pitch_offset_deg。
     """
-    a = np.radians((1500 - pitch_pulse) * SERVO_DEG_PER_US)
+    a = np.radians((1500 - pitch_pulse) * SERVO_DEG_PER_US
+                   + pitch_offset_deg)
     f = np.radians(bearing_deg)
     sa, ca = np.sin(a), np.cos(a)
     sf, cf = np.sin(f), np.cos(f)
@@ -98,7 +105,7 @@ def camera_rotation(bearing_deg, pitch_pulse):
 class SimNineGridRobot(RobotState):
     """九宫格仿真机器人：场地系位姿 + 打滑噪声运动 + 合成相机"""
 
-    CAM_HEIGHT = 39.0
+    CAM_HEIGHT = CAM_HEIGHT_STANDING_CM   # 与 camera_config 同源（站立相机高度）
     CAM_BODY_OFFSET = 0.0  # 仿真中相机即机体中心（关卡常量另算，端到端容差内）
 
     def __init__(self, layout=SIM_LAYOUT, seed=3, viewer=None):

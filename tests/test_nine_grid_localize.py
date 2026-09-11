@@ -90,7 +90,14 @@ def test_localize_converges_from_perturbed_prior():
 
 
 def test_unclipped_center_model_exact():
-    """未裁切面板：中心模型仍精确（残差 <6px），保证近距外精度不退步"""
+    """未裁切面板：中心模型仍精确（残差 <20px），保证近距外精度不退步
+
+    阈值依据（2026-09-11 更新为"安装偏移 + 高度 56cm"后的新几何）：本场景
+    实测 关卡投影 ↔ 仿真渲染 误差 **0.00px**（两侧模型严格一致），残差全部
+    来自检测端 quad_center 对栅格化四边形的 approxPolyDP 近似（4~15px ≈
+    0.2~0.8cm）；而裁切面板的"中心模型"偏差在本场景为 76~140px。故 20px
+    既能把中心模型与裁切模型分开，又不把检测噪声误判成模型缺陷。
+    """
     robot = SimNineGridRobot()
     level = NineGridLevel(robot)
     level.digit_cell = {d: c for c, d in SIM_LAYOUT.items() if d is not None}
@@ -107,28 +114,44 @@ def test_unclipped_center_model_exact():
         pred = project_ground_to_pixel(
             cell_xy, truth[0], truth[1], truth[2], PITCH_NAV, head)[0]
         errs.append(float(np.linalg.norm(pred - np.asarray(o.center_px))))
-    assert max(errs) < 6.0, f"完整面板中心模型残差 {max(errs):.1f}px 超 6px"
-    print(f"  完整面板中心模型：最大残差 {max(errs):.1f}px ✓")
+    assert max(errs) < 20.0, f"完整面板中心模型残差 {max(errs):.1f}px 超 20px"
+    print(f"  完整面板中心模型：最大残差 {max(errs):.1f}px"
+          f"（≪裁切模型 76~140px）✓")
 
 
 def test_clipped_prediction_inside_image():
-    """裁切预测边界条件：脚下只余贴底细条/贴边极限，远距为画内点"""
+    """裁切预测边界条件：脚下只余贴底细条/贴边极限，远距为画内点
+
+    阈值按"安装偏移 + 高度 56cm"的新几何重推（2026-09-11；旧几何 39cm/41.4°
+    下站在面板中心时面板整个在视野外，现在是"近端一小条可见"）：
+      - 站在面板中心 pitch1040：可见地面带起点 ≈3.3cm，面板前缘 14cm 可见
+        → 裁切质心预测 (1283, 1734) 在画内靠底；面板中心投影 y=2004 已出画；
+      - 站在面板中心 pitch1200：面板完全在可见带之下 → 预测点被钳到画幅底边
+        （y=1944），仍是有限值（数值雅可比需要连续，不能返回 None）；
+      - 距 60cm pitch1200：面板基本在画内（y≈937）。
+    """
     from core.ground_homography import grid_cell_center
     center = grid_cell_center(4)  # 面板 4 在格心 (50,50)
-    # 站在面板中心（pitch 1040）：仅远边细条可见，预测应贴画幅底边
+    # 站在面板中心（pitch 1040）：裁切质心在画内靠底，中心投影已出画
     on_panel = clipped_quad_centroid(center, 50.0, 50.0, 0.0, 1040)
-    assert on_panel is not None and on_panel[1] > 1944 - 12, \
-        f"站在面板中心时预测点应贴底边，实际 {on_panel}"
+    center_px = project_ground_to_pixel(center, 50.0, 50.0, 0.0, 1040)[0]
+    assert on_panel is not None and 0 <= on_panel[0] <= 2592 \
+        and on_panel[1] > 1944 * 0.75, \
+        f"站在面板中心时裁切预测应在画内靠底，实际 {on_panel}"
+    assert center_px[1] > 1944, \
+        f"站在面板中心时面板中心投影应已出画（下沿外），实际 {center_px}"
     # 导航档站在面板中心：面板完全在视野外 → 钳到画幅的极限点（不返回 None）
     outside = clipped_quad_centroid(center, 50.0, 50.0, 0.0, PITCH_NAV)
     assert outside is not None, "画外预测应给连续极限点而非 None"
-    assert 0 <= outside[0] <= 2592 and 0 <= outside[1] <= 1944
-    # 站在 60cm 外：面板部分可见 → 画内点
+    assert 0 <= outside[0] <= 2592 and 1944 - 1.0 <= outside[1] <= 1944, \
+        f"完全出画时应钳到画幅底边，实际 {outside}"
+    # 站在 60cm 外：面板大部分可见 → 画内点（明显高于底边）
     far = clipped_quad_centroid(center, 50.0, -10.0, 0.0, PITCH_NAV)
     assert far is not None, "远距应给出裁切预测"
-    assert 0 <= far[0] <= 2592 and 0 <= far[1] <= 1944, f"预测点跑出画幅: {far}"
-    print(f"  裁切预测边界：脚下贴底({int(on_panel[1])}px)，"
-          f"画外极限({outside[0]:.0f},{outside[1]:.0f})，"
+    assert 0 <= far[0] <= 2592 and 0 <= far[1] < 1944 - 100, \
+        f"远距预测点应在画内偏上: {far}"
+    print(f"  裁切预测边界：脚下贴底细条({int(on_panel[1])}px，中心投影 "
+          f"{int(center_px[1])}px 出画)，画外极限({outside[0]:.0f},{outside[1]:.0f})，"
           f"远距画内 ({far[0]:.0f},{far[1]:.0f}) ✓")
 
 
