@@ -108,7 +108,7 @@ class SimNineGridRobot(RobotState):
     CAM_HEIGHT = CAM_HEIGHT_STANDING_CM   # 与 camera_config 同源（站立相机高度）
     CAM_BODY_OFFSET = 0.0  # 仿真中相机即机体中心（关卡常量另算，端到端容差内）
 
-    def __init__(self, layout=SIM_LAYOUT, seed=3, viewer=None):
+    def __init__(self, layout=SIM_LAYOUT, seed=3, viewer=None, deform=None):
         super().__init__(tag_poses={})
         self.pos = np.array([50.0, -20.0])   # 入口外居中
         self.heading = 0.0                   # 场地系 bearing（度，右正）
@@ -120,6 +120,13 @@ class SimNineGridRobot(RobotState):
         self.action_log = []
         # 可选图形化 viewer（sim/nine_grid_view.NineGridView）；None = 纯无头
         self.viewer = viewer
+        # 地板形变（2026-09-11 用户约束：本关地板会形变，机体俯仰按 ±15° 考虑）：
+        # 只改**世界侧**的相机姿态/高度，关卡内常数保持不动 → 精确复现"常数失配"。
+        self.deform_tilt_deg = 0.0
+        self.deform_height_cm = 0.0
+        self.deform_actions = 0
+        self._deform = dict(deform) if deform else None
+        self._deform_rng = np.random.RandomState(int(seed) + 977)
 
     # ---- I/O 接缝 ----
 
@@ -133,9 +140,40 @@ class SimNineGridRobot(RobotState):
     def run_action(self, name, times=1):
         for _ in range(max(1, times)):
             self._apply_action(name)
+            self._update_deform()
         self.action_log.append((name, times))
         if self.viewer is not None:
             self.viewer.on_action(self, name, times)
+
+    def _update_deform(self):
+        """地板形变模型：每动作一次随机游走 + 可选一次性阶跃
+
+        deform 配置（run_simulation 透传）：
+          sigma_tilt_deg / sigma_h_cm  每动作随机游走步长（默认 0 = 无形变）
+          max_tilt_deg  / max_h_cm     形变幅度上限（默认 15° / 3cm）
+          step_after_actions           第 N 个动作后施加一次性阶跃
+          step_tilt_deg / step_h_cm    阶跃幅度
+        注意：形变只在**动作**时变化 —— 静止扫头部（布局扫）期间保持不变，
+        与现场"站定扫描时地板不再继续形变"一致。
+        """
+        cfg = self._deform
+        if not cfg:
+            return
+        self.deform_actions += 1
+        if cfg.get("sigma_tilt_deg"):
+            self.deform_tilt_deg += float(
+                self._deform_rng.normal(0.0, float(cfg["sigma_tilt_deg"])))
+        if cfg.get("sigma_h_cm"):
+            self.deform_height_cm += float(
+                self._deform_rng.normal(0.0, float(cfg["sigma_h_cm"])))
+        if cfg.get("step_after_actions") \
+                and self.deform_actions == int(cfg["step_after_actions"]):
+            self.deform_tilt_deg += float(cfg.get("step_tilt_deg", 0.0))
+            self.deform_height_cm += float(cfg.get("step_h_cm", 0.0))
+        mt = float(cfg.get("max_tilt_deg", 15.0))
+        mh = float(cfg.get("max_h_cm", 3.0))
+        self.deform_tilt_deg = float(np.clip(self.deform_tilt_deg, -mt, mt))
+        self.deform_height_cm = float(np.clip(self.deform_height_cm, -mh, mh))
 
     def _apply_action(self, name):
         th = np.radians(self.heading)
@@ -170,8 +208,11 @@ class SimNineGridRobot(RobotState):
         self.n_captures += 1
         # 头部左转(脉宽>1500)为正 → 相机方位角减小（与真机一致）
         bearing = self.heading - (self.head - HEAD_CENTER) * SERVO_DEG_PER_US
-        R = camera_rotation(bearing, self.pitch)
-        C = np.array([self.pos[0], self.pos[1], self.CAM_HEIGHT])
+        # 形变只加到"世界侧"：相机安装偏移 + 地板形变倾角、站立高度 + 形变高度差
+        R = camera_rotation(bearing, self.pitch,
+                            CAM_PITCH_MOUNT_OFFSET_DEG + self.deform_tilt_deg)
+        C = np.array([self.pos[0], self.pos[1],
+                      self.CAM_HEIGHT + self.deform_height_cm])
 
         frame = np.full((FRAME_H, FRAME_W, 3), 90, np.uint8)
         for cell, digit in self.layout.items():
@@ -241,17 +282,20 @@ def random_layout(seed):
     return layout
 
 
-def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None):
+def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
+                   deform=None):
     """跑一遍完整关卡（布局扫→1..7），不做断言；返回 SimRun(robot, level, stats)
 
     stats 键：ok_all / results / layout_ok / digit_cell / truth / captures /
               actions / action_counts / small_turn_deg / small_turn_usable /
-              banned_used
+              banned_used / deform_tilt_deg / deform_height_cm
     quiet=True 时吞掉关卡逐行日志（只留返回值供调用方打印摘要）。
     viewer：可选图形化 viewer（需有 attach(robot, level) 与 on_action/on_frame）；
             传入后由 viewer 决定节奏（暂停/单步），None = 纯无头。
+    deform：地板形变注入（见 SimNineGridRobot._update_deform）；None = 无形变。
     """
-    robot = SimNineGridRobot(layout=layout, seed=seed, viewer=viewer)
+    robot = SimNineGridRobot(layout=layout, seed=seed, viewer=viewer,
+                             deform=deform)
     level = NineGridLevel(robot)
     if viewer is not None:
         viewer.attach(robot, level)
@@ -275,6 +319,8 @@ def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None):
         "small_turn_deg": level._small_turn_deg,
         "small_turn_usable": level._small_turn_usable,
         "banned_used": sorted(used & set(DISABLED_ACTIONS)),
+        "deform_tilt_deg": robot.deform_tilt_deg,
+        "deform_height_cm": robot.deform_height_cm,
     }
     return SimRun(robot, level, stats)
 
@@ -290,6 +336,9 @@ def _print_summary(stats):
           f"({'可用' if stats['small_turn_usable'] else '已弃用(大转兜底)'})")
     if stats["banned_used"]:
         print(f"[sim] ⚠ 使用了禁用动作: {stats['banned_used']}")
+    if stats.get("deform_tilt_deg") or stats.get("deform_height_cm"):
+        print(f"[sim] 地板形变终值: 俯仰 {stats['deform_tilt_deg']:+.1f}° / "
+              f"高度 {stats['deform_height_cm']:+.1f}cm")
 
 
 def main(argv=None):
@@ -300,12 +349,21 @@ def main(argv=None):
                     help="由 seed 生成合法随机布局（默认用固定 SIM_LAYOUT）")
     ap.add_argument("--quiet", action="store_true",
                     help="不打印关卡逐行日志，只打印摘要")
+    ap.add_argument("--deform", type=float, default=0.0, metavar="SIGMA_TILT_DEG",
+                    help="地板形变：每动作俯仰随机游走步长（度），"
+                         "幅度上限 ±15°、高度 ±2cm（0=无形变）")
     args = ap.parse_args(argv)
 
     layout = random_layout(args.seed) if args.random_layout else SIM_LAYOUT
     print(f"[sim] 布局: {layout}")
+    deform = None
+    if args.deform:
+        deform = {"sigma_tilt_deg": args.deform, "sigma_h_cm": 0.5,
+                  "max_tilt_deg": 15.0, "max_h_cm": 2.0}
+        print(f"[sim] 地板形变注入: {deform}")
     try:
-        run = run_simulation(layout=layout, seed=args.seed, quiet=args.quiet)
+        run = run_simulation(layout=layout, seed=args.seed, quiet=args.quiet,
+                             deform=deform)
     except Exception as e:  # 布局扫失败等：CLI 友好退出，便于脚本判断
         print(f"[sim] 关卡异常: {type(e).__name__}: {e}")
         return 1

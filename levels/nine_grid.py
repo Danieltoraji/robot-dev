@@ -6,34 +6,40 @@
 机器人按 1→7 顺序依次到达各面板中心（踩中微动开关），限时 15 分钟。
 评分：顺序正确每格 10 分（70），限时完成 +30。
 
-方案要点（2026-09-08 定稿，详见 docs/关卡算法/数字宫格攻略.md）：
+方案要点（2026-09-08 定稿；2026-09-11 导航改 v3 视觉伺服，详见
+docs/关卡算法/数字宫格攻略.md §3.2b）：
   视觉  颜色主判（HSV 七色，1红..7粉）+ HOG+SVM 黑色数字仲裁（只否决）；
         面板中心：未裁切取四边形对角线交点（透视不变量）；被画幅裁切时
         对角线交点失效（实测偏差 150~800px），改用颜色掩膜凸包面积质心。
-  定位  地图定位（Gauss-Newton）：布局已知后，9 个格心即"地图"。每步用
-        名义动作模型预测位姿（x,y,θ），以可见面板(>=2)的「投影像素 ↔
-        检出像素」残差迭代修正。观测按裁切与否分两种，均与预测同定义：
-        - 未裁切：面板中心投影 ↔ 对角线交点（精确、与面板尺寸无关）；
-        - 已裁切：预测四角投影与画幅求交的面积质心 ↔ 凸包质心（裁切不变）。
-        平方损失会被裁切野值拖走，故用 IRLS + Cauchy 鲁棒核，并加弱先验
-        正则（σ=8cm/8°）保证 1~2 点也能解。用真实内参+畸变模型。
-  运动  小幅度动作白名单（单步 2cm 前进、~2cm 横移、3.2cm 后退），每步
-        闭环；远距+对准良好才小批量（≤3 次 one_step = 6cm）。本场地禁用
+  导航  **v3 视觉伺服（默认）**：地板会形变 → 机体俯仰/相机高度大幅变化
+        （按 ±15° 考虑，可见地面带 4 倍摆动），因此导航主链只用相对量：
+        搜索（头部五档 + 按死推提示转向 / 盲走）→ 对准（像素 yaw，死区 8°）
+        → 接近（目标框宽 ≥820px ≈ 进 50cm）→ 低头到达（颜色占比**峰值跟踪**：
+        跌破峰值 55% 即判压过该格）→ 蹭步确认 → 死推位姿锚到格心。
+        地图（布局扫的 digit_cell + 动作模型死推位姿）只作"往哪转/盲走多远"
+        的粗提示；GN 地图定位降级为可选校正（USE_MAP_CORRECTION，失败只记
+        日志、不触发恢复链）。现场应急：VIS_NAV_ENABLED=False 回 v2 地图路径。
+  定位（v2 地图路径，保留为回退/诊断）  地图 GN：布局已知后 9 个格心即
+        "地图"；每步用名义动作模型预测位姿，以可见面板的「投影像素 ↔ 检出
+        像素」残差迭代修正。未裁切用面板中心投影 ↔ 对角线交点；已裁切用
+        "预测四角投影∩画幅的面积质心 ↔ 凸包质心"。IRLS + Cauchy 鲁棒核 +
+        弱先验正则（σ=8cm/8°）。**注意：它依赖冻结的相机常数，地板形变下
+        会整片超门控——这正是 v3 改视觉伺服的原因。**
+  运动  小幅度动作白名单（单步 2cm 前进、~2cm 横移、3.2cm 后退）；远距
+        批量上限 VIS_BATCH_MAX_STEPS=5（10cm）。本场地禁用
         go_forward / go_forward_fast（5cm 步幅在小面板+打滑地板上易摔倒，
-        `_act` 硬门拒绝）。转向用参考方案的「在线 EMA 估计小转实际角，
-        连续 2 批 <0.5°/次→升级大转」，并带大转防振荡（误差符号翻转即
-        停止转向、改用航向偏置接近）。
-  容错  卡滞检测（相邻两次定位目标改善<0.5cm 连续 2 次→后退脱困）、
-        丢失恢复（低头补扫→按运动先验朝目标转→退格重扫→盲走一步→撤销
-        转向）、分格时间预算 + 全局看门狗、到达确认（位姿"脚下覆盖中心"
-        主判 + 接近段确实检出过目标面板 + 蹭步来回覆盖微动开关）。
+        `_act` 硬门拒绝）。转向用「在线 EMA 估计小转实际角（误差源 = 像素
+        yaw 或地图方位），连续 2 批 <0.5°/次→升级大转」+ 大转防振荡。
+  容错  卡滞检测（框宽不涨/定位不改善 → 后退脱困）、目标丢失（头部扫找回
+        → 回退半步 → 重搜）、分格时间预算 + 全局看门狗 + 预算不足自动收缩
+        低头段迭代、到达确认（颜色出现→消失主判 + 蹭步压微动开关）。
         绝不跳格：跳格断 70 分计分链（ESP32 顺序错只日志不断链，借道
         穿越其他面板计分安全）。
 
-到达确认为什么不用"低头色占比"主判：相机高 39cm、俯仰 1040（41.4°）时
-画面下沿对应地面 15.8cm，站在面板中心时面板远边仅 14cm——目标面板整个
-在视野之外（实测占比 0.003，而旧阈值 0.10）。参考方案的"出现→压过→消失"
-是过渡判据，不是"站上仍可见"。
+到达确认为什么不改回"低头色占比绝对阈值"：参考实现的每色阈值（0.002~0.17）
+在本机俯角下判不到（实测峰值仅 0.13）——v3 用**尺度无关**的"峰值跟踪 + 相对
+跌落"，与颜色/光照/俯仰无关。历史结论"低头色占比不可用"是旧相机模型
+（39cm/41.4°，可见地面带 15.8cm 起）下的结论，现在几何已修正。
 
 布局扫描 v2（2026-09-11，无站位依赖）：机器人从前一关卡进入，初始位姿
 未知不可控，因此布局扫不用任何场地系先验——每帧观测经"机器人系单应"
@@ -81,7 +87,7 @@ from core.ground_homography import (
     CAMERA_TO_BODY_FORWARD_CM, GRID_CELL_CM,
 )
 from core.robot_core import RobotState
-from vision.nine_grid_detector import NineGridDetector
+from vision.nine_grid_detector import NineGridDetector, ID_TO_COLOR
 
 # 相机光心高度缺省值：来自 camera_config（机器人自身属性）；layout_scan
 # 运行时用格阵拟合参数网格自标定刷新（self._cam_height_cm）
@@ -163,6 +169,55 @@ GN_CAUCHY_C_PX = 4.0      # IRLS 鲁棒核尺度（px）：大残差（裁切野
 GN_PRIOR_SIGMA_XY_CM = 8.0    # 弱先验正则（cm）：低观测时抑制位姿乱跑
 GN_PRIOR_SIGMA_TH_DEG = 8.0   # 弱先验正则（度）
 GN_RMS_OK_PX = 3.0        # 多起点早停阈值：RMS 已足够好就不再试其它起点
+
+# =====================================================================
+# 视觉伺服导航 v3（2026-09-11：抗地板形变，导航不依赖相机常数）
+# =====================================================================
+# 现场约束（用户）：本关地板会形变，机器人在板上行走时机体俯仰/相机高度会
+# 大幅变化（按 ±15° 考虑）。量化：h=50cm、竖直半视场 26.8° 时，有效俯角
+# 42°/57°/72° 的可见地面带分别是 19~184 / 5~86 / 0~50 cm（4 倍范围摆动）
+# —— 任何"冻结相机常数的度量投影"（GN 地图定位、"位姿覆盖中心"判据）在这种
+# 形变下都不可用（sim 实测：随机游走 ±15° 时旧导航 0/7）。
+# 故导航主链改为**相对量视觉伺服**（做法同参考实现
+# reference code/九宫格视觉导航：yaw=-(dx/W)·FOV、proximity=框宽、
+# 到达=低头颜色"出现→消失"）；地图（布局扫结果 digit_cell + 动作模型死推位姿）
+# 只用于"往哪个方向找目标"的粗提示（±30° 足够）与每格到达后的位姿重置。
+VIS_NAV_ENABLED = True          # False → 退回 v2 地图路径（现场应急开关）
+USE_MAP_CORRECTION = False      # True → 每格尝试一次地图 GN 校正（失败只打日志）
+CAMERA_FOV_H_DEG = 60.0         # yaw = -(dx/W)*FOV：名义水平视场，仅作伺服增益
+VIS_ALIGN_TOL_DEG = 8.0         # 对准死区（参考 epsilon=8）
+VIS_BIG_TURN_DEG = 30.0         # 大/小转角分界（参考 BIG_TURN_THRESHOLD=30）
+PANEL_WIDTH_CM = 28.0           # 色块宽（像素↔厘米换算基准；与 PANEL_HALF_CM 同源）
+# 到达触发：目标框宽（px）——"目标已进入 ~50cm"的**相对深度**代理。
+# 实测（sim，目标正前方，面板 28cm，pitch1200：150/100/80/60/50/40/30cm →
+# 376/530/624/742/808/880/954 px；pitch1040 同距离同量级）：
+# 本相机俯角大（有效 46~60°），地面点的**沿轴深度** ≈ d·cosθ + h·sinθ 在近距
+# 趋于 h·sinθ ≈ 36~43cm，所以框宽在 50cm 内几乎饱和（808→954）——框宽不是
+# 精细距离，只用来触发"交棒低头段"。精细到达由低头颜色"出现→消失"判定
+# （绝对几何关系，抗形变）。
+VIS_ARRIVE_BOX_PX = 820.0
+VIS_BATCH_MAX_STEPS = 5         # 远距批量上限（5×2cm=10cm，仍是小步幅）
+# 低头到达判据（**尺度无关**版本，2026-09-11 实测重设计）：
+# 参考实现用每色绝对占比阈值（0.002~0.17），但我们的相机俯角大、色块占比峰值
+# 只有 ~0.13（实测红1：0.047 → 峰值 0.130 → 0.015），照抄阈值会永远判不到
+# "看到"。改为记录**本次接近的占比峰值**：峰值超过绝对下限后，占比跌到峰值
+# 的 VIS_COLOR_DROP_FRAC 以下即判"已压过"——与颜色/光照/俯仰无关。
+VIS_COLOR_SEEN_MIN = 0.02       # "看到过颜色"的绝对下限（防噪声）
+VIS_COLOR_DROP_FRAC = 0.55      # 占比跌破峰值的此比例 → 判定压过该格
+# 实测（sim 红1/紫6 等）：占比曲线 0.06 → 峰值 0.13 → 平稳回落；取 0.55 是
+# "跌掉 45%" 的保守证据，同时避免机器人刚好停在峰值附近时判不出来。
+VIS_ARRIVE_MAX_ITERS = 30       # 低头段迭代上限（时间预算护栏）
+VIS_ARRIVE_FALLBACK_CM = 15.0   # 视觉判据走不完时，死推距离兜底（纵向 cm）
+VIS_ARRIVE_FALLBACK_LAT_CM = 12.0  # 同上（横向 cm）
+VIS_LAT_MAX_CORRECTIONS = 3     # 低头段横向小转纠偏次数上限（防抖动）
+VIS_STALL_BOX_PX = 5.0          # 前进无效判据（参考 proximity_change<5）
+VIS_MIN_RATIO_CHANGE = 0.002    # 低头段占比变化下限（参考；紫6 取 0）
+VIS_LAT_TOL_CM = 3.0            # 低头段横向容差（由 dx/box_w*PANEL_WIDTH_CM 换算）
+VIS_SEARCH_MAX_ROUNDS = 4       # 搜索轮次上限（每轮 = 头部五档扫 + 转一步）
+VIS_SEARCH_PROBE_STEPS = 3      # （保留）早前的前进探测步数
+VIS_SEARCH_BLIND_CM = 25.0      # 盲走判据：死推纵向大于此值时先走近再由视觉接管
+VIS_SEARCH_BLIND_MAX_STEPS = 10  # 单轮盲走上限（10×2cm=20cm）
+VIS_SEARCH_MAX_FRAMES = 26      # 单格搜索拍照硬上限（时间预算护栏）
 
 # =====================================================================
 # 容错预算
@@ -566,6 +621,8 @@ class NineGridLevel:
         self._loc_count = 0         # 本格定位次数（时间预算诊断）
         # FSM 阶段标签（纯诊断：日志/仿真可视化用，不参与任何决策）
         self.phase = "INIT"
+        # 逐阶段拍照计数（真机时间预算诊断：拍照 2~4s/张，7 格总预算 780s）
+        self.phase_frames = {}
 
     # =================================================================
     # 入口
@@ -594,6 +651,8 @@ class NineGridLevel:
                 print("[看门狗] 全局超时，停止（保已得分，不冒进）")
                 break
         self.results = done
+        frames = sorted(self.phase_frames.items(), key=lambda kv: -kv[1])
+        print(f"[诊断] 逐阶段拍照数: {frames}  合计 {sum(self.phase_frames.values())}")
         return all(ok for _, ok in done)
 
     # =================================================================
@@ -1210,10 +1269,406 @@ class NineGridLevel:
         return forward, lateral, bearing
 
     # =================================================================
-    # 单格导航 FSM：APPROACH → ENTER → CONFIRM
+    # 单格导航 FSM：视觉伺服 v3（搜索→对准→接近→低头到达→蹭步确认）
+    # 地图路径 v2 保留在 _go_to_panel_map / _approach / _enter（应急开关）
     # =================================================================
 
     def go_to_panel(self, digit):
+        """前往第 digit 块面板；返回 bool（视觉到位并完成蹭步）
+
+        v3（缺省）：全程只用相对量（像素 yaw / 目标框宽 / 低头颜色占比），
+        不依赖相机高度与俯仰——地板形变 ±15° 下仍可用。
+        v2（VIS_NAV_ENABLED=False）：地图 GN 路径，仅作现场应急回退。
+        """
+        if not VIS_NAV_ENABLED:
+            return self._go_to_panel_map(digit)
+        t_end = min(time.time() + TARGET_TIME_BUDGET_S, self.deadline)
+        self._target_seen = False
+        self._loc_count = 0
+        self._current_digit = digit
+        for attempt in range(RETRY_LIMIT + 1):
+            if time.time() > t_end:
+                print(f"[面板{digit}] 时间预算耗尽")
+                return False
+            if self._seek_align_approach(digit, t_end):
+                if self._arrive_visual(digit, t_end) \
+                        and self._confirm_switch(digit):
+                    self._reanchor_pose(digit)
+                    if USE_MAP_CORRECTION:
+                        self._map_correction()
+                    return True
+            print(f"[面板{digit}] 第{attempt + 1}轮未到位")
+            if attempt < RETRY_LIMIT:
+                self._act("back_one_step", 1)
+        return False
+
+    def _seek_align_approach(self, digit, t_end):
+        """搜索 → 对准 → 接近（框宽达标即返回 True）
+
+        对准期目标短暂丢失（转过冲/近距窄视野）不算失败：重搜一次再试。
+        """
+        if self._search_target(digit, t_end) is None:
+            print(f"[搜索] 未找到面板{digit}（遮挡/光照？）")
+            return False
+        self._target_seen = True
+        for _try in range(2):
+            if self._align_visual(digit, t_end) is not None:
+                return self._approach_visual(digit, t_end)
+            print(f"[对准] 目标{digit}丢失 → 重搜一次")
+            if self._search_target(digit, t_end) is None:
+                break
+        # 目标始终不入视野，但死推说到位了：交给低头颜色判据裁决（抗形变、
+        # 不需要看见目标数字本身——色块压过与否是机器人与色块的相对关系）。
+        if digit in self.digit_cell:
+            fwd, lat, _b = self.target_relative(digit)
+            if abs(fwd) <= VIS_ARRIVE_FALLBACK_CM and abs(lat) <= 20.0:
+                print(f"[对准] 目标{digit}不可见但死推已到位"
+                      f"（纵向{fwd:+.1f} 横向{lat:+.1f}cm）→ 交低头颜色判据")
+                self._target_seen = True
+                return True
+        print(f"[对准] 目标{digit}反复丢失")
+        return False
+
+    def _count_frame(self):
+        """按当前阶段累计拍照数（诊断；见 run_level 的汇总打印）"""
+        self.phase_frames[self.phase] = self.phase_frames.get(self.phase, 0) + 1
+
+    def _target_color(self, digit):
+        """数字(1..7) → 检测器颜色名"""
+        return ID_TO_COLOR[digit]
+
+    def _see_target(self, digit, pitch=PITCH_NAV, head=None):
+        """拍一帧找目标色块 → (obs, frame, yaw_deg, box_px)；没看到返回 None
+
+        yaw 是**机体系**偏角：像素偏移换算（仅作伺服增益，FOV 取名义值不影响
+        收敛点）**再加上当前头部角**（左正）——否则在偏头档找到目标后会转错
+        角度（实测：宽扫档找到目标、按像素偏移转，目标立刻丢失）。
+        box_px 优先取 bbox 宽；被画幅裁切时用 sqrt(hull_area)（等效边长）兜底。
+        """
+        self._count_frame()
+        if head is not None:
+            self.state.set_head(head)
+        frame = self.state.capture_frame()
+        if frame is None:
+            return None
+        obs = self.detector.detect_panels(frame,
+                                          colors=[self._target_color(digit)],
+                                          arbitrate=False, drop_border=False)
+        if not obs:
+            return None
+        o = max(obs, key=lambda x: x.hull_area)
+        w = float(frame.shape[1])
+        center_x = float((o.hull_centroid_px if o.clipped
+                          else o.center_px)[0])
+        head_deg = ((self.state.current_head_pulse - HEAD_CENTER)
+                    * SERVO_DEG_PER_US)
+        yaw = -(center_x - w / 2.0) / w * CAMERA_FOV_H_DEG + head_deg
+        box = float(o.bbox[2])
+        if o.clipped:
+            box = max(box, float(np.sqrt(max(o.hull_area, 1.0))))
+        return o, frame, float(yaw), box
+
+    def _see_target_any(self, digit, pitch=PITCH_NAV):
+        """先在当前头部档找；找不到再头部五档扫（零身体位移）。同 _see_target"""
+        seen = self._see_target(digit, pitch)
+        if seen is not None:
+            return seen
+        for head in (HEAD_LEFT, HEAD_RIGHT, HEAD_WIDE_LEFT, HEAD_WIDE_RIGHT):
+            seen = self._see_target(digit, pitch, head)
+            if seen is not None:
+                return seen
+        self.state.set_head(HEAD_CENTER)
+        return None
+
+    def _search_target(self, digit, t_end):
+        """搜索目标：当前朝向头部五档 → 按死推提示转一步 → 后段前进探测
+
+        地图只用来定"往哪转"（±30° 容差足够，死推位姿每格到达后由
+        _reanchor_pose 重置，因此不会漂到不可用）。返回 (obs, frame) 或 None。
+        """
+        self.phase = f"SEARCH{digit}"
+        frames = 0
+        for rnd in range(VIS_SEARCH_MAX_ROUNDS):
+            if time.time() > t_end or frames >= VIS_SEARCH_MAX_FRAMES:
+                break
+            for head in (HEAD_CENTER, HEAD_LEFT, HEAD_RIGHT,
+                         HEAD_WIDE_LEFT, HEAD_WIDE_RIGHT):
+                if time.time() > t_end or frames >= VIS_SEARCH_MAX_FRAMES:
+                    break
+                seen = self._see_target(digit, PITCH_NAV, head)
+                frames += 1
+                if seen is not None:
+                    self.state.set_head(HEAD_CENTER)
+                    print(f"[搜索] 面板{digit} 已找到（第{rnd + 1}轮，"
+                          f"用掉 {frames} 帧）")
+                    return seen[0], seen[1]
+            self.state.set_head(HEAD_CENTER)
+            # 按死推提示转向（提示无效时固定左转）：**按提示大小转足**，
+            # 一次转 1~5 个大转步（22~129°）——动作不花帧，只有头部扫花帧，
+            # 这样"目标在身后 180°"也能两轮内覆盖到。
+            hint = (self.target_relative(digit)[2]
+                    if digit in self.digit_cell else 0.0)
+            if abs(hint) < 5.0:
+                hint = -TURN_LEFT_DEG      # 负 = 目标在左侧 → 左转
+            k = int(np.clip(round(abs(hint) / TURN_RIGHT_DEG), 1, 5))
+            self._act("turn_right" if hint > 0 else "turn_left", k)
+            frames += 1
+            # 盲走近目标（死推指引，动作不花帧）：地板形变会把可见地面带整体
+            # 推走（±15° → 可见带在 0~50cm 与 19~184cm 之间摆动），此时目标
+            # 可能压根不在任何俯仰档的视野里，只能先走近再由视觉接管。
+            if digit in self.digit_cell:
+                fwd = self.target_relative(digit)[0]
+                if fwd > VIS_SEARCH_BLIND_CM:
+                    n = int(np.clip(round((fwd - VIS_SEARCH_BLIND_CM) / 4.0
+                                          / FORWARD_ONE_STEP_CM),
+                                    1, VIS_SEARCH_BLIND_MAX_STEPS))
+                    print(f"[搜索] 面板{digit} 未入视野（死推纵向 {fwd:.0f}cm）"
+                          f"→ 盲走 {n} 步")
+                    self._act("go_forward_one_step", n)
+        print(f"[搜索] 面板{digit} 搜索用尽（{frames} 帧）")
+        return None
+
+    def _align_visual(self, digit, t_end, max_iters=6, first_seen=None):
+        """闭环对准（误差源 = 像素 yaw）→ (obs, frame, box) 或 None
+
+        小转角用在线 EMA 估计（与 do_turn 同一套常量/语义），但误差来自画面
+        偏移而不是地图方位——形变不影响它。
+        first_seen：调用方刚拍到的那一帧（搜索/接近的观测）可直接复用，
+        省一次拍照（真机 2~4s/张）。
+        """
+        self.phase = f"ALIGN{digit}"
+        prev_yaw, prev_n = None, 0
+        last_act, last_n = None, 0
+        for _ in range(max_iters):
+            if time.time() > t_end:
+                return None
+            if first_seen is not None:
+                seen, first_seen = first_seen, None
+            else:
+                seen = self._see_target_any(digit)
+            if seen is None:
+                if last_act is not None:
+                    undo = {"turn_left": "turn_right",
+                            "turn_right": "turn_left",
+                            "turn_left_small_step": "turn_right_small_step",
+                            "turn_right_small_step": "turn_left_small_step"}[last_act]
+                    print(f"[对准] 目标{digit}丢失：回退 {undo} "
+                          f"x{max(1, last_n // 2)} 后重试")
+                    self._act(undo, max(1, last_n // 2))
+                    last_act, last_n = None, 0
+                    continue
+                return None
+            obs, frame, yaw, box = seen
+            # 用"转过前后 yaw 的变化"更新单次小转实际角（过冲按 |a|+|b| 折算，
+            # 否则 per_step 变负 → EMA 崩向 0 → 下一轮请求更多步 → 更过冲）
+            if prev_yaw is not None and prev_n:
+                if abs(yaw) < abs(prev_yaw):
+                    per = (abs(prev_yaw) - abs(yaw)) / prev_n
+                else:
+                    per = (abs(prev_yaw) + abs(yaw)) / prev_n
+                per = float(np.clip(per, 0.3, 10.0))
+                alpha = (TURN_EMA_ALPHA_FAST
+                         if self._turn_updates < TURN_EMA_FAST_UPDATES
+                         else TURN_EMA_ALPHA)
+                self._turn_updates += 1
+                self._small_turn_deg = ((1 - alpha) * self._small_turn_deg
+                                        + alpha * per)
+                if per < MIN_EFFECTIVE_TURN_DEG:
+                    self._small_turn_fail += 1
+                    if self._small_turn_fail >= SMALL_TURN_FAIL_BATCHES:
+                        print("[对准] 小转连续被地面吞掉，升级大转")
+                        self._small_turn_usable = False
+                else:
+                    self._small_turn_fail = 0
+            if abs(yaw) <= VIS_ALIGN_TOL_DEG:
+                print(f"[对准] 已对准（yaw {yaw:+.1f}°，框宽 {box:.0f}px）")
+                return obs, frame, box
+            if abs(yaw) > VIS_BIG_TURN_DEG or not self._small_turn_usable:
+                print(f"[对准] 大转修正 yaw {yaw:+.1f}°")
+                self._big_turn(-yaw)     # _big_turn 用"右正"约定，故取负
+                prev_yaw, prev_n = None, 0
+                continue
+            n = int(np.clip(round(abs(yaw) / max(self._small_turn_deg, 0.3)),
+                            1, SMALL_TURN_MAX_STEPS))
+            # yaw > 0 = 目标在画面左侧 → 左转
+            action = ("turn_left_small_step" if yaw > 0
+                      else "turn_right_small_step")
+            self._act(action, n)
+            self._last_turn = (action, n)
+            last_act, last_n = action, n
+            print(f"[对准] 小转{n}次（yaw {yaw:+.1f}°，估计 "
+                  f"{self._small_turn_deg:.1f}°/次）")
+            prev_yaw, prev_n = yaw, n
+        return None
+
+    def _approach_visual(self, digit, t_end, max_iters=60):
+        """接近：目标框宽达 VIS_ARRIVE_BOX_PX 即交棒低头段
+
+        距离只用框宽（相对量，抗形变）；卡滞判据用"框宽是否还在涨"
+        （参考实现：Δproximity < 5 → 后退一步重识别）。
+        """
+        self.phase = f"APPROACH{digit}"
+        arr = float(VIS_ARRIVE_BOX_PX)
+        prev_box = None
+        stall = 0
+        for _ in range(max_iters):
+            if time.time() > t_end:
+                return False
+            seen = self._see_target(digit)
+            if seen is None or abs(seen[2]) > VIS_ALIGN_TOL_DEG:
+                got = self._align_visual(digit, t_end, first_seen=seen)
+                if got is None:
+                    print(f"[接近] 目标{digit}丢失，交回搜索")
+                    return False
+                box = got[2]
+            else:
+                box = seen[3]
+            print(f"[接近] 框宽 {box:.0f}px（交棒 {arr:.0f}px）")
+            if box >= arr:
+                return True
+            if prev_box is not None and abs(box - prev_box) < VIS_STALL_BOX_PX:
+                stall += 1
+                if stall >= 2:
+                    print("[接近] 前进无效（框宽不涨）：后退一步重识别")
+                    self._act("back_one_step", 1)
+                    stall, prev_box = 0, None
+                    continue
+            else:
+                stall = 0
+            prev_box = box
+            if box < 0.6 * arr:
+                n = VIS_BATCH_MAX_STEPS
+            elif box < 0.85 * arr:
+                n = 3
+            else:
+                n = 1
+            self._act("go_forward_one_step", n)
+        print("[接近] 迭代上限用尽")
+        return False
+
+    def _arrive_visual(self, digit, t_end):
+        """低头到达：颜色占比"出现 → 消失"判定压过目标格（尺度无关版）
+
+        判据 = 记录本次接近的占比峰值，峰值过绝对下限后占比跌破峰值的
+        VIS_COLOR_DROP_FRAC → 已压过该格。它描述的是"色块从机器人视野里
+        由出现到消失"这一**机器人与色块的相对几何关系**，与相机高度/俯仰
+        无关 → 抗地板形变。
+        横向纠偏用 dx/box_w × PANEL_WIDTH_CM（投影不变量，同样抗形变），
+        但在看到颜色前最多纠 VIS_LAT_MAX_CORRECTIONS 次（防抖动空耗帧）。
+        """
+        self.phase = f"ARRIVE{digit}"
+        self.state.set_pitch(PITCH_DOWN)
+        color = self._target_color(digit)
+        peak = 0.0
+        prev_ratio = None
+        lat_fixes = 0
+        # 时间预算自适应：剩余时间不足时收缩迭代上限（真机拍照 2~4s/张；
+        # 仿真里动作/拍照是瞬时的，因此这条只影响真机行为）
+        iters_max = VIS_ARRIVE_MAX_ITERS
+        cells_left = max(1, 8 - digit)
+        if (self.deadline - time.time()) / cells_left < 90.0:
+            iters_max = max(12, int(iters_max * 0.6))
+        try:
+            for _ in range(iters_max):
+                if time.time() > t_end:
+                    return False
+                self._count_frame()
+                frame = self.state.capture_frame()
+                if frame is None:
+                    return False
+                ratio = self.detector.color_ratio(frame, color)
+                peak = max(peak, ratio)
+                print(f"[到达] 色占比 {ratio:.4f}（峰值 {peak:.4f}，"
+                      f"判据 <{VIS_COLOR_DROP_FRAC * peak:.4f}）")
+                if peak >= VIS_COLOR_SEEN_MIN \
+                        and ratio < VIS_COLOR_DROP_FRAC * peak:
+                    print(f"[到达] 颜色由峰值 {peak:.4f} 跌到 {ratio:.4f}"
+                          " → 判定压过目标格")
+                    return True
+                obs = self.detector.detect_panels(frame, colors=[color],
+                                                  arbitrate=False,
+                                                  drop_border=False)
+                if obs and peak < VIS_COLOR_SEEN_MIN \
+                        and lat_fixes < VIS_LAT_MAX_CORRECTIONS:
+                    o = max(obs, key=lambda x: x.hull_area)
+                    px = o.hull_centroid_px if o.clipped else o.center_px
+                    box = max(float(o.bbox[2]), 1.0)
+                    dx_cm = ((float(px[0]) - frame.shape[1] / 2.0) / box
+                             * PANEL_WIDTH_CM)
+                    if abs(dx_cm) > VIS_LAT_TOL_CM:
+                        print(f"[到达] 横向 {dx_cm:+.1f}cm → 小转纠偏"
+                              f"（{lat_fixes + 1}/{VIS_LAT_MAX_CORRECTIONS}）")
+                        self._act("turn_right_small_step" if dx_cm > 0
+                                  else "turn_left_small_step", 1)
+                        lat_fixes += 1
+                        continue
+                # 步长自适应：占比**还在涨**时用 3 步批量（6cm）赶路，一旦不再涨
+                # （到峰/过峰）改单步（2cm）精停。实测：用"与峰值比"判据会
+                # 在爬升段误判成"接近峰值"而一路 2cm 挪（占比 0.06→0.13 花了
+                # 18 次迭代＝低头段占了全程 61% 的拍照）。
+                rising = prev_ratio is None or ratio >= prev_ratio
+                prev_ratio = ratio
+                self._act("go_forward_one_step", 3 if rising else 1)
+            print(f"[到达] 迭代/时间用尽（峰值占比 {peak:.4f}）")
+            # 兜底：视觉判据没走完（例如峰值后占比掉得不够）时，用**死推距离**
+            # 复核——位姿每格到达后已重置，短程死推（≤1格）精度足够。
+            fwd, lat, _b = self.target_relative(digit)
+            if abs(fwd) <= VIS_ARRIVE_FALLBACK_CM \
+                    and abs(lat) <= VIS_ARRIVE_FALLBACK_LAT_CM:
+                print(f"[到达] 死推距离兜底判定到位（纵向{fwd:+.1f} "
+                      f"横向{lat:+.1f}cm）")
+                return True
+            return False
+        finally:
+            self.state.set_pitch(PITCH_NAV)
+
+    def _confirm_switch(self, digit):
+        """到达收尾：蹭步压微动开关 + 仲裁冲突近距复核（沿用 v2 行为）"""
+        self.phase = f"CONFIRM{digit}"
+        self._act("back_one_step", 1)
+        self._act("go_forward_one_step", 1)
+        cell = self.digit_cell.get(digit)
+        if cell in self.cell_conflict:
+            loc = self.localize(PITCH_DOWN, arbitrate=True)
+            if loc:
+                for o in loc[0]:
+                    if o.digit == digit:
+                        verdict = "一致" if o.model_digit == digit \
+                            else "仍冲突（以颜色为准，赛后人工核对）"
+                        print(f"[复核] 格{cell} 近距SVM={o.model_digit}"
+                              f"({o.model_conf:.2f}) vs 颜色={digit}——{verdict}")
+        self.state.act("stand")
+        print(f"[确认] 面板{digit} 到达 ✓")
+        return True
+
+    def _reanchor_pose(self, digit):
+        """到达后把死推位姿锚到该格格心（消除逐格漂移，保搜索提示可用）
+
+        位置断言来自"到达判定成立"（机器人确实压在该色块/格上）；航向保持
+        死推值（视觉对准已把目标对正，残余误差只影响粗提示）。
+        """
+        if digit not in self.digit_cell:
+            return
+        c = grid_cell_center(self.digit_cell[digit])
+        self.pose = np.array([c[0], c[1], self.pose[2]])
+        print(f"[锚定] 死推位姿重置到格{self.digit_cell[digit]}"
+              f"（{c[0]:.0f},{c[1]:.0f}）")
+
+    def _map_correction(self):
+        """可选的地图 GN 校正：成功才采纳，失败只打一行日志
+
+        地板形变会让相机常数失配 → 残差超门控。这是**预期**行为而非错误：
+        因此这里静默跳过，绝不触发恢复链（v2 的"定位风暴"根因）。
+        """
+        loc = self.localize(PITCH_DOWN)
+        if loc is None:
+            print("[校正] 地图校正跳过（残差超门控/面板不足——形变下属预期）")
+            return
+        print(f"[校正] 地图校正采纳: ({self.pose[0]:.1f},{self.pose[1]:.1f}) "
+              f"{np.degrees(self.pose[2]):.1f}°")
+
+    def _go_to_panel_map(self, digit):
+        """v2 地图 GN 路径（VIS_NAV_ENABLED=False 时的应急回退）"""
         t_end = min(time.time() + TARGET_TIME_BUDGET_S, self.deadline)
         self._target_seen = False
         self._loc_count = 0
