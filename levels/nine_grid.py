@@ -219,7 +219,14 @@ LAYOUT_HEIGHT_MAX_CM = 70.0
 LAYOUT_HEIGHT_STEP_CM = 5.0
 LAYOUT_VOTE_MIN_FRAC = 0.6      # 胜出布局须占全部成功组合的比例
 LAYOUT_VOTE_MIN_COMBOS = 10     # 且组合数下限（防少数组合碰巧一致）
-SPREAD_MAX_CM = 8.0             # 同一数字跨帧离散度上限（超出判坏观测并剔除）
+# 像素域五参数精修门（见 _pixel_pose_calib）：重投影 RMS 上限 = 导航的 GN 门控
+# （GN_PIXEL_GATE）——自标定常数必须让导航级残差合格，否则真机会定位风暴。
+# 门用**中位残差**而不是 RMS：真实照片里少数面板会因光照/阴影/半合并使
+# 观测中心偏几十 px，RMS 被它们抬高（实测中位 ~20px 而 RMS ~110px），
+# 但参数估计由多数好观测驱动，故用稳健的统计量判定。
+PIXEL_CALIB_MED_MAX_PX = 40.0
+SPREAD_MAX_CM = 8.0             # 簇内离散告警阈值（cm；超出说明该数字观测不可信）
+CLUSTER_RADIUS_CM = 6.0         # 同数字跨帧观测聚类半径（cm）：取最大一致簇
 LAYOUT_MIN_CLEAN_DIGITS = 6     # 提前结束扫描所需的"未裁切观测覆盖数字数"
 POSE_BOOTSTRAP_RMS_MAX_CM = 0.35 * GRID_CELL_CM  # 位姿自举刚体残差上限
 # 取"覆盖门同量级"（0.35 格距 ≈11.7cm）：布局若已被 lattice_assign 接受
@@ -230,10 +237,114 @@ POSE_BOOTSTRAP_X_RANGE = (-10.0, 110.0)   # 自举位姿合理性门（场地系
 POSE_BOOTSTRAP_Y_RANGE = (-45.0, 105.0)   # 入口在场外，y 允许负值
 
 # 布局扫一次拟合的完整结果（cells=None 表示失败；见 _lattice_grid_fit）
+# pose = 像素域精修得到的位姿 (x, y, θ)（None = 未收敛，回退刚体自举）
 LatticeFit = namedtuple(
     "LatticeFit",
     "cells info offset_deg cam_height_cm pts_robot clean weights "
-    "rms_clean_cm rms_all_cm spread_cm res_max_cm warnings")
+    "rms_clean_cm rms_all_cm spread_cm res_max_cm warnings pose")
+
+
+def _pixel_pose_calib(entries, p0, off0, h0, iters=12):
+    """像素域五参数联合精修 (x, y, θ, 安装偏移, 相机高度) → (pose5, rms_px)
+
+    为什么需要：格阵刚性判据只约束"这批点是不是 33.3cm 格阵"，(安装偏移,
+    相机高度) 存在一条**等价退化谷**——sim 实测 (18.5°, 56cm) 与 (19.5°, 59cm)
+    的刚体 RMS 都是 0.30cm，但导航用的投影对谷内位置很敏感：高度差 3cm 会让
+    GN 残差从 <1px 涨到 16~23px，直接触发"定位风暴"（拍照数爆表）。
+    像素域目标用的是完整投影模型（含裁切感知观测），谷被消掉。
+
+    entries: [(格心场地坐标, 观测像素, head_pulse, 裁切?, pitch_pulse), ...]
+    与导航同一残差定义 + Cauchy 鲁棒 + 弱先验（观测少时仍可解）。
+    无效（面板跑到相机背后/参数越界）返回 (None, None)。
+    """
+    ent = [(np.asarray(g, dtype=np.float64), np.asarray(px, dtype=np.float64),
+            int(head), bool(cl), int(pitch))
+           for g, px, head, cl, pitch in entries]
+    if len(ent) < 4:
+        return None, None, None
+    w_obs = np.array([1.0 if not cl else 0.6 for _g, _px, _h, cl, _p in ent])
+    sig = np.array([20.0, 20.0, np.radians(20.0), 12.0, 20.0])  # 弱先验 σ
+    ref = np.array([p0[0], p0[1], p0[2], float(off0), float(h0)], dtype=np.float64)
+
+    def resid(p):
+        out = np.empty((len(ent), 2))
+        for k, (g, px, head, cl, pitch) in enumerate(ent):
+            # 有效性守卫：观测点当初是在画幅内被检出的，若预测中心跑到画幅外
+            # 很远（或面板跑到相机背后），这一步长把参数推到了不自洽处 →
+            # 视为无效，由线搜索缩步。否则优化器会"收敛"到把面板甩出画外的
+            # 大残差解（实测真实照片集上出现干净残差 2.6e4 px 的假收敛）。
+            qc = project_ground_to_pixel(g, p[0], p[1], p[2], pitch, head,
+                                         pitch_offset_deg=p[3],
+                                         cam_height_cm=p[4])[0]
+            if not np.all(np.isfinite(qc)) or not (
+                    -1500.0 <= qc[0] <= CAMERA_WIDTH + 1500.0
+                    and -1500.0 <= qc[1] <= CAMERA_HEIGHT + 1500.0):
+                return None
+            if cl:
+                q = clipped_quad_centroid(g, p[0], p[1], p[2], pitch, head,
+                                          pitch_offset_deg=p[3],
+                                          cam_height_cm=p[4])
+            else:
+                q = qc
+            if q is None:
+                return None
+            q = np.asarray(q, dtype=np.float64)
+            if not np.all(np.isfinite(q)):
+                return None
+            out[k] = q - px
+        return out
+
+    p = ref.copy()
+    r = resid(p)
+    if r is None:
+        return None, None, None
+    steps = np.array([0.5, 0.5, np.radians(0.5), 0.5, 1.0])
+    dmax = np.array([3.0, 3.0, np.radians(3.0), 3.0, 3.0])
+    for _it in range(iters):
+        per = np.linalg.norm(r, axis=1)
+        # Cauchy 权重按观测给（与 _gn_run 同一鲁棒核）
+        w = w_obs / (1.0 + (per / GN_CAUCHY_C_PX) ** 2)
+        J = np.zeros((r.size + 5, 5))
+        for j in range(5):
+            e = np.zeros(5)
+            e[j] = steps[j]
+            r1 = resid(p + e)
+            r2 = resid(p - e)
+            if r1 is None or r2 is None:
+                return None, None, None
+            J[:r.size, j] = ((r1 - r2) / (2.0 * steps[j])).ravel()
+        for j in range(5):                      # 弱先验行
+            J[r.size + j, j] = 1.0 / sig[j]
+        rp = np.concatenate([r.ravel(), (p - ref) / sig])
+        wf = np.concatenate([np.repeat(w, 2), np.ones(5)])
+        try:
+            d = np.linalg.solve(J.T @ (J * wf[:, None]) + 1e-8 * np.eye(5),
+                                -(J.T @ (rp * wf)))
+        except np.linalg.LinAlgError:
+            return None, None, None
+        d = np.clip(d, -dmax, dmax)
+        ok = False
+        for _ls in range(6):
+            cand = p + d
+            if (-15.0 <= cand[3] <= 55.0 and 25.0 <= cand[4] <= 100.0
+                    and abs(cand[0] - ref[0]) <= 60.0
+                    and abs(cand[1] - ref[1]) <= 60.0
+                    and abs(_wrap_angle(cand[2] - ref[2])) <= np.radians(40.0)):
+                rc = resid(cand)
+                if rc is not None:
+                    p, r, ok = cand, rc, True
+                    break
+            d = d * 0.5
+        if not ok:
+            break
+        if np.max(np.abs(d[:3])) < 1e-3 and abs(d[3]) < 0.02 and abs(d[4]) < 0.02:
+            break
+    per = np.linalg.norm(r, axis=1)
+    cl = np.array([c for _g, _px, _h, c, _p in ent])
+    rms_all = float(np.sqrt(np.mean(per ** 2)))
+    med_clean = (float(np.median(per[~cl]))
+                 if int(np.count_nonzero(~cl)) >= 3 else float(np.median(per)))
+    return p, rms_all, med_clean
 
 
 def _fit_failure(info, warnings=None):
@@ -241,7 +352,7 @@ def _fit_failure(info, warnings=None):
     return LatticeFit(cells=None, info=info, offset_deg=0.0, cam_height_cm=0.0,
                       pts_robot={}, clean=set(), weights={}, rms_clean_cm=None,
                       rms_all_cm=None, spread_cm={}, res_max_cm=None,
-                      warnings=list(warnings or []))
+                      warnings=list(warnings or []), pose=None)
 
 
 def _rigid_fit_2d(gs, ps, w=None):
@@ -610,12 +721,14 @@ class NineGridLevel:
 
         pix_obs: [(pitch, head, digit, 观测像素, 裁切?), ...]（跨帧全部观测）
 
-        聚合策略（2026-09-11 现场照片实测驱动）：
-          - **干净优先**：某数字有未裁切观测时只用未裁切观测（裁切质心偏差
-            实测 1.3~8.4cm）；否则用裁切观测并把权重降到
-            LATTICE_CLIPPED_WEIGHT；
-          - 稳健修剪：离该数字中位数 >SPREAD_MAX_CM 的观测剔除
-            （假阳 / 同色合并 blob 的兜底）。
+        聚合策略（2026-09-11 现场照片 + 真机布局扫实测驱动）：
+          - **最大一致簇取模式**：同一数字的多次观测先按 CLUSTER_RADIUS_CM
+            邻域聚类，取点数最多的一簇（真机实测：场内木框被橙色阈值命中、
+            蓝地垫被蓝色阈值命中，且多为**未裁切**观测——单纯"干净优先的
+            中位数"会被它们带到 40cm 外，格阵拟合整体失败）；
+          - 簇内**干净优先**：有未裁切观测就只用未裁切观测（裁切质心偏差
+            实测 1.3~8.4cm）；否则用簇内裁切观测并把权重降到
+            LATTICE_CLIPPED_WEIGHT；簇外观测计入 dropped 供告警/诊断。
         退化提醒：只有单档俯仰有观测时，安装偏移与名义俯仰角不可分离
         （实测 (pitch1200, offset=25°) 与 (pitch1040, offset=10°) 等价，
         有效俯角都 ≈51.5°），此时自标定常数不可外推到另一档 → warnings。
@@ -627,6 +740,10 @@ class NineGridLevel:
                 f"仅 {sorted(pitches_seen)} 单档俯仰有观测：安装偏移与名义"
                 "俯仰角退化，自标定常数不可外推到另一档")
         hg_cache = {}
+        obs_by_digit = {}          # digit -> [(pitch, head, px, clipped), ...]
+        for _pitch, _head, _d, _px, _cl in pix_obs:
+            obs_by_digit.setdefault(_d, []).append(
+                (int(_pitch), int(_head), _px, bool(_cl)))
 
         def _hg(pitch, pulse, off, hcm):
             key = (int(pitch), int(pulse), float(off), float(hcm))
@@ -639,41 +756,56 @@ class NineGridLevel:
             return hg
 
         def _aggregate(off, hcm):
-            """逐数字机器人系点聚合 → (med, clean, weights, spread)"""
-            acc = {}
-            for pitch, pulse, digit, px, clipped in pix_obs:
-                p = _hg(pitch, pulse, off, hcm).pixels_to_ground(
+            """逐数字机器人系点聚合 → (med, clean, wts, spread, dropped, sel)
+
+            现场实测（2026-09-11 真机布局扫 photo_1789127899~909）：场内木框
+            被橙色阈值命中、蓝地垫被蓝色阈值命中，且它们是**未裁切**观测——
+            "干净优先的中位数"会被它们带到 40cm 外，整个格阵拟合失败。
+            故先按"最大一致簇"取模式，再在簇内干净优先；簇外观测计 dropped。
+            sel[d] = 该数字**入选观测在 obs_by_digit[d] 中的下标**，供像素域
+            精修复用（精修必须只用同一批内点，否则假阳会把重投影解带飞）。
+            """
+            med, clean, wts, spread, dropped, sel = {}, set(), {}, {}, {}, {}
+            for d, lst in obs_by_digit.items():
+                pts = np.array([_hg(pitch, pulse, off, hcm).pixels_to_ground(
                     [px], head_pulse=pulse)[0]
-                acc.setdefault(digit, []).append((bool(clipped), p))
-            med, clean, wts, spread = {}, set(), {}, {}
-            for d, lst in acc.items():
-                clean_pts = np.array([p for cl, p in lst if not cl])
-                if len(clean_pts):
-                    use = clean_pts
+                    for pitch, pulse, px, _cl in lst])
+                flags = np.array([cl for _p, _h, _px, cl in lst])
+                if len(pts) > 1:
+                    dm = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=2)
+                    n_in = (dm <= CLUSTER_RADIUS_CM).sum(axis=1)
+                    keep = dm[int(np.argmax(n_in))] <= CLUSTER_RADIUS_CM
+                else:
+                    keep = np.ones(len(pts), dtype=bool)
+                n_clean = int(np.count_nonzero(keep & ~flags))
+                use_mask = keep & ~flags if n_clean >= 1 else keep
+                use = pts[use_mask]
+                m = np.median(use, axis=0)
+                med[d] = m
+                spread[d] = float(np.max(np.linalg.norm(use - m, axis=1)))
+                dropped[d] = int(np.count_nonzero(~keep))
+                sel[d] = [int(k) for k in np.where(use_mask)[0]]
+                if n_clean >= 1:
                     clean.add(d)
                     wts[d] = 1.0
                 else:
-                    use = np.array([p for _cl, p in lst])
                     wts[d] = LATTICE_CLIPPED_WEIGHT
-                m = np.median(use, axis=0)
-                keep = np.linalg.norm(use - m, axis=1) <= SPREAD_MAX_CM
-                if keep.any():
-                    use = use[keep]
-                    m = np.median(use, axis=0)
-                spread[d] = float(np.max(np.linalg.norm(use - m, axis=1)))
-                med[d] = m
-            return med, clean, wts, spread
+            return med, clean, wts, spread, dropped, sel
 
         votes = {}   # (数字→格)冻结元组 -> [每个成功组合的拟合明细, ...]
+        dropped_seen = {}
         for off in np.arange(LAYOUT_OFFSET_MIN_DEG,
                              LAYOUT_OFFSET_MAX_DEG + 1e-9,
                              LAYOUT_OFFSET_STEP_DEG):
             for hcm in np.arange(LAYOUT_HEIGHT_MIN_CM,
                                  LAYOUT_HEIGHT_MAX_CM + 1e-9,
                                  LAYOUT_HEIGHT_STEP_CM):
-                med, clean, wts, spread = _aggregate(off, hcm)
+                med, clean, wts, spread, dropped, sel = _aggregate(off, hcm)
                 if len(med) < 7:
                     continue
+                for d, n in dropped.items():
+                    if n:
+                        dropped_seen[d] = max(dropped_seen.get(d, 0), n)
                 cells, _info, ranked = lattice_assign(med, weights=wts,
                                                       clean=clean)
                 if cells is None or len(cells) != 7 or not ranked:
@@ -681,7 +813,7 @@ class NineGridLevel:
                 votes.setdefault(tuple(sorted(cells.items())), []).append({
                     "off": float(off), "hcm": float(hcm), "med": med,
                     "clean": set(clean), "wts": dict(wts),
-                    "spread": dict(spread),
+                    "spread": dict(spread), "sel": sel,
                     "rms_clean": ranked[0]["rms_clean"],
                     "rms_all": ranked[0]["rms_all"],
                     "res_max": ranked[0]["res_max_cm"]})
@@ -701,15 +833,73 @@ class NineGridLevel:
         cells = dict(key)
         off = float(np.median([c["off"] for c in combos]))
         hcm = float(np.median([c["hcm"] for c in combos]))
-        # 取最接近中位数的那个组合的几何数据作为最终结果（可复现、可诊断）
+        # 取最接近中位数的那个组合的几何数据作为基准（可复现、可诊断）
         pick = min(combos, key=lambda c: (
             abs(c["off"] - off) / LAYOUT_OFFSET_STEP_DEG
             + abs(c["hcm"] - hcm) / LAYOUT_HEIGHT_STEP_CM))
+        # 像素域五参数联合精修（关键步骤，见 _pixel_pose_calib）：格阵刚性判据
+        # 对 (安装偏移, 相机高度) 只有一条退化谷（sim 实测 (18.5°,56cm) 与
+        # (19.5°,59cm) 刚体 RMS 都是 0.30cm），而导航投影对谷内位置很敏感
+        # （高度差 3cm → GN 残差 16~23px → 定位风暴）。故用"格心↔像素"重投影
+        # 残差（与导航同一残差定义）联合解出 (x, y, θ, 偏移, 高度)。
+        ds = sorted(pick["med"])
+        gs = np.array([grid_cell_center(cells[d]) for d in ds])
+        ps = np.array([pick["med"][d] for d in ds])
+        ws = np.array([pick["wts"].get(d, 1.0) for d in ds])
+        R0, t0, _rms0, _per0 = _rigid_fit_2d(gs, ps, ws)
+        pos0 = -R0.T @ t0
+        fwd0 = R0.T @ np.array([0.0, 1.0])
+        pose0 = np.array([pos0[0], pos0[1], float(np.arctan2(fwd0[0], fwd0[1]))])
+        entries = []
+        for d, pos_list in pick["sel"].items():
+            if d not in cells:
+                continue
+            for k in pos_list:
+                pitch, head, px, cl = obs_by_digit[d][k]
+                entries.append((grid_cell_center(cells[d]), px, head, cl, pitch))
+        pose5, rms_all_px, med_px = _pixel_pose_calib(entries, pose0, off, hcm)
+        pose = None
+        if pose5 is not None and med_px is not None \
+                and med_px <= PIXEL_CALIB_MED_MAX_PX:
+            o2, h2 = float(pose5[3]), float(pose5[4])
+            med2, clean2, wts2, spread2, _dr2, sel2 = _aggregate(o2, h2)
+            cells2, _i2, ranked2 = lattice_assign(med2, weights=wts2,
+                                                  clean=clean2)
+            if cells2 == cells and ranked2:
+                off, hcm = o2, h2
+                pick = {"off": off, "hcm": hcm, "med": med2, "clean": clean2,
+                        "wts": wts2, "spread": spread2, "sel": sel2,
+                        "rms_clean": ranked2[0]["rms_clean"],
+                        "rms_all": ranked2[0]["rms_all"],
+                        "res_max": ranked2[0]["res_max_cm"]}
+                pose = np.array([pose5[0], pose5[1], pose5[2]])
+                warnings.append(
+                    f"相机常数经像素域精修：偏移 {off:+.1f}° / 高度 {hcm:.1f}cm"
+                    f"（重投影 中位 {med_px:.1f}px / RMS {rms_all_px:.1f}px）")
+            else:
+                warnings.append("像素域精修后的常数与胜出布局不一致——已忽略"
+                                "精修，沿用格阵投票常数")
+        else:
+            warnings.append(
+                "像素域精修未收敛（重投影 中位 "
+                f"{'None' if med_px is None else format(med_px, '.1f') + 'px'} "
+                f"> {PIXEL_CALIB_MED_MAX_PX:.0f}px）——沿用格阵投票常数，"
+                "导航精度可能下降")
         clipped_only = sorted(d for d in cells if pick["wts"].get(d, 1.0) < 1.0)
         if clipped_only:
             warnings.append(
                 f"数字 {clipped_only} 无未裁切观测，仅靠裁切质心"
                 f"（偏差可达 ~8cm）")
+        if dropped_seen:
+            warnings.append(
+                f"数字 {sorted(dropped_seen)} 有被剔除的离群观测"
+                f"（最多 {max(dropped_seen.values())} 帧，疑似场内同色杂物"
+                "被误检——木框/地垫）")
+        bad_spread = sorted(d for d, s in pick["spread"].items()
+                            if s > SPREAD_MAX_CM)
+        if bad_spread:
+            warnings.append(
+                f"数字 {bad_spread} 簇内离散 >{SPREAD_MAX_CM:.0f}cm，观测质量差")
         if 6 in cells.values():
             warnings.append("位置6 被面板占据：与比赛规则冲突——标号约定或"
                             "机位存疑，需现场踩格核对")
@@ -722,41 +912,50 @@ class NineGridLevel:
                           rms_clean_cm=pick["rms_clean"],
                           rms_all_cm=pick["rms_all"],
                           spread_cm=dict(pick["spread"]),
-                          res_max_cm=pick["res_max"], warnings=warnings)
+                          res_max_cm=pick["res_max"], warnings=warnings,
+                          pose=pose)
 
     def _pose_bootstrap(self, fit):
-        """机器人系点 ↔ 场地格心 2D 刚体拟合 → 直接写 self.pose，返回 bool
+        """位姿自举 → 直接写 self.pose，返回 bool
 
-        为什么不再解"像素↔格心"单应再 decompose：那条路把裁切质心观测
-        （偏差实测 1.3~8.4cm）送进无鲁棒的最小二乘，会给出非物理 H
-        （历史崩溃："相机未俯视地面（光轴无向下分量）"）。机器人系地面点与
-        场地格心只差一个刚体变换（两系同为 z 轴向上的地面系），加权最小二乘
-        直接得位姿，且与 GN 投影（project_ground_to_pixel）同源自洽。
-        自检：干净子集残差 ≤POSE_BOOTSTRAP_RMS_MAX_CM、机器人在入口侧、
-        位置落在场地合理范围；任一不满足 → False（调用方前进一步重扫）。
+        两条路径：
+          1) **优先用像素域精修位姿**（fit.pose，见 _pixel_pose_calib）：它由
+             "格心↔像素"重投影最小二乘得到，与导航同一残差定义、同一常数，
+             精度最高；
+          2) 回退用"机器人系点 ↔ 场地格心"2D 刚体拟合（两系同为 z 轴向上的
+             地面系，只差一个刚体变换）。
+        两条路都不再解"像素↔格心"单应再 decompose——那条路把裁切质心观测
+        （偏差实测 1.3~8.4cm）送进无鲁棒最小二乘，会给出非物理 H
+        （历史崩溃："相机未俯视地面（光轴无向下分量）"）。
+        自检：残差门、机器人在入口侧、位置落在场地合理范围；任一不满足 → False。
         """
         ds = sorted(fit.pts_robot)
         if len(ds) < 4 or not fit.cells or any(d not in fit.cells for d in ds):
             print("[布局] 位姿自举失败：拟合结果不完整")
             return False
         gs = np.array([grid_cell_center(fit.cells[d]) for d in ds])
-        ps = np.array([fit.pts_robot[d] for d in ds])
-        w = np.array([1.0 if d in fit.clean else LATTICE_CLIPPED_WEIGHT
-                      for d in ds])
-        R, t, rms_all, per = _rigid_fit_2d(gs, ps, w)
-        idx = [k for k, d in enumerate(ds) if d in fit.clean]
-        if len(idx) >= 3:
-            gate_val = float(np.sqrt(np.mean(per[idx] ** 2)))
-            gate_txt = f"干净子集 {gate_val:.1f}cm"
+        if fit.pose is not None:
+            pos = np.asarray(fit.pose[:2], dtype=np.float64)
+            th = float(fit.pose[2])
+            gate_txt = "像素域精修"
         else:
-            gate_val, gate_txt = rms_all, f"全点 {rms_all:.1f}cm"
-        if gate_val > POSE_BOOTSTRAP_RMS_MAX_CM:
-            print(f"[布局] 位姿自举自检失败：刚体残差 {gate_txt} > "
-                  f"{POSE_BOOTSTRAP_RMS_MAX_CM:.0f}cm（布局或观测存疑）")
-            return False
-        pos = -R.T @ t                      # 机器人系原点的场地坐标（相机地面投影）
-        fwd = R.T @ np.array([0.0, 1.0])    # 机器人系 +y（机体前方）的场地方向
-        th = float(np.arctan2(fwd[0], fwd[1]))
+            ps = np.array([fit.pts_robot[d] for d in ds])
+            w = np.array([1.0 if d in fit.clean else LATTICE_CLIPPED_WEIGHT
+                          for d in ds])
+            R, t, rms_all, per = _rigid_fit_2d(gs, ps, w)
+            idx = [k for k, d in enumerate(ds) if d in fit.clean]
+            if len(idx) >= 3:
+                gate_val = float(np.sqrt(np.mean(per[idx] ** 2)))
+                gate_txt = f"刚体残差 干净子集 {gate_val:.1f}cm"
+            else:
+                gate_val, gate_txt = rms_all, f"刚体残差 全点 {rms_all:.1f}cm"
+            if gate_val > POSE_BOOTSTRAP_RMS_MAX_CM:
+                print(f"[布局] 位姿自举自检失败：{gate_txt} > "
+                      f"{POSE_BOOTSTRAP_RMS_MAX_CM:.0f}cm（布局或观测存疑）")
+                return False
+            pos = -R.T @ t                  # 机器人系原点的场地坐标（相机地面投影）
+            fwd = R.T @ np.array([0.0, 1.0])   # 机器人系 +y（机体前方）的场地方向
+            th = float(np.arctan2(fwd[0], fwd[1]))
         if not (POSE_BOOTSTRAP_X_RANGE[0] <= pos[0] <= POSE_BOOTSTRAP_X_RANGE[1]
                 and POSE_BOOTSTRAP_Y_RANGE[0] <= pos[1]
                 <= POSE_BOOTSTRAP_Y_RANGE[1]):
@@ -768,8 +967,7 @@ class NineGridLevel:
             return False
         self.pose = np.array([pos[0], pos[1], th])
         print(f"[布局] 位姿自举: ({pos[0]:.1f},{pos[1]:.1f}) "
-              f"航向{np.degrees(th):.1f}° 刚体残差 {gate_txt} "
-              f"({len(ds)}点/{len(idx)}干净)")
+              f"航向{np.degrees(th):.1f}°（{gate_txt}，{len(ds)}点）")
         return True
 
     # =================================================================
