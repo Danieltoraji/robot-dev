@@ -26,37 +26,45 @@ import numpy as np
 from core.paths import PROJECT_ROOT
 
 # =====================================================================
-# HSV 阈值（单一真源；数值继承参考代码 extract_digit_roi.py 实测结论）
+# HSV 阈值（单一真源）
 # =====================================================================
-# 普通颜色：(h,s,v) 长方体，红为双段（H 环绕）
+# 2026-09-10 现场实测更新（11 张布局扫照片，采样见开发实录）：
+# 实测贴纸 H(度)/S%/V% —— 黄42-60/30-96/63-73、橙14-26/27-86/61、
+# 蓝206-214/41-83/43-56、粉336/26/63、紫242-248/32-47/33-42、红2-8/65-80/39-52。
+# 白色面板地板 S 仅 3~9%、阴影 V 7~10%、外围绿色地垫会过绿色规则（靠格归属排除）。
+# 自动白平衡跨帧漂移可使同一贴纸 H 漂 ~10°，故 H 区间取宽、S 下限区分地板。
+# 普通颜色：(h,s,v) 长方体（OpenCV H 0-179），红为双段（H 环绕）
 COLOR_THRESHOLDS = {
-    "red": [((0, 120, 100), (6, 255, 255)),
-            ((170, 120, 80), (179, 255, 255))],
-    "orange": [((8, 120, 120), (16, 255, 255))],
-    "yellow": [((22, 100, 120), (32, 255, 255))],
+    "red": [((0, 110, 90), (5, 255, 255)),
+            ((172, 110, 90), (180, 255, 255))],
+    "orange": [((6, 85, 110), (15, 255, 255))],
+    "yellow": [((17, 70, 90), (34, 255, 255))],
     # green/blue 走 build_color_mask 特殊判定，不放长方体
-    "purple": [((108, 80, 50), (140, 255, 255))],
-    "pink": [((160, 35, 80), (170, 255, 255))],
+    "purple": [((114, 55, 60), (136, 255, 255))],
+    "pink": [((160, 45, 80), (171, 255, 255))],
 }
 
 COLOR_TO_ID = {"red": 1, "orange": 2, "yellow": 3,
                "green": 4, "blue": 5, "purple": 6, "pink": 7}
 ID_TO_COLOR = {v: k for k, v in COLOR_TO_ID.items()}
 
-# 绿色：H_deg∈[100,160] 且 S/V>=1.15（深绿 S/V 1.35~2.48，水绿 0.27~0.98 被排除）
+# 绿色：H_deg∈[100,160] 且 S/V>=1.15 且 V>=16%（深绿 S/V 1.35~2.48，水绿
+# 0.27~0.98 被排除）；V 下限排除深色阴影（实测 V7~10% 的阴影曾通过比例规则）
 GREEN_H_MIN_DEG, GREEN_H_MAX_DEG = 100.0, 160.0
 GREEN_SV_RATIO_MIN = 1.15
+GREEN_V_MIN_PERCENT = 16.0
 
-# 蓝色：H∈[207,220]deg，V∈[35%,75%]，S 用随 H 变化的动态下限
-BLUE_H_MIN_DEG, BLUE_H_MAX_DEG = 207.0, 220.0
-BLUE_V_MIN_PERCENT, BLUE_V_MAX_PERCENT = 35.0, 75.0
+# 蓝色：H∈[198,222]deg，V∈[25%,75%]，S 平底下限 32%（现场实测 S 低至 41%，
+# 参考队的动态 S 下限 55~70% 在本场地会把蓝整块拒掉，故弃用动态规则）
+BLUE_H_MIN_DEG, BLUE_H_MAX_DEG = 198.0, 222.0
+BLUE_V_MIN_PERCENT, BLUE_V_MAX_PERCENT = 25.0, 75.0
+BLUE_S_MIN_PERCENT = 32.0
 
 
 def blue_s_min_percent(h_deg):
-    """蓝色动态 S 下限（%）：H<215° 时越靠近 208° 要求越高（杂色在低 H 端）"""
-    if h_deg < 215.0:
-        return 65.0 - 1.43 * (h_deg - 208.0)
-    return 55.0
+    """蓝色 S 下限（%）。历史版本随 H 动态（55~70%），2026-09-10 现场实测
+    本场地蓝色贴纸 S 低至 41%，改为平底下限。保留函数以兼容既有调用。"""
+    return BLUE_S_MIN_PERCENT
 
 
 # 面板几何门槛（工作分辨率下；工作宽 1296 = 原生一半）
@@ -76,8 +84,10 @@ def build_color_mask(hsv, color_name):
         S = hsv[:, :, 1].astype(np.float32)
         V = hsv[:, :, 2].astype(np.float32)
         sv_ratio = S / np.maximum(V, 1.0)
+        v_pct = V / 255.0 * 100.0
         mask = ((H >= GREEN_H_MIN_DEG) & (H <= GREEN_H_MAX_DEG)
-                & (sv_ratio >= GREEN_SV_RATIO_MIN))
+                & (sv_ratio >= GREEN_SV_RATIO_MIN)
+                & (v_pct >= GREEN_V_MIN_PERCENT))
         return mask.astype(np.uint8) * 255
 
     if color_name == "blue":
@@ -86,8 +96,8 @@ def build_color_mask(hsv, color_name):
         V = hsv[:, :, 2] / 255.0 * 100.0
         h_ok = (H >= BLUE_H_MIN_DEG) & (H <= BLUE_H_MAX_DEG)
         v_ok = (V >= BLUE_V_MIN_PERCENT) & (V <= BLUE_V_MAX_PERCENT)
-        s_min = np.where(H < 215.0, 65.0 - 1.43 * (H - 208.0), 55.0)
-        return ((h_ok & (S >= s_min) & v_ok).astype(np.uint8) * 255)
+        return ((h_ok & (S >= BLUE_S_MIN_PERCENT) & v_ok)
+                .astype(np.uint8) * 255)
 
     mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
     for lower, upper in COLOR_THRESHOLDS.get(color_name, []):
