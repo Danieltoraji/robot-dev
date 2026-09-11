@@ -246,9 +246,13 @@ class NineGridLevel:
                 frame = self.state.capture_frame()
                 if frame is None:
                     continue
+                # 裁切感知：本场地贴纸小，入口视角大半面板贴画幅边（实测
+                # 只剩 1~3 块完整，凑不齐 7 票）——保留裁切面板，用凸包
+                # 质心观测（判格容差半格 16.7cm，凸包质心偏差 3~4cm 足够）
                 for o in self.detector.detect_panels(frame, arbitrate=True,
-                                                     drop_border=True):
-                    field = hg.pixels_to_ground([o.center_px],
+                                                     drop_border=False):
+                    px = o.hull_centroid_px if o.clipped else o.center_px
+                    field = hg.pixels_to_ground([px],
                                                 head_pulse=pulse)[0]
                     cell = nearest_cell(field)
                     if cell is None:
