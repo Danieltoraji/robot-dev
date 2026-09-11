@@ -75,6 +75,12 @@ MAX_AREA_WORK = 1_500_000
 # 4.5 ≈ 容忍 1.7m 视距（布局扫远排必然 3.2 左右）；细长噪声条仍被排除。
 MAX_ASPECT_RATIO = 4.5
 MIN_SOLIDITY = 0.35      # 哑光贴纸色块凸实性下限（软门槛滤碎噪）
+# 同色碎块合并准则（见 detect_panels）：间距上限 = 主块短边 × MERGE_GAP_FRAC，
+# 面积比下限 = 主块面积 × MERGE_AREA_FRAC。
+# 依据：黑字把色块切成两块时间距 ≈ 笔画宽（工作分辨率 20~40px，取 0.35×短边
+# 有余量）；而场内同色杂物（木框、蓝地垫）与面板间距远大于此、面积比也更小。
+MERGE_GAP_FRAC = 0.35
+MERGE_AREA_FRAC = 0.15
 
 
 def build_color_mask(hsv, color_name):
@@ -350,12 +356,22 @@ class NineGridDetector:
             if not frags:
                 continue
 
-            # 同色碎块合并（数字孔洞/画幅裁切造成的分裂）
+            # 同色碎块合并（只针对"同一块面板被黑字/画幅切开"的情形）
+            #
+            # 历史 bug（2026-09-11 真机探针帧 photo_1789127583）：旧准则
+            # gap <= max(主块宽,高) 过于宽松——黄面板（工作 bbox 393x212）与
+            # 画面左侧木框的同色碎块间距 266px 也被合并 → 合并 hull 横跨到
+            # 左边框 → 面板被误判 clipped=True，观测中心偏 600 原生 px。
+            # 现准则：间距 ≤ 主块**短边**的 MERGE_GAP_FRAC（黑字笔画在工作
+            # 分辨率约 20~40px，0.35×短边足够桥接），且候选面积 ≥ 主块的
+            # MERGE_AREA_FRAC（挡住木框/地垫等场地同色杂物）。
             frags.sort(key=lambda f: f[0], reverse=True)
             main = frags[0]
-            merge_gap = max(main[1][2], main[1][3])
-            group = [main] + [f for f in frags[1:]
-                              if _bbox_gap(f[1], main[1]) <= merge_gap]
+            merge_gap = MERGE_GAP_FRAC * min(main[1][2], main[1][3])
+            group = [main] + [
+                f for f in frags[1:]
+                if f[0] >= MERGE_AREA_FRAC * main[0]
+                and _bbox_gap(f[1], main[1]) <= merge_gap]
             hull = _hull_of([g[3] for g in group])
             area = float(cv2.contourArea(hull))
             if area <= 0:
