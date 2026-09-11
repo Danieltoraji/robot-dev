@@ -509,6 +509,11 @@ class SortingTask:
         elif self.color_step == 4:  # 凑近(小步前进)
             if target.cy > COLOR_TOO_NEAR_Y:
                 self.actions.run("back_fast")
+            elif target.area >= self.args.pick_area_threshold:
+                # 面积已足够大(足够近), 不再追着海绵走, 直接进入抓取判定
+                log.info("sponge aligned for final pickup approach (area=%.0f)", target.area)
+                self.color_step = 1  # reset for next
+                return True
             elif target.cy < COLOR_NEAR_Y:
                 self.actions.run("go_forward_one_step")
             elif abs(dx) > COLOR_X_FINE:
@@ -827,40 +832,62 @@ class SortingTask:
         log.info("follow_line %s done: steps=%d", label, steps)
 
     def search_line_and_follow(self, max_steps: int, max_turns: int = 8):
-        """放置后: 右转找红线, 找到就沿红线走到终点(走满max_steps)"""
+        """放置后: 右转找红线, 找到就沿红线走到终点(走满max_steps). 返回是否找到并走完."""
         log.info("search_line: 右转找红线最多%d次", max_turns)
+        # 重置巡线中心卡尔曼, 避免画面中心旧值拉偏首帧
+        self.kf_line_cx = Kalman1DConst(LINE_CENTER_X, Q=1.0, R=10.0)
         self.set_head(self.servo2, self.servo1 + self.line_head_delta, duration=400)
         time.sleep(0.5)
         found = False
-        for i in range(max_turns):
+        last_side = 0   # 最近一次看到红线时的 dx 符号(+1右/-1左), 用于丢线后反向回找
+        turns = 0
+        while turns < max_turns:
             ok, frame = self.camera.read()
             if not ok or frame is None:
                 time.sleep(0.02)
                 continue
             frame = cv2.remap(frame, self.mapx, self.mapy, cv2.INTER_LINEAR)
             line_cx, line_display = self.detect_red_line(frame)
-            snap_path = "/home/pi/codes/pictures/searchline_%s_%d.jpg" % (time.strftime("%H%M%S"), i)
+            snap_path = "/home/pi/codes/pictures/searchline_%s_%d.jpg" % (time.strftime("%H%M%S"), turns)
             os.makedirs("/home/pi/codes/pictures", exist_ok=True)
             cv2.imwrite(snap_path, line_display)
             if line_cx >= 0:
                 found = True
                 dx = line_cx - LINE_CENTER_X
-                if abs(dx) <= SEARCH_LINE_ALIGN_THRESHOLD:
-                    log.info("search_line: 第%d次红线已对正 cx=%d, 开始巡线", i + 1, line_cx)
+                if dx != 0:
+                    last_side = 1 if dx > 0 else -1
+                # 对正条件: 红色矩形必须竖着(机器人已面向红线) 且 位于画面正中, 才进入巡线
+                if self.line_is_vertical and abs(dx) <= SEARCH_LINE_ALIGN_THRESHOLD:
+                    log.info("search_line: 第%d次红线竖直且居中 cx=%d, 开始巡线", turns + 1, line_cx)
                     break
-                # 看到红线但偏在侧面, 转身对正(不前进)
-                turn_action = "turn_right" if dx > 0 else "turn_left_small_step"
-                log.info("search_line: 第%d次看到红线 dx=%d, 大步对正", i + 1, dx)
-                self.actions.run(turn_action)
+                if self.line_is_vertical:
+                    # 线已竖直但偏: 用平移横向对正(保持朝向不变, 避免转身过冲甩出视野)
+                    move_action = "right_move" if dx > 0 else "left_move"
+                    log.info("search_line: 第%d次红线竖直但偏 dx=%d, 平移对正", turns + 1, dx)
+                else:
+                    # 线还是横/斜的: 继续向右转找正面(直到红色矩形竖起来)
+                    move_action = "turn_right_small_step"
+                    log.info("search_line: 第%d次看到红线但未竖直, 继续右转找正面", turns + 1)
+                self.actions.run(move_action)
+                turns += 1
                 time.sleep(0.3)
                 continue
-            self.actions.run("turn_right_small_step")  # 小转弯找红线(避免转过头)
+            # 未看到红线
+            if found and last_side != 0:
+                # 之前看到过线现在丢了: 朝上次方向的反方向小步回找, 不继续朝原方向扫描
+                back_action = "turn_left_small_step" if last_side > 0 else "turn_right_small_step"
+                log.info("search_line: 红线丢失, 反向回找 %s (last_side=%d)", back_action, last_side)
+                self.actions.run(back_action)
+            else:
+                self.actions.run("turn_right_small_step")  # 小转弯找红线(避免转过头)
+            turns += 1
             time.sleep(0.3)
         if found:
             self.follow_line(max_steps, stop_on_blue=False, label="to_end")
-        else:
-            log.warning("search_line: %d次右转未找到红线, 不直走, 结束巡线", max_turns)
-            self.set_head_center(duration=300)
+            return True
+        log.warning("search_line: %d次右转未找到红线, 结束巡线", max_turns)
+        self.set_head_center(duration=300)
+        return False
 
     def navigate_to_end_tag(self, tag_id):
         """放置后: 找终点tag, 小步转直到-15<yaw<5后大步直行10步穿过"""
@@ -1075,9 +1102,13 @@ class SortingTask:
             self.running = False
             worker.join(timeout=2)
 
-            # 放置后: 走到终点tag
-            if self.state == "FINISH" and self.args.end_tag and not self.args.blue_pickup_test:
-                self.navigate_to_end_tag(self.args.end_tag)
+            # 放置后: 转身找红线 → 沿红线走到终点; 找不到红线时回退找终点tag
+            if self.state == "FINISH" and not self.args.blue_pickup_test:
+                line_ok = self.search_line_and_follow(
+                    self.args.line_final_steps, self.args.line_search_turns)
+                if not line_ok and self.args.end_tag:
+                    log.info("search_line 未找到红线, 回退到找终点 tag %d", self.args.end_tag)
+                    self.navigate_to_end_tag(self.args.end_tag)
 
         except BaseException as exc:
             log.exception("fatal error: %s", exc)
@@ -1109,14 +1140,16 @@ def parse_args():
     parser.add_argument("--end-tag", type=int, default=26, help="终点tag id, 放置后走到该tag(0=禁用)")
     parser.add_argument("--post-pick-left-turns", type=int, default=9)
     parser.add_argument("--post-pick-forward-steps", type=int, default=5)
-    parser.add_argument("--back-steps-after-place", type=int, default=5)
+    parser.add_argument("--back-steps-after-place", type=int, default=12, help="放置后后退步数(退远一点才够转身找到身后红线)")
     # 红色胶带巡线
     parser.add_argument("--line-initial-steps", type=int, default=8, help="开机沿红色胶带走几步到海绵区(0=禁用,看见蓝海绵提前停)")
     parser.add_argument("--line-search-turns", type=int, default=30, help="放置后右转找红线最多几次(看到即停)")
-    parser.add_argument("--line-final-steps", type=int, default=40, help="放置后沿红线走到终点的步数")
+    parser.add_argument("--line-final-steps", type=int, default=10, help="放置后沿红线走到终点的步数")
     parser.add_argument("--line-head-delta", type=int, default=60, help="巡线时低头角度(相对servo1, 60=看远)")
-    parser.add_argument("--pick-area-threshold", type=float, default=8000.0)
-    parser.add_argument("--pick-y-threshold", type=int, default=380)
+    parser.add_argument("--pick-area-threshold", type=float, default=5000.0,
+                        help="海绵面积达到此值即视为足够近, 触发抓取")
+    parser.add_argument("--pick-y-threshold", type=int, default=350,
+                        help="海绵cy达到此值即视为足够近, 触发抓取")
     parser.add_argument("--pick-too-near-y", type=int, default=420)
     parser.add_argument(
         "--blue-pickup-test",
