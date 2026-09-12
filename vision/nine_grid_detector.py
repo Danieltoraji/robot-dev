@@ -90,6 +90,79 @@ MERGE_GAP_FRAC = 0.35
 MERGE_AREA_FRAC = 0.15
 
 
+# =====================================================================
+# 光照归一化（2026-09-11：消除现场光照/自动白平衡漂移）
+# =====================================================================
+# 现场实测（真机探针帧 photo_1789213170）：同一场地、同一相机的白底板 BGR
+# 从 [153,155,149] 漂到 [209,186,180]（R/B 差 16%，相机 white_balance_automatic=1
+# 所致）→ 粉贴纸 H 由 168 掉到 141，整块掉出手写窗口而漏检（布局扫缺数字 7）。
+# 用画面里的**白底板**做灰世界归一化后，粉 H 回到 164（粉−紫间隔 24→46），
+# 对正常帧几乎无影响（168→169）。
+# 白参考 = 低饱和(S<WHITE_S_MAX)且较亮(V>WHITE_V_MIN)像素的中位 BGR。
+# 归一化只是"修正光源"，不改变场景几何；过曝（分量打满）是信息损失，
+# 归一化救不回来 → 单独统计 clip_frac 供真机提示"锁/降曝光"。
+NORM_ENABLED = True
+WHITE_S_MAX = 40            # 白参考像素的 S 上限（OpenCV 0-255）
+WHITE_V_MIN = 120           # 白参考像素的 V 下限
+WHITE_MIN_SAMPLES = 200     # 白参考像素数下限
+WHITE_MIN_FRAC = 0.005      # 白参考像素占比下限（低于此不归一化）
+NORM_GAIN_MIN, NORM_GAIN_MAX = 0.75, 1.40   # 合理增益范围（超出标记 suspicious）
+NORM_CLIP_LEVEL = 250       # "打满"判据
+NORM_CLIP_WARN_FRAC = 0.05  # 过曝告警阈值（任一分量打满的像素占比）
+
+
+def estimate_white_bgr(frame):
+    """估计光源白点 → (wp_bgr|None, frac)
+
+    用低饱和 + 较亮像素的中位 BGR（本场地 = 白底板，占比很大）。
+    大面积帧按 1/4 抽样估计（全局增益与分辨率无关，省时间）。
+    """
+    if frame is None or frame.size == 0:
+        return None, 0.0
+    small = frame[::4, ::4] if frame.shape[1] > 800 else frame
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    m = (hsv[:, :, 1] < WHITE_S_MAX) & (hsv[:, :, 2] > WHITE_V_MIN)
+    n = int(np.count_nonzero(m))
+    frac = n / float(m.size) if m.size else 0.0
+    if n < WHITE_MIN_SAMPLES or frac < WHITE_MIN_FRAC:
+        return None, frac
+    return np.median(small[m].astype(np.float64), axis=0), frac
+
+
+def normalize_illumination(frame, enabled=None):
+    """灰世界归一化 → (frame_u8, info)
+
+    info = {"applied": bool, "white_bgr": [b,g,r]|None, "gain": [gb,gg,gr],
+            "white_frac": float, "clip_frac": float, "suspicious": bool}
+    白参考不足或 NORM_ENABLED=False 时原样返回（applied=False）。
+    """
+    use = NORM_ENABLED if enabled is None else bool(enabled)
+    info = {"applied": False, "white_bgr": None, "gain": [1.0, 1.0, 1.0],
+            "white_frac": 0.0, "clip_frac": 0.0, "suspicious": False}
+    if frame is None or frame.size == 0:
+        return frame, info
+    if not use:
+        return frame, info
+    small = frame[::4, ::4] if frame.shape[1] > 800 else frame
+    info["clip_frac"] = float(np.count_nonzero(
+        (small[:, :, 0] >= NORM_CLIP_LEVEL) | (small[:, :, 1] >= NORM_CLIP_LEVEL)
+        | (small[:, :, 2] >= NORM_CLIP_LEVEL))) / float(small.shape[0]
+        * small.shape[1]) if small.size else 0.0
+    wp, frac = estimate_white_bgr(frame)
+    info["white_frac"] = float(frac)
+    if wp is None:
+        return frame, info
+    gain = float(np.mean(wp)) / np.maximum(wp, 1.0)
+    info["white_bgr"] = [float(v) for v in wp]
+    info["gain"] = [float(v) for v in gain]
+    info["suspicious"] = bool(np.any(gain < NORM_GAIN_MIN)
+                              or np.any(gain > NORM_GAIN_MAX))
+    out = np.clip(frame.astype(np.float32) * gain.reshape(1, 1, 3),
+                  0, 255).astype(np.uint8)
+    info["applied"] = True
+    return out, info
+
+
 def build_color_mask(hsv, color_name):
     """单色二值 mask。green/blue 特殊判定，其余 inRange 长方体并集。"""
     if color_name == "green":
@@ -314,6 +387,8 @@ class NineGridDetector:
         self.max_area = max_area
         self.arbiter = arbiter if arbiter is not None else DigitArbiter()
         self._kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        # 最近一次 detect_panels/color_ratio 的光照归一化信息（诊断/工具用）
+        self.last_norm = None
 
     # -----------------------------------------------------------------
 
@@ -337,6 +412,8 @@ class NineGridDetector:
         scale = frame.shape[1] / self.work_width
         work = cv2.resize(frame, (self.work_width,
                                   int(round(frame.shape[0] / scale))))
+        # 光照归一化（工作分辨率上做：掩膜/面积都在这一层，等价且省时间）
+        work, self.last_norm = normalize_illumination(work)
         hsv = cv2.cvtColor(work, cv2.COLOR_BGR2HSV)
         border_px = 8  # 工作分辨率下贴边判据
         work_h = work.shape[0]
@@ -428,12 +505,17 @@ class NineGridDetector:
         return results
 
     def color_ratio(self, frame, color_name):
-        """整帧中某颜色的面积占比（CONFIRM 到达判定用）"""
+        """整帧中某颜色的面积占比（低头到达判定用）
+
+        与 detect_panels 同一条光照归一化链路（否则颜色占比会被现场光照带偏，
+        v3 到达判据用的是"占比峰值/跌落"相对量，但也必须在同一归一化下比较）。
+        """
         if frame is None or frame.size == 0:
             return 0.0
         scale = frame.shape[1] / self.work_width
         work = cv2.resize(frame, (self.work_width,
                                   int(round(frame.shape[0] / scale))))
+        work, self.last_norm = normalize_illumination(work)
         hsv = cv2.cvtColor(work, cv2.COLOR_BGR2HSV)
         mask = build_color_mask(hsv, color_name)
         return float(cv2.countNonZero(mask)) / mask.size
