@@ -1356,7 +1356,11 @@ class NineGridLevel:
                                           arbitrate=False, drop_border=False)
         if not obs:
             return None
-        o = max(obs, key=lambda x: x.hull_area)
+        # 同色择优：优先取"带数字证据"的观测，其次才按面积——现场实测木框被
+        # 橙色掩膜命中且比真橙面板还大（93k vs 62k px），纯按面积择大会追着
+        # 木框跑（见 nine_grid_detector.DIGIT_EVIDENCE_*）。
+        cand = [o for o in obs if o.has_digit_evidence()] or list(obs)
+        o = max(cand, key=lambda x: x.hull_area)
         w = float(frame.shape[1])
         center_x = float((o.hull_centroid_px if o.clipped
                           else o.center_px)[0])

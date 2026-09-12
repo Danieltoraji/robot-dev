@@ -22,6 +22,7 @@ from vision.nine_grid_detector import (
     NineGridDetector, build_color_mask, extract_digit_mask,
     COLOR_TO_ID, DigitArbiter,
 )
+import vision.nine_grid_detector as nd
 
 FRAME_W, FRAME_H = 2592, 1944
 SQUARE = 700   # 面板边长（原生像素，≈1.2m 处的 33cm 面板）
@@ -62,7 +63,7 @@ def approx(v, ref, tol):
 def test_seven_colors():
     det = NineGridDetector()
     for color, digit_id in COLOR_TO_ID.items():
-        frame = make_frame(color, digit=False)
+        frame = make_frame(color, digit=True)
         obs = det.detect_panels(frame)
         assert len(obs) == 1, f"{color}: 应检出1块，实际{len(obs)} {obs}"
         o = obs[0]
@@ -72,6 +73,52 @@ def test_seven_colors():
         approx(cx, 946 + SQUARE / 2, 8)
         approx(cy, 622 + SQUARE / 2, 8)
     print("  七色分类与中心定位 ✓")
+
+
+def test_digit_evidence_gate():
+    """数字证据（C1）：低证据只降级不误杀，极端深色块才丢
+
+    硬门只拦"大面积深色块"（阴影/深色物件）；低证据保留但 `has_digit_evidence()`
+    为假，供导航在同色择优时避开木框/地垫（见 levels/nine_grid._see_target）。
+    """
+    det = NineGridDetector()
+    # 1) 无数字的色块（= 木框/地垫这类"颜色接近但没有印刷数字"的杂物）：
+    #    保留（可能是数字被遮挡的真面板）但证据判据为假
+    bare = make_frame("orange", digit=False)
+    obs = det.detect_panels(bare)
+    assert len(obs) == 1, f"低证据观测不应被丢弃: {obs}"
+    assert det.last_rejected == [], "低证据不该进拒绝列表"
+    assert not obs[0].has_digit_evidence(), "无黑字色块不应被判为'像面板'"
+    # 2) 带黑字的面板：证据可观且判据为真
+    obs = det.detect_panels(make_frame("yellow", digit=True))
+    assert obs and obs[0].digit_evidence > 0.03, \
+        f"真面板应带黑字证据: {obs[0].digit_evidence if obs else None}"
+    assert obs[0].has_digit_evidence()
+    ev = obs[0].digit_evidence
+    # 3) 贴画幅边（数字可能在画幅外）→ 免检，判据为真
+    clipped = make_frame("orange", square_xy=(FRAME_W - SQUARE // 2, 622),
+                         digit=False)
+    obs = det.detect_panels(clipped)
+    assert len(obs) == 1 and obs[0].clipped and obs[0].has_digit_evidence(), \
+        f"贴边观测应免检: {obs}"
+    # 4) 极端深色块（大片阴影/深色物件）→ 硬门丢弃
+    dark = make_frame("orange", digit=False)
+    x, y = 946, 622
+    m = int(SQUARE * 0.8)
+    o = (SQUARE - m) // 2
+    dark[y + o:y + o + m, x + o:x + o + m] = (0, 0, 0)   # 中央 64% 深色
+    assert det.detect_panels(dark) == [], "大面积深色块应被硬门丢弃"
+    assert det.last_rejected and det.last_rejected[0][3] == "dark_blob"
+    # 5) 面积低于门限（远/小到判不了）→ 免检，保留且不计拒绝
+    old = nd.DIGIT_EVIDENCE_MIN_AREA
+    try:
+        nd.DIGIT_EVIDENCE_MIN_AREA = 10 ** 9
+        assert len(det.detect_panels(dark)) == 1, "面积免检时应保留"
+        assert det.last_rejected == [], "面积免检时不应记录拒绝"
+    finally:
+        nd.DIGIT_EVIDENCE_MIN_AREA = old
+    print(f"  数字证据（无字色块降级不丢 / 贴边+过小免检 / 真面板证据 "
+          f"{ev:.3f} / 深色块硬门） ✓")
 
 
 def test_black_digit_mask():
@@ -128,6 +175,7 @@ def test_no_false_on_empty():
 
 if __name__ == "__main__":
     test_seven_colors()
+    test_digit_evidence_gate()
     test_black_digit_mask()
     test_color_ratio()
     test_arbitration_interface()

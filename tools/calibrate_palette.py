@@ -74,13 +74,14 @@ def _blob_hsv_stats(work_bgr, color_mask):
     return np.median(px, axis=0).astype(float)   # (H, S, V)
 
 
-def collect(frames, det=None, legacy_masks=False):
-    """返回 {color: [(H,S,V,frame_tag)]} 与每帧检出摘要
+def collect(frames, det=None, legacy_masks=False, keep_clutter=False):
+    """返回 {color: [(H,S,V,frame_tag)]}、每帧检出摘要、被标签门剔除的样本
 
     legacy_masks=True 时用**历史手调窗口**选样本（自举）：否则"待拟合的窗口"
     与"选样本的窗口"是同一套，会形成循环依赖——实测把 Voronoi 边界 4.5 烘进
     代码后，红板在多数帧被并进橙窗口，样本里 red 只剩 2 个，拟合结果被自己
     的错误带偏。
+    keep_clutter=True 时不做"色块内要有黑字"的标签质量门（对照实验用）。
     """
     det = det or NineGridDetector()
     if legacy_masks:
@@ -88,6 +89,7 @@ def collect(frames, det=None, legacy_masks=False):
         _d.USE_PALETTE = False
     out = {}
     summary = []
+    skipped = []
     for path in frames:
         frame = cv2.imread(str(path))
         if frame is None:
@@ -105,6 +107,13 @@ def collect(frames, det=None, legacy_masks=False):
         summary.append((tag, sorted(o.digit for o in obs),
                         [round(g, 3) for g in norm_info["gain"]]))
         for o in obs:
+            # 标签质量门：色块内几乎没有黑字、又没贴边/没小到判不了 ⇒ 场内同色
+            # 杂物（木框/地垫），它的像素会把 S 下限和 H 边界拖偏，不入样本。
+            if not keep_clutter and not o.has_digit_evidence():
+                skipped.append((tag, o.color,
+                                None if o.digit_evidence is None
+                                else round(o.digit_evidence, 4)))
+                continue
             # 注意：o.bbox/center_px 是**原生**分辨率坐标，本工具在工作分辨率上
             # 统计（掩膜在那里），故先除以 scale
             x, y, w, h = [int(v / scale) for v in o.bbox]
@@ -118,7 +127,7 @@ def collect(frames, det=None, legacy_masks=False):
                 continue
             out.setdefault(o.color, []).append((st[0], st[1] / 255.0 * 100.0,
                                                 st[2] / 255.0 * 100.0, tag))
-    return out, summary
+    return out, summary, skipped
 
 
 def fit(samples, h_tol=H_TOL_DEFAULT):
@@ -222,6 +231,8 @@ def main(argv=None):
                     help="H 半窗（默认 8）")
     ap.add_argument("--legacy-masks", action="store_true",
                     help="用历史手调窗口选样本（自举；避免与待拟合窗口循环依赖）")
+    ap.add_argument("--keep-clutter", action="store_true",
+                    help="关掉'色块内要有黑字'的标签质量门（对照实验用）")
     ap.add_argument("--write", action="store_true",
                     help="写 models/nine_grid/palette.json（缺省只打印）")
     args = ap.parse_args(argv)
@@ -239,9 +250,14 @@ def main(argv=None):
         return 0
     print(f"[palette] 帧 {len(paths)} 张")
 
-    samples, summary = collect(paths, legacy_masks=args.legacy_masks)
+    samples, summary, skipped = collect(paths, legacy_masks=args.legacy_masks,
+                                        keep_clutter=args.keep_clutter)
     for tag, digits, gain in summary:
         print(f"   {tag}: 检出 {digits}  增益 {' '.join('%.3f' % g for g in gain)}")
+    if skipped:
+        print(f"[palette] 标签质量门剔除 {len(skipped)} 个'色块内无黑字'样本"
+              f"（木框/地垫等场内同色杂物）："
+              + ", ".join(f"{t[:16]}:{c}(d={d})" for t, c, d in skipped))
     print("\n逐色拟合窗口（H 边界 = 相邻色中心中点；S/V 为百分数）:")
     fit_out = fit(samples, args.h_tol)
     for color in sorted(fit_out, key=lambda c: fit_out[c]["stats"]["h_center"]):

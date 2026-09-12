@@ -65,8 +65,8 @@ USE_PALETTE = True
 PALETTE = {          # color: (h_lo, h_hi, s_lo%, v_lo%)；h_lo > h_hi = 环绕窗口
     "red":    (174, 5, 25.0, 25.0),     # 环绕另一段 (0, 5] 见 _palette_ranges
     "orange": (6, 15, 25.0, 25.0),
-    "yellow": (16, 41, 25.0, 25.0),
-    "green":  (42, 88, 25.0, 19.1),
+    "yellow": (16, 42, 25.0, 25.0),
+    "green":  (43, 88, 25.0, 19.1),
     "blue":   (89, 113, 25.0, 25.0),
     "purple": (114, 142, 25.0, 24.4),
     "pink":   (143, 173, 10.0, 25.0),   # 粉贴纸本身饱和度低（实测 S 12~35%）
@@ -149,6 +149,28 @@ MIN_SOLIDITY = 0.35      # 哑光贴纸色块凸实性下限（软门槛滤碎�
 # 有余量）；而场内同色杂物（木框、蓝地垫）与面板间距远大于此、面积比也更小。
 MERGE_GAP_FRAC = 0.35
 MERGE_AREA_FRAC = 0.15
+
+# 数字证据（C1，"这块色斑像不像印刷面板"的结构判据）
+# ---------------------------------------------------------------------
+# 真面板 = 色块 **内部印着黑色数字**；场内同色杂物（木框 H12/S33%/V126、
+# 蓝地垫 H105/S38%、深绿地垫）只是"颜色接近"，没有黑字。用"凸包内 V<60 的
+# 像素占比"衡量数字证据，实测（13 张实拍帧的合并观测）：
+#   真面板（未裁切）0.0184~0.1262；粉 7 最差帧（强暖偏色 probe_c）0.0184
+#   同色杂物        0.0000~0.0085（木框橙 0.0085／蓝地垫 0.0032／绿地垫 0）
+# 但**证据低 ≠ 杂物**：实测 photo_1789022703/706 的真面板"绿 4"呈 0.0000
+# ——数字被场内白色物件挡住，色块本身没被画幅裁切。故：
+#   - 只对**极端深色块**（证据 > DIGIT_EVIDENCE_MAX，实测杂物 0.2650 vs
+#     真面板上界 0.1262）做硬过滤：大片深色 ⇒ 阴影/深色物件，必非印刷面板；
+#   - 低证据只作**软信号**：写进观测的 digit_evidence，供导航 `_see_target`
+#     在"真面板 vs 木框"之间择大时优先取有证据的那块（木框橙实测 93k px
+#     比真橙面板 62k 还大，纯按面积择大会追着木框跑）。
+#   宁可放过、不可误杀：漏检可以用 color_ratio 兜（到达判据不依赖掩膜分类），
+#   误杀真面板会让导航看不到目标。
+DIGIT_EVIDENCE_ENABLED = True
+DIGIT_V_MAX = 60              # "黑字"判据（归一化工作帧：黑字 V≈15~55，贴纸自身 V≥70）
+DIGIT_EVIDENCE_MIN = 0.012    # 有证据判据（软，供 _see_target 优先择取）
+DIGIT_EVIDENCE_MAX = 0.22     # 硬门上限：占比过大 = 大片阴影/深色物件
+DIGIT_EVIDENCE_MIN_AREA = 5000   # 面积下限（工作分辨率）：低于此判不了，免检
 
 
 # =====================================================================
@@ -411,11 +433,11 @@ class PanelObservation:
 
     __slots__ = ("color", "color_id", "bbox", "center_px", "area",
                  "solidity", "model_digit", "model_conf",
-                 "clipped", "hull_centroid_px", "hull_area")
+                 "clipped", "hull_centroid_px", "hull_area", "digit_evidence")
 
     def __init__(self, color, bbox, center_px, area, solidity,
                  model_digit=None, model_conf=0.0, clipped=False,
-                 hull_centroid_px=None, hull_area=0.0):
+                 hull_centroid_px=None, hull_area=0.0, digit_evidence=None):
         self.color = color
         self.color_id = COLOR_TO_ID[color]
         self.bbox = bbox                      # (x,y,w,h) 原生像素
@@ -427,6 +449,7 @@ class PanelObservation:
         self.clipped = bool(clipped)          # 是否被画幅边缘裁切
         self.hull_centroid_px = hull_centroid_px or center_px
         self.hull_area = float(hull_area)
+        self.digit_evidence = digit_evidence   # 凸包内黑字占比（None=未算）
 
     @property
     def digit(self):
@@ -439,6 +462,18 @@ class PanelObservation:
         return (self.model_digit is not None and self.model_conf >= 0.6
                 and self.model_digit != self.color_id
                 and 1 <= self.model_digit <= 7)
+
+    def has_digit_evidence(self):
+        """是否"看起来像印刷面板"（软判据，见 DIGIT_EVIDENCE_*）
+
+        证据足够 → True；证据不足但**判不了**（贴画幅边、太小、未算）→ True
+        （宁可放过）；只有"面积够大、未裁切、却几乎没有黑字"才 False——
+        现场实测这类多半是木框/地垫等场内同色杂物。
+        """
+        e = self.digit_evidence
+        if e is None or self.clipped or self.area < DIGIT_EVIDENCE_MIN_AREA:
+            return True
+        return e >= DIGIT_EVIDENCE_MIN
 
     def __repr__(self):
         arb = f", svm={self.model_digit}({self.model_conf:.2f})" \
@@ -462,6 +497,8 @@ class NineGridDetector:
         self._kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         # 最近一次 detect_panels/color_ratio 的光照归一化信息（诊断/工具用）
         self.last_norm = None
+        # 最近一次 detect_panels 被数字证据门拒绝的观测（诊断/工具用）
+        self.last_rejected = []
 
     # -----------------------------------------------------------------
 
@@ -490,6 +527,7 @@ class NineGridDetector:
         hsv = cv2.cvtColor(work, cv2.COLOR_BGR2HSV)
         border_px = 8  # 工作分辨率下贴边判据
         work_h = work.shape[0]
+        self.last_rejected = []
 
         raw = []
         for color in (colors or COLOR_TO_ID.keys()):
@@ -539,8 +577,14 @@ class NineGridDetector:
                        or y + h > work_h - border_px)
             if drop_border and clipped:
                 continue
+            # 数字证据门（C1）：色块内没有黑字且不贴边 ⇒ 场内同色杂物
+            ev = digit_evidence(hsv[:, :, 2], hull, (x, y, w, h))
+            keep, why = digit_evidence_ok(area, clipped, ev)
+            if not keep:
+                self.last_rejected.append((color, (x, y, w, h), ev, why))
+                continue
             raw.append((color, area, (x, y, w, h), main[2], hull,
-                        quad_center(hull), _contour_centroid(hull), clipped))
+                        quad_center(hull), _contour_centroid(hull), clipped, ev))
 
         # 跨色去重：同区域多色命中时保留面积大者（阈值交界抖动）
         raw.sort(key=lambda r: r[1], reverse=True)
@@ -556,7 +600,7 @@ class NineGridDetector:
 
         results = []
         for (color, area, (x, y, w, h), solidity, _hull, center,
-             hull_centroid, clipped) in kept:
+             hull_centroid, clipped, ev) in kept:
             obs = PanelObservation(
                 color=color,
                 bbox=(x * scale, y * scale, w * scale, h * scale),
@@ -567,6 +611,7 @@ class NineGridDetector:
                 hull_centroid_px=(hull_centroid[0] * scale,
                                   hull_centroid[1] * scale),
                 hull_area=area * scale * scale,
+                digit_evidence=ev,
             )
             if arbitrate:
                 roi = work[y:y + h, x:x + w]
@@ -626,6 +671,39 @@ def _digit_mask_for_arbitration(roi_bgr, color_mask_roi):
     inv = cv2.bitwise_not(color_mask_roi)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     return cv2.morphologyEx(inv, cv2.MORPH_OPEN, kernel)
+
+
+def digit_evidence(v_plane, hull, bbox):
+    """凸包内"印刷黑字"像素占比（数字证据，见 DIGIT_EVIDENCE_* 说明）
+
+    v_plane: 工作帧的 HSV V 通道；hull: 合并后的凸包轮廓；bbox: 其 (x,y,w,h)
+    """
+    x, y, w, h = bbox
+    m = np.zeros((h, w), np.uint8)
+    cv2.drawContours(m, [hull - [x, y]], -1, 255, -1)
+    inside = m > 0
+    n = int(np.count_nonzero(inside))
+    if n <= 0:
+        return 0.0
+    dark = np.count_nonzero(inside & (v_plane[y:y + h, x:x + w] < DIGIT_V_MAX))
+    return dark / float(n)
+
+
+def digit_evidence_ok(area, clipped, evidence):
+    """数字证据硬门 → (是否保留, 原因)；只有"极端深色块"才丢
+
+    低证据**不丢**（可能是数字被遮挡的真面板，见 DIGIT_EVIDENCE_* 说明），
+    原因串 "low_evidence"/"clipped"/"too_small" 仍返回 True，只作日志。
+    """
+    if not DIGIT_EVIDENCE_ENABLED:
+        return True, ""
+    if area < DIGIT_EVIDENCE_MIN_AREA:
+        return True, "too_small"
+    if evidence > DIGIT_EVIDENCE_MAX:
+        return False, "dark_blob"
+    if evidence >= DIGIT_EVIDENCE_MIN:
+        return True, ""
+    return True, "clipped" if clipped else "low_evidence"
 
 
 def _iou(a, b):
