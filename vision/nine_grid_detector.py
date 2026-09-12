@@ -63,13 +63,13 @@ COLOR_THRESHOLDS = {
 #     （写 models/nine_grid/palette.json，运行时优先读它，失败回退本表）。
 USE_PALETTE = True
 PALETTE = {          # color: (h_lo, h_hi, s_lo%, v_lo%)；h_lo > h_hi = 环绕窗口
-    "red":    (174, 5, 25.0, 25.0),     # 环绕另一段 (0, 5] 见 _palette_ranges
-    "orange": (6, 15, 25.0, 25.0),
-    "yellow": (16, 42, 25.0, 25.0),
-    "green":  (43, 88, 25.0, 19.1),
+    "red":    (174, 3, 25.0, 25.0),     # 环绕另一段 (0, 3] 见 _palette_ranges
+    "orange": (4, 16, 25.0, 25.0),
+    "yellow": (17, 42, 25.0, 25.0),
+    "green":  (43, 88, 25.0, 19.7),
     "blue":   (89, 113, 25.0, 25.0),
-    "purple": (114, 142, 25.0, 24.4),
-    "pink":   (143, 173, 10.0, 25.0),   # 粉贴纸本身饱和度低（实测 S 12~35%）
+    "purple": (114, 144, 25.0, 24.7),
+    "pink":   (145, 173, 10.6, 25.0),   # 粉贴纸本身饱和度低（实测 S 12~35%）
 }
 PALETTE_JSON_PATH = os.path.join(PROJECT_ROOT, "models", "nine_grid",
                                  "palette.json")
@@ -172,6 +172,64 @@ DIGIT_EVIDENCE_MIN = 0.012    # 有证据判据（软，供 _see_target 优先�
 DIGIT_EVIDENCE_MAX = 0.22     # 硬门上限：占比过大 = 大片阴影/深色物件
 DIGIT_EVIDENCE_MIN_AREA = 5000   # 面积下限（工作分辨率）：低于此判不了，免检
 
+# 形状仲裁（C3）：**只在颜色有歧义时**才允许用数字形状改判
+# ---------------------------------------------------------------------
+# 颜色是主判（现场光照下 66/66 唯一命中），形状只在两色边界打架时当裁判：
+#   - 歧义信号一：同一位置被两种颜色的掩膜同时命中（跨色去重 IoU > AMBIG_IOU）；
+#   - 歧义信号二：色块中位 H 距本窗口边界 < AMBIG_H_MARGIN_DEG（红↔橙只差 7°，
+#     现场光照漂移足以把红贴纸推到橙窗口边）。
+#   - 裁决依据：现场帧自建的数字模板（tools/gen_ninegrid_digit_templates.py）。
+#     留一实测（41 样本）：匹配"间隔"≥0.20 时 20/20 正确（覆盖 20/41），
+#     ≥0.15 时 24/25；故门限取 0.20——宁可不改判，也不要用形状把对的颜色
+#     改错（旧 SVM 在现场帧与颜色一致率仅 23%，等于用噪声否决真值）。
+SHAPE_ENABLED = True
+SHAPE_TEMPLATE_PATH = os.path.join(PROJECT_ROOT, "models", "nine_grid",
+                                   "digit_templates.npz")
+SHAPE_OVERRIDE_MIN_CONF = 0.20
+AMBIG_IOU = 0.5
+AMBIG_H_MARGIN_DEG = 4.0
+# 墨迹（黑色数字）提取参数：形状仲裁与模板生成共用，保证训练/推理同一链路
+GLYPH_ERODE_PX = 7
+GLYPH_V_FRAC = 0.60
+GLYPH_MIN_AREA = 40
+
+
+def extract_glyph_mask(hsv, color_mask, bbox):
+    """色块内的黑色数字墨迹掩膜（工作分辨率）→ (mask|None, 诊断)
+
+    数字是**色域里的洞**（黑字不满足该色窗口），必须先"填洞"再内缩——直接
+    对色域腐蚀会让洞跟着变大，墨迹像素全被排除（实测 dark∩inner=0/5387）。
+    填洞 = 取最大外轮廓实心填充（外轮廓天然包含洞）。
+    """
+    x, y, w, h = [int(v) for v in bbox]
+    cm = color_mask[y:y + h, x:x + w]
+    if cm.size == 0 or int(np.count_nonzero(cm)) < 50:
+        return None, {"why": "色域为空"}
+    cnts = sorted(_find_contours(cm), key=cv2.contourArea, reverse=True)
+    if not cnts:
+        return None, {"why": "无色域轮廓"}
+    filled = np.zeros((h, w), np.uint8)
+    cv2.drawContours(filled, [cnts[0]], -1, 255, -1)
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                    (GLYPH_ERODE_PX, GLYPH_ERODE_PX))
+    inner = cv2.erode(filled, ker)
+    if cv2.countNonZero(inner) < 50:
+        return None, {"why": "内缩后无像素"}
+    v = hsv[y:y + h, x:x + w, 2]
+    vmed = float(np.median(v[cm > 0]))
+    dark = ((v < GLYPH_V_FRAC * vmed).astype(np.uint8)) * 255
+    dark = cv2.bitwise_and(dark, inner)
+    dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN,
+                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    cnts = [c for c in _find_contours(dark)
+            if cv2.contourArea(c) >= GLYPH_MIN_AREA]
+    if not cnts:
+        return None, {"why": "无墨迹连通域", "v_med": vmed}
+    big = max(cnts, key=cv2.contourArea)
+    out = np.zeros_like(dark)
+    cv2.drawContours(out, [big], -1, 255, -1)
+    return out, {"area": float(cv2.contourArea(big)), "v_med": vmed}
+
 
 # =====================================================================
 # 光照归一化（2026-09-11：消除现场光照/自动白平衡漂移）
@@ -189,27 +247,61 @@ WHITE_S_MAX = 40            # 白参考像素的 S 上限（OpenCV 0-255）
 WHITE_V_MIN = 120           # 白参考像素的 V 下限
 WHITE_MIN_SAMPLES = 200     # 白参考像素数下限
 WHITE_MIN_FRAC = 0.005      # 白参考像素占比下限（低于此不归一化）
-NORM_GAIN_MIN, NORM_GAIN_MAX = 0.75, 1.40   # 合理增益范围（超出标记 suspicious）
+NORM_GAIN_MIN, NORM_GAIN_MAX = 0.60, 1.80   # 硬限幅（防白点估计异常时放大噪声）
+NORM_GAIN_WARN_MIN, NORM_GAIN_WARN_MAX = 0.75, 1.40   # 告警区间（现场需关注）
+# 曝光归一化目标：把白点三通道均值拉到该值。**只做白平衡是不够的**——均匀
+# 变暗/变亮（曝光漂移）时白点跟着一起缩放，纯白平衡增益恒为 1、等于没做，
+# 实测 -25% 曝光下深绿面板 V 跌破调色板下限而整块漏检。13 张实拍帧白点均值
+# 中位 154.3（范围 135~192），故取 155 为目标。
+NORM_TARGET_WHITE_MEAN = 155.0
 NORM_CLIP_LEVEL = 250       # "打满"判据
 NORM_CLIP_WARN_FRAC = 0.05  # 过曝告警阈值（任一分量打满的像素占比）
+WHITE_BRIGHT_PCTL = 95      # "亮参考"分位（白参考的亮度下限按它取相对值）
+WHITE_V_REL = 0.70          # 白参考亮度下限 = 该比例 × 亮参考分位
+WHITE_S_FALLBACK = 120      # 兜底一的饱和度上限（白板强偏色后 S≈100~115）
+WHITE_V_FALLBACK_REL = 0.55
+WHITE_FALLBACK_MIN_FRAC = 0.01
 
 
 def estimate_white_bgr(frame):
-    """估计光源白点 → (wp_bgr|None, frac)
+    """估计光源白点 → (wp_bgr|None, frac, 方法)
 
-    用低饱和 + 较亮像素的中位 BGR（本场地 = 白底板，占比很大）。
+    主判：低饱和 + 较亮像素的中位 BGR（本场地 = 白底板，占比很大）。
+    **兜底**：强偏色会把白底板本身推到 S>WHITE_S_MAX（实测 B×0.75 的暖偏色
+    帧里白板变 (115,147,186)、S=98 ⇒ 主判一个样本都选不出来，归一化直接
+    不生效），此时改用"最亮 WHITE_BRIGHT_PCTL 分位以上的像素"——白底板仍是
+    画面最亮的大面积区域，取它的中位色彩与饱和度判据无关。
     大面积帧按 1/4 抽样估计（全局增益与分辨率无关，省时间）。
     """
     if frame is None or frame.size == 0:
-        return None, 0.0
+        return None, 0.0, "none"
     small = frame[::4, ::4] if frame.shape[1] > 800 else frame
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-    m = (hsv[:, :, 1] < WHITE_S_MAX) & (hsv[:, :, 2] > WHITE_V_MIN)
+    # 白参考还必须"够亮"：否则会挑到画面里的灰暗色块（机器人本体、阴影里的
+    # 浅灰地面）——它们也满足"低饱和"，但完全不代表光源。实测人为双重偏色
+    # （B×0.7,R×1.1 叠在 probe_c 强暖偏上）时，主判挑中的"白点"亮度只有
+    # 全场 95 分位的 64%，比色随之为近中性 ⇒ 归一化形同没做、粉 7 被推成红。
+    bright_ref = float(np.percentile(hsv[:, :, 2], 95))
+    v_floor = max(float(WHITE_V_MIN), WHITE_V_REL * bright_ref)
+    m = (hsv[:, :, 1] < WHITE_S_MAX) & (hsv[:, :, 2] > v_floor)
     n = int(np.count_nonzero(m))
     frac = n / float(m.size) if m.size else 0.0
-    if n < WHITE_MIN_SAMPLES or frac < WHITE_MIN_FRAC:
-        return None, frac
-    return np.median(small[m].astype(np.float64), axis=0), frac
+    if n >= WHITE_MIN_SAMPLES and frac >= WHITE_MIN_FRAC:
+        return np.median(small[m].astype(np.float64), axis=0), frac, "neutral"
+    # 兜底一：放宽饱和度上限（强偏色下白板自身 S 会升到 100+，但仍远低于
+    # 彩贴纸的 180~220），同时要求够亮。**不能只按"最亮"取**——暖偏色下
+    # 橙/黄贴纸比白板还亮（实测 B×0.75/R×1.25 后橙面板 V=250 > 白板 186），
+    # 纯最亮会把橙面板当白点，增益反被带飞。
+    v_floor2 = max(float(WHITE_V_MIN), WHITE_V_FALLBACK_REL * bright_ref)
+    m = (hsv[:, :, 1] < WHITE_S_FALLBACK) & (hsv[:, :, 2] > v_floor2)
+    n = int(np.count_nonzero(m))
+    frac2 = n / float(m.size) if m.size else 0.0
+    if n >= WHITE_MIN_SAMPLES and frac2 >= WHITE_FALLBACK_MIN_FRAC:
+        return np.median(small[m].astype(np.float64), axis=0), frac2, "bright"
+    # 不再往"纯最亮"退：合成/无白底场景里最亮的往往是彩贴纸本身（实测合成帧
+    # 灰底 V=90、面板 V=200 ⇒ 纯最亮会把面板当白点，整帧被带偏、误检丛生）。
+    # 找不到可信白点就**不归一化**（返回原帧），由现场锁曝光兜底。
+    return None, frac, "none"
 
 
 def normalize_illumination(frame, enabled=None):
@@ -231,15 +323,17 @@ def normalize_illumination(frame, enabled=None):
         (small[:, :, 0] >= NORM_CLIP_LEVEL) | (small[:, :, 1] >= NORM_CLIP_LEVEL)
         | (small[:, :, 2] >= NORM_CLIP_LEVEL))) / float(small.shape[0]
         * small.shape[1]) if small.size else 0.0
-    wp, frac = estimate_white_bgr(frame)
+    wp, frac, method = estimate_white_bgr(frame)
     info["white_frac"] = float(frac)
+    info["white_method"] = method
     if wp is None:
         return frame, info
-    gain = float(np.mean(wp)) / np.maximum(wp, 1.0)
+    gain = NORM_TARGET_WHITE_MEAN / np.maximum(wp, 1.0)
     info["white_bgr"] = [float(v) for v in wp]
+    info["suspicious"] = bool(np.any(gain < NORM_GAIN_WARN_MIN)
+                              or np.any(gain > NORM_GAIN_WARN_MAX))
+    gain = np.clip(gain, NORM_GAIN_MIN, NORM_GAIN_MAX)
     info["gain"] = [float(v) for v in gain]
-    info["suspicious"] = bool(np.any(gain < NORM_GAIN_MIN)
-                              or np.any(gain > NORM_GAIN_MAX))
     out = np.clip(frame.astype(np.float32) * gain.reshape(1, 1, 3),
                   0, 255).astype(np.uint8)
     info["applied"] = True
@@ -433,11 +527,15 @@ class PanelObservation:
 
     __slots__ = ("color", "color_id", "bbox", "center_px", "area",
                  "solidity", "model_digit", "model_conf",
-                 "clipped", "hull_centroid_px", "hull_area", "digit_evidence")
+                 "clipped", "hull_centroid_px", "hull_area", "digit_evidence",
+                 "shape_digit", "shape_conf", "ambig_color", "ambig_margin_deg",
+                 "ambig_candidates")
 
     def __init__(self, color, bbox, center_px, area, solidity,
                  model_digit=None, model_conf=0.0, clipped=False,
-                 hull_centroid_px=None, hull_area=0.0, digit_evidence=None):
+                 hull_centroid_px=None, hull_area=0.0, digit_evidence=None,
+                 shape_digit=None, shape_conf=0.0, ambig_color=None,
+                 ambig_margin_deg=None, ambig_candidates=()):
         self.color = color
         self.color_id = COLOR_TO_ID[color]
         self.bbox = bbox                      # (x,y,w,h) 原生像素
@@ -450,11 +548,47 @@ class PanelObservation:
         self.hull_centroid_px = hull_centroid_px or center_px
         self.hull_area = float(hull_area)
         self.digit_evidence = digit_evidence   # 凸包内黑字占比（None=未算）
+        self.shape_digit = shape_digit         # 形状仲裁结果（None=未跑/不可用）
+        self.shape_conf = float(shape_conf)    # 匹配间隔（最佳−次佳），越大越敢用
+        self.ambig_color = ambig_color         # 主要竞争色（跨色去重的落败者）
+        self.ambig_margin_deg = ambig_margin_deg   # 中位 H 距本窗口边界的角度
+        self.ambig_candidates = tuple(ambig_candidates)   # 全部竞争色
 
     @property
     def digit(self):
-        """主判：颜色→数字。仲裁只否决，不改主判（见类 docstring）。"""
+        """主判：颜色→数字。形状只在该颜色**有歧义**时才允许改判（C3）"""
+        if self.shape_override:
+            return self.shape_digit
         return self.color_id
+
+    @property
+    def ambiguous(self):
+        """颜色是否有歧义：同位置双色命中，或中位 H 贴着本窗口边界"""
+        if self.ambig_candidates or self.ambig_color is not None:
+            return True
+        return (self.ambig_margin_deg is not None
+                and self.ambig_margin_deg < AMBIG_H_MARGIN_DEG)
+
+    @property
+    def candidates(self):
+        """歧义时的候选数字（颜色主判 + 全部竞争色）"""
+        cands = {self.color_id}
+        for c in list(self.ambig_candidates) + (
+                [self.ambig_color] if self.ambig_color else []):
+            if c in COLOR_TO_ID:
+                cands.add(COLOR_TO_ID[c])
+        return cands
+
+    @property
+    def shape_override(self):
+        """是否由形状改判（诊断/日志用）"""
+        if not (SHAPE_ENABLED and self.shape_digit is not None):
+            return False
+        if self.shape_conf < SHAPE_OVERRIDE_MIN_CONF:
+            return False
+        if self.shape_digit == self.color_id:
+            return False
+        return self.ambiguous and self.shape_digit in self.candidates
 
     @property
     def arb_conflict(self):
@@ -495,19 +629,43 @@ class NineGridDetector:
         self.max_area = max_area
         self.arbiter = arbiter if arbiter is not None else DigitArbiter()
         self._kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        # 形状仲裁器（现场自建数字模板；懒加载，缺文件即降级为不可用）
+        self._shape_arb = None
+        self._shape_tried = False
         # 最近一次 detect_panels/color_ratio 的光照归一化信息（诊断/工具用）
         self.last_norm = None
         # 最近一次 detect_panels 被数字证据门拒绝的观测（诊断/工具用）
         self.last_rejected = []
 
+    @property
+    def shape_arb(self):
+        """形状仲裁器：models/nine_grid/digit_templates.npz（缺失=不可用）"""
+        if not self._shape_tried:
+            self._shape_tried = True
+            try:
+                from .digit_recognizer import DigitRecognizer
+                if os.path.exists(SHAPE_TEMPLATE_PATH):
+                    data = np.load(SHAPE_TEMPLATE_PATH, allow_pickle=False)
+                    tmpl = {k[1:]: data[k] for k in data.files
+                            if k.startswith("d") and k[1:].isdigit()}
+                    if tmpl:
+                        self._shape_arb = DigitRecognizer(templates=tmpl)
+                        print(f"[形状仲裁] 数字模板已加载: {SHAPE_TEMPLATE_PATH}"
+                              f"（{len(tmpl)} 个数字）")
+            except (OSError, ValueError, KeyError) as e:
+                print(f"[形状仲裁] 模板加载失败({e})，形状仲裁停用")
+        return self._shape_arb
+
     # -----------------------------------------------------------------
 
     def detect_panels(self, frame, colors=None, arbitrate=False,
-                      drop_border=False):
+                      drop_border=False, shape=False):
         """检测画面中的面板色块，按面积降序返回 [PanelObservation]
 
         colors:      限定颜色列表（None=全部七色）
         arbitrate:   对每个候选跑 SVM 数字仲裁（慢，布局扫/复核时开）
+        shape:       对每个候选跑**数字形状仲裁**（现场自建模板；颜色有歧义
+                     时才用于改判，见 PanelObservation.digit）
         drop_border: 丢弃被画幅裁切的面板。裁切后 center_px（对角线交点）
                      与面积都系统性偏差，只适合"定归属"的布局扫；GN 定位
                      路径默认关闭——裁切面板改用 hull_centroid_px 参与解算
@@ -586,21 +744,51 @@ class NineGridDetector:
             raw.append((color, area, (x, y, w, h), main[2], hull,
                         quad_center(hull), _contour_centroid(hull), clipped, ev))
 
-        # 跨色去重：同区域多色命中时保留面积大者（阈值交界抖动）
+        # 跨色去重：同区域多色命中时保留面积大者（阈值交界抖动）。
+        # 落败色**不丢**：记到胜者的 ambig_color 上——同位置双色命中就是
+        # 颜色歧义的直接证据，交给形状仲裁裁决（见 PanelObservation.digit）。
         raw.sort(key=lambda r: r[1], reverse=True)
         kept = []
+        losers = {}          # id(胜者元组) -> 落败色名
         for item in raw:
             dup = False
             for k in kept:
-                if _iou(item[2], k[2]) > 0.5:
+                if _iou(item[2], k[2]) > AMBIG_IOU:
                     dup = True
+                    losers.setdefault(id(k), item[0])
                     break
             if not dup:
                 kept.append(item)
 
         results = []
-        for (color, area, (x, y, w, h), solidity, _hull, center,
-             hull_centroid, clipped, ev) in kept:
+        for item in kept:
+            (color, area, (x, y, w, h), solidity, _hull, center,
+             hull_centroid, clipped, ev) = item
+            # 颜色歧义度：色块像素的中位 H 距本窗口两侧边界的角度（取小者）。
+            # 红↔橙窗口只差 7°，中位 H 贴边就说明光照把贴纸推到了边界。
+            mask_full = build_color_mask(hsv, color)
+            sub = mask_full[y:y + h, x:x + w]
+            hmed = (float(np.median(hsv[y:y + h, x:x + w, 0][sub > 0]))
+                    if np.count_nonzero(sub) else None)
+            amb_margin = None
+            amb_list = []
+            if hmed is not None:
+                h_lo, h_hi, _s, _v = _active_palette()[color]
+                d_lo = (float(hmed) - h_lo) % 180.0
+                d_hi = (h_hi - float(hmed)) % 180.0
+                amb_margin = float(min(d_lo, d_hi))
+                # 中位 H 贴边 ⇒ 竞争色 = 边界另一侧的颜色
+                if d_lo < AMBIG_H_MARGIN_DEG:
+                    nb = palette_neighbor(color, float(hmed) - 1.0)
+                    if nb:
+                        amb_list.append(nb)
+                if d_hi < AMBIG_H_MARGIN_DEG:
+                    nb = palette_neighbor(color, float(hmed) + 1.0)
+                    if nb:
+                        amb_list.append(nb)
+            loser = losers.get(id(item))
+            if loser and loser not in amb_list:
+                amb_list.append(loser)
             obs = PanelObservation(
                 color=color,
                 bbox=(x * scale, y * scale, w * scale, h * scale),
@@ -612,6 +800,9 @@ class NineGridDetector:
                                   hull_centroid[1] * scale),
                 hull_area=area * scale * scale,
                 digit_evidence=ev,
+                ambig_color=loser,
+                ambig_margin_deg=amb_margin,
+                ambig_candidates=amb_list,
             )
             if arbitrate:
                 roi = work[y:y + h, x:x + w]
@@ -619,6 +810,11 @@ class NineGridDetector:
                 digit_mask = _digit_mask_for_arbitration(roi, mask_roi)
                 obs.model_digit, obs.model_conf = self.arbiter.predict(
                     digit_mask)
+            if shape and SHAPE_ENABLED:
+                gm, _diag = extract_glyph_mask(hsv, mask_full, (x, y, w, h))
+                if gm is not None and self.shape_arb is not None:
+                    obs.shape_digit, obs.shape_conf, _ = \
+                        self.shape_arb.match_mask(gm)
             results.append(obs)
         return results
 
@@ -671,6 +867,26 @@ def _digit_mask_for_arbitration(roi_bgr, color_mask_roi):
     inv = cv2.bitwise_not(color_mask_roi)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     return cv2.morphologyEx(inv, cv2.MORPH_OPEN, kernel)
+
+
+def palette_neighbor(color_name, h_query):
+    """调色板中"另一个"包含该 H 的颜色名（色块中位 H 贴边时找竞争色）
+
+    窗口按整数 H 平铺（相邻窗口留 0~1° 缝），故对 h_query 逐色判断包含关系，
+    取第一个非本色命中者。
+    """
+    pal = _active_palette()
+    for other, (h_lo, h_hi, _s, _v) in pal.items():
+        if other == color_name:
+            continue
+        h = float(h_query) % 180.0
+        if h_lo <= h_hi:
+            hit = h_lo <= h <= h_hi
+        else:
+            hit = h >= h_lo or h <= h_hi
+        if hit:
+            return other
+    return None
 
 
 def digit_evidence(v_plane, hull, bbox):

@@ -691,8 +691,11 @@ class NineGridLevel:
                         continue
                     # 裁切感知：贴纸小、入口视角大半面板贴画幅边——保留
                     # 裁切面板，用凸包质心观测（拟合时降权，见 _aggregate）
+                    # shape=True：颜色贴窗口边界时用数字形状仲裁（C3）——
+                    # 布局一次定全局，颜色错判代价最大，这里最该开形状。
                     obs = self.detector.detect_panels(frame, arbitrate=True,
-                                                      drop_border=False)
+                                                      drop_border=False,
+                                                      shape=True)
                     frame_obs.append((pitch, pulse, obs))
                     for o in obs:
                         px = (o.hull_centroid_px if o.clipped
