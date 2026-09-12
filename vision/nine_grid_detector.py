@@ -40,16 +40,77 @@ COLOR_THRESHOLDS = {
     "orange": [((6, 85, 110), (15, 255, 255))],
     "yellow": [((17, 70, 90), (34, 255, 255))],
     # green/blue 走 build_color_mask 特殊判定，不放长方体
-    # 紫/粉分界：紫 H≤136、粉 H≥137（实测两板间隔 ≥24 单位，见下）
     "purple": [((114, 55, 60), (136, 255, 255))],
-    # 粉：2026-09-11 现场探针帧 photo_1789213170 实测粉贴纸 **H=140/S=52%/V=191**
-    # （当时场内光照偏亮偏冷，粉色读成淡紫粉），旧窗口 H∈[160,171] 整块漏检
-    # （该帧粉掩膜最大碎块仅 360px² vs 正常 18000px²）→ 布局扫必缺数字 7。
-    # 同帧紫板 H=116/S=125%/V=66，两者间隔 24 单位；旧光照下粉 H≈168。故把粉
-    # 窗口下界放到 137（仍与紫的 136 留 1 单位硬边界），S 下限 45%→30%
-    # （白板 S 8~20% 仍被排除），V 下限保持 80%。
     "pink": [((137, 30, 80), (175, 255, 255))],
 }
+
+# =====================================================================
+# 七色调色板（归一化 HSV 空间；2026-09-11 起为**生效阈值**）
+# =====================================================================
+# 由 tools/calibrate_palette.py 从 13 张实拍标注帧（tests/fixtures/field_photos，
+# 含 3 张真机探针帧）拟合，规整为整数 H 区间：
+#   - H 边界 = **相邻色实测样本之间的缝隙中点**（gap-midpoint）→ 互相排斥、
+#     不留缝、不重叠。先试过"相邻色中心中点"（Voronoi，红↔橙 = 4.5），结果
+#     红在 13 帧里只命中 2 帧：红贴纸实测 H 落在 178~5，中心中点把 5 判给橙。
+#     改成缝隙中点（红 ≤5 / 橙 ≥6）后 73/73 唯一命中、0 多命中、0 漏检。
+#     实测相邻色 H 中心间隔：红↔橙 7、橙↔黄 12、蓝↔紫 18、粉↔红 13.5（环绕），
+#     其余 ≥42。红↔橙只差 7° 是硬伤：H 单独判不了，交给形状仲裁（C3）兜。
+#   - S/V 下限只承担"不是白板、不是黑字"的职责（白板 S 3~9%、黑字 V<24%），
+#     故意取松：S/V 会随曝光与光照整体漂移，取紧就重现"整块漏检"（第一版
+#     拟合用 min×0.8 得到红 S≥49%、黄 S≥54%，直接拒掉真实样本）。
+#     场景杂物（木框/地垫）交给数字证据门 + 格阵共识拦，不靠颜色窗口硬扛。
+#   - 现场复标：python tools/calibrate_palette.py --write
+#     （写 models/nine_grid/palette.json，运行时优先读它，失败回退本表）。
+USE_PALETTE = True
+PALETTE = {          # color: (h_lo, h_hi, s_lo%, v_lo%)；h_lo > h_hi = 环绕窗口
+    "red":    (174, 5, 25.0, 25.0),     # 环绕另一段 (0, 5] 见 _palette_ranges
+    "orange": (6, 15, 25.0, 25.0),
+    "yellow": (16, 41, 25.0, 25.0),
+    "green":  (42, 88, 25.0, 19.1),
+    "blue":   (89, 113, 25.0, 25.0),
+    "purple": (114, 142, 25.0, 24.4),
+    "pink":   (143, 173, 10.0, 25.0),   # 粉贴纸本身饱和度低（实测 S 12~35%）
+}
+PALETTE_JSON_PATH = os.path.join(PROJECT_ROOT, "models", "nine_grid",
+                                 "palette.json")
+_PALETTE_OVERRIDE = None       # (生效色数, 路径) —— _active_palette 的缓存
+
+
+def _active_palette():
+    """生效调色板：models/nine_grid/palette.json 存在则覆盖（现场复标产物）"""
+    global _PALETTE_OVERRIDE
+    if _PALETTE_OVERRIDE is not None:
+        return _PALETTE_OVERRIDE
+    pal = dict(PALETTE)
+    try:
+        import json
+        if os.path.exists(PALETTE_JSON_PATH):
+            with open(PALETTE_JSON_PATH, "r", encoding="utf-8") as f:
+                fitted = json.load(f).get("fitted", {})
+            n = 0
+            for color, w in fitted.items():
+                if color in pal and "h_lo" in w:
+                    pal[color] = (int(round(w["h_lo"])), int(round(w["h_hi"])),
+                                  float(w["s_lo"]), float(w["v_lo"]))
+                    n += 1
+            print(f"[调色板] 已加载现场复标 {PALETTE_JSON_PATH}（{n} 色覆盖）")
+    except (OSError, ValueError, KeyError) as e:
+        print(f"[调色板] {PALETTE_JSON_PATH} 读取失败({e})，用代码内缺省窗口")
+    _PALETTE_OVERRIDE = pal
+    return pal
+
+
+def _palette_ranges(color_name, palette=None):
+    """调色板窗口 → [(h_lo, h_hi, s_lo8, v_lo8), ...]（S/V 换算到 0-255；红两段）"""
+    pal = palette if palette is not None else _active_palette()
+    w = pal.get(color_name)
+    if w is None:
+        return []
+    h_lo, h_hi, s_lo, v_lo = w
+    s8, v8 = int(round(s_lo * 2.55)), int(round(v_lo * 2.55))
+    if h_lo <= h_hi:
+        return [(int(h_lo), int(h_hi), s8, v8)]
+    return [(0, int(h_hi), s8, v8), (int(h_lo), 179, s8, v8)]   # 环绕拆两段
 
 COLOR_TO_ID = {"red": 1, "orange": 2, "yellow": 3,
                "green": 4, "blue": 5, "purple": 6, "pink": 7}
@@ -164,7 +225,19 @@ def normalize_illumination(frame, enabled=None):
 
 
 def build_color_mask(hsv, color_name):
-    """单色二值 mask。green/blue 特殊判定，其余 inRange 长方体并集。"""
+    """单色二值 mask
+
+    缺省走**归一化空间的 PALETTE（Voronoi H 分界 + 松 S/V 下限）**；
+    USE_PALETTE=False 时回退历史实现（green/blue 走 H+S/V 特殊判定，
+    其余走 COLOR_THRESHOLDS 长方体）——保留以便现场应急与对照。
+    """
+    if USE_PALETTE:
+        mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+        for h_lo, h_hi, s_lo, v_lo in _palette_ranges(color_name):
+            mask |= cv2.inRange(hsv, np.array([h_lo, s_lo, v_lo], np.uint8),
+                                np.array([h_hi, 255, 255], np.uint8))
+        return mask
+
     if color_name == "green":
         H = hsv[:, :, 0].astype(np.float32) * 2.0
         S = hsv[:, :, 1].astype(np.float32)
