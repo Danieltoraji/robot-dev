@@ -68,6 +68,127 @@ MAX_LOCATE_RETRIES = 5  # 定位失败最大重试次数
 MULTIVIEW_EXTRINSICS_PATH = os.path.join(RESULT_DIR, "multiview_extrinsics.json")
 
 # =====================================================================
+# 相机参数锁定（2026-09-11：消除现场光照/自动白平衡漂移）
+# =====================================================================
+# 现场实测（真机探针帧 photo_1789213170）：同一场地同一相机的白底板 BGR 从
+# [153,155,149] 漂到 [209,186,180]（R/B 差 16%），粉贴纸 H 由 168 掉到 141，
+# 整块掉出手写窗口而漏检。事后归一化能救，但**源头锁住才是根治**：
+# fswebcam 每次调用都重新测光/白平衡（命令里 `-S 3` 只是丢 3 帧），
+# 故在一局开始时用 v4l2-ctl 把白平衡与对焦钉死，全程不再漂。
+# 取值来源：真机 `v4l2-ctl --list-ctrls` 读到的当前值（4000K/313/166）。
+# 曝光默认**不锁**（CAM_LOCK_EXPOSURE=False）：亮度漂移已由
+# vision.nine_grid_detector.normalize_illumination 归一化消除；而手动曝光在
+# 新场地上有欠曝/过曝风险，且过曝是不可逆的信息丢失。需要时再开。
+CAM_LOCK_CONTROLS_ENABLED = True
+CAM_LOCK_EXPOSURE = False
+CAM_V4L2_DEVICE = "/dev/video0"
+CAM_WB_TEMPERATURE_K = 4000
+CAM_EXPOSURE_ABS = 313
+CAM_FOCUS_ABS = 166
+_CAM_LOCK_DONE = None      # 已应用的配置（同一次运行内不重复设置）
+
+
+def camera_lock_controls(device=None, wb_k=None, exposure=None, focus=None,
+                         lock_exposure=None):
+    """→ 有序的 (控制名, 值) 列表（纯函数，便于单测；不含 IO）
+
+    auto_exposure=1 = Manual、white_balance_automatic=0 = 手动白平衡、
+    focus_automatic_continuous=0 = 手动对焦（V4L2 菜单约定）。
+    """
+    device = device or CAM_V4L2_DEVICE
+    wb_k = CAM_WB_TEMPERATURE_K if wb_k is None else wb_k
+    exposure = CAM_EXPOSURE_ABS if exposure is None else exposure
+    focus = CAM_FOCUS_ABS if focus is None else focus
+    lock_exposure = CAM_LOCK_EXPOSURE if lock_exposure is None else lock_exposure
+    ctrls = [("white_balance_automatic", 0),
+             ("white_balance_temperature", int(wb_k)),
+             ("focus_automatic_continuous", 0),
+             ("focus_absolute", int(focus))]
+    if lock_exposure:
+        ctrls += [("auto_exposure", 1),
+                  ("exposure_time_absolute", int(exposure))]
+    return device, ctrls
+
+
+def build_camera_lock_cmd(device, ctrls):
+    """设置命令（一次调用设完全部控制，避免中间态被 fswebcam 抢到）"""
+    pairs = ",".join(f"{k}={v}" for k, v in ctrls)
+    return f"v4l2-ctl -d {device} -c {pairs}"
+
+
+def build_camera_readback_cmd(device, ctrls):
+    """读回命令（验收/诊断：确认锁定真的生效）"""
+    names = ",".join(k for k, _v in ctrls)
+    return f"v4l2-ctl -d {device} --get-ctrl={names}"
+
+
+def parse_v4l2_values(text):
+    """`v4l2-ctl --get-ctrl` 输出 → {控制名: 值}（容忍空白与冒号变体）"""
+    out = {}
+    for line in (text or "").splitlines():
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        k, v = k.strip(), v.strip()
+        try:
+            out[k] = int(v)
+        except ValueError:
+            continue
+    return out
+
+
+def lock_camera_controls(device=None, wb_k=None, exposure=None, focus=None,
+                         lock_exposure=None, force=False, quiet=False):
+    """锁定白平衡/对焦（可选曝光）→ (是否成功, 明细字典)
+
+    非 Linux（PC 开发）或设备不存在/无 v4l2-ctl 时返回 (False, 原因)，
+    **不抛异常**：锁不上只是精度风险，不该让整局跑不起来（归一化仍可兜）。
+    """
+    device, ctrls = camera_lock_controls(device, wb_k, exposure, focus,
+                                         lock_exposure)
+    info = {"device": device, "ctrls": dict(ctrls), "applied": False,
+            "readback": {}, "mismatch": [], "reason": ""}
+    if not CAM_LOCK_CONTROLS_ENABLED and not force:
+        info["reason"] = "锁定已关闭(CAM_LOCK_CONTROLS_ENABLED=False)"
+        return False, info
+    global _CAM_LOCK_DONE
+    if _CAM_LOCK_DONE == info["ctrls"] and not force:
+        info["applied"] = True
+        info["reason"] = "本次运行已锁定过，跳过"
+        return True, info
+    if os.name != "posix" or not os.path.exists(device):
+        info["reason"] = f"非 Linux 或无 {device}（PC 开发环境按未锁处理）"
+        return False, info
+    try:
+        r = subprocess.run(build_camera_lock_cmd(device, ctrls), shell=True,
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as e:
+        info["reason"] = f"v4l2-ctl 调用失败: {e}"
+        return False, info
+    if r.returncode != 0:
+        info["reason"] = f"v4l2-ctl 返回 {r.returncode}: {r.stderr.strip()[:200]}"
+        return False, info
+    info["applied"] = True
+    try:
+        rb = subprocess.run(build_camera_readback_cmd(device, ctrls),
+                            shell=True, capture_output=True, text=True,
+                            timeout=10)
+        got = parse_v4l2_values(rb.stdout)
+    except (OSError, subprocess.SubprocessError):
+        got = {}
+    info["readback"] = got
+    for k, want in ctrls:
+        if k in got and got[k] != want:
+            info["mismatch"].append(f"{k}: 期望 {want} 实读 {got[k]}")
+    _CAM_LOCK_DONE = dict(ctrls)
+    if not quiet:
+        print(f"[相机] 已锁定 {device}: "
+              + ", ".join(f"{k}={v}" for k, v in ctrls)
+              + (f"；读回不一致 {info['mismatch']}" if info["mismatch"] else "；读回一致"))
+    return True, info
+
+
+# =====================================================================
 # 位置连续性守卫（2026-08-30，依据真机 trace 一次 12cm 跳变坏定位）
 # =====================================================================
 # 共面标签对的错误分支可能通过重投影门控（真机实测 (22,38)→(34,41) 跳变，

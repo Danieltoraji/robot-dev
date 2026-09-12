@@ -86,7 +86,7 @@ from core.ground_homography import (
     GroundHomography, grid_cell_center, cell_index,
     CAMERA_TO_BODY_FORWARD_CM, GRID_CELL_CM,
 )
-from core.robot_core import RobotState
+from core.robot_core import RobotState, lock_camera_controls
 from vision.nine_grid_detector import NineGridDetector, ID_TO_COLOR
 
 # 相机光心高度缺省值：来自 camera_config（机器人自身属性）；layout_scan
@@ -281,6 +281,9 @@ LAYOUT_VOTE_MIN_COMBOS = 10     # 且组合数下限（防少数组合碰巧一�
 # 但参数估计由多数好观测驱动，故用稳健的统计量判定。
 PIXEL_CALIB_MED_MAX_PX = 40.0
 SPREAD_MAX_CM = 8.0             # 簇内离散告警阈值（cm；超出说明该数字观测不可信）
+# 歧义修复（E）交换余量：歧义数字的观测点必须"离竞争格比离本格近"这么多 cm
+# 才考虑交换格号（约 1/4 格距，远大于现场观测 1~2cm 的跨帧离散）。
+AMBIG_SWAP_MARGIN_CM = 8.0
 CLUSTER_RADIUS_CM = 6.0         # 同数字跨帧观测聚类半径（cm）：取最大一致簇
 LAYOUT_MIN_CLEAN_DIGITS = 6     # 提前结束扫描所需的"未裁切观测覆盖数字数"
 POSE_BOOTSTRAP_RMS_MAX_CM = 0.35 * GRID_CELL_CM  # 位姿自举刚体残差上限
@@ -430,6 +433,79 @@ def _rigid_fit_2d(gs, ps, w=None):
     tt = pm - Rm @ gm
     per = np.linalg.norm(ps - ((Rm @ gs.T).T + tt), axis=1)
     return Rm, tt, float(np.sqrt(np.mean(per ** 2))), per
+
+
+def ambiguity_repair(cells, pick, ambig, margin_cm=None):
+    """歧义修复（E）：用格阵共识复核颜色有歧义、形状又没定案的面板
+
+    输入：cells = {数字: 格号}（格阵投票胜出解）；pick = 该解的拟合明细
+    （含 med=各数字机器人系点、clean=可信数字集合）；ambig = {数字: {竞争数字}}。
+    做法：
+      1. 只用**无歧义且可信**的数字拟合刚体变换（场地格心 → 机器人系点）；
+      2. 对每个歧义数字 d 与其竞争数字 c（两者都已在 cells 里）：比较 d 的观测点
+         到"格(d)"与"格(c)"预测位置的距离，若后者近出一个余量以上 ⇒ 交换二者格号；
+      3. 交换后用全点重算残差，**只有残差变小才接受**（否则回退）。
+    返回 (cells, notes)：notes 为人类可读的修复记录（无修复时为空）。
+    几何不可判（置信数字 <3、缺观测、候选不在解里）时原样返回——宁可不动。
+    """
+    margin_cm = AMBIG_SWAP_MARGIN_CM if margin_cm is None else margin_cm
+    notes = []
+    if not ambig or not cells or pick is None:
+        return cells, notes
+    med = pick.get("med") or {}
+    pairs = []
+    for d, cands in ambig.items():
+        if d not in cells or d not in med:
+            continue
+        for c in cands:
+            if c in cells and c != d and c in med and (c, d) not in pairs:
+                pairs.append((d, c))
+    if not pairs:
+        return cells, notes
+    clean = set(pick.get("clean") or ())
+    base_amb = {d for pr in pairs for d in pr}
+    ref = [d for d in cells if d in med and d in clean and d not in base_amb]
+    if len(ref) < 3:                      # 可信参照不足：换用全部非歧义数字
+        ref = [d for d in cells if d in med and d not in base_amb]
+    if len(ref) < 3:
+        return cells, notes
+
+    def _resid(cells_now):
+        ds = sorted(d for d in cells_now if d in med)
+        gs = np.array([grid_cell_center(cells_now[d]) for d in ds])
+        ps = np.array([med[d] for d in ds])
+        w = np.array([1.0 if d in clean else LATTICE_CLIPPED_WEIGHT for d in ds])
+        _R, _t, _rms, per = _rigid_fit_2d(gs, ps, w)
+        return float(np.sqrt(np.mean(np.asarray(per) ** 2)))
+
+    # 参照刚体变换：只用参考数字（歧义数字的观测不参与，避免"自己证明自己"）
+    gs = np.array([grid_cell_center(cells[d]) for d in sorted(ref)])
+    ps = np.array([med[d] for d in sorted(ref)])
+    R, t, _rms, _per = _rigid_fit_2d(gs, ps, np.ones(len(ref)))
+
+    def _pred(cell):
+        return R @ grid_cell_center(cell) + t
+
+    new_cells = dict(cells)
+    for d, c in pairs:
+        pd, pc = np.asarray(med[d]), np.asarray(med[c])
+        d_own = float(np.linalg.norm(pd - _pred(cells[d])))
+        d_other = float(np.linalg.norm(pd - _pred(cells[c])))
+        # 对称检查：竞争数字 c 的观测也应更靠近格(d)，否则不动（可能只是噪声）
+        c_own = float(np.linalg.norm(pc - _pred(cells[c])))
+        c_other = float(np.linalg.norm(pc - _pred(cells[d])))
+        if d_other + margin_cm >= d_own or c_other + margin_cm >= c_own:
+            continue
+        cand = dict(new_cells)
+        cand[d], cand[c] = new_cells[c], new_cells[d]
+        if _resid(cand) < _resid(new_cells):
+            notes.append(
+                f"数字 {d}↔{c} 交换格号（{new_cells[d]}↔{new_cells[c]}）："
+                f"观测点距对格 {d_own:.1f}cm、距竞争格 {d_other:.1f}cm"
+                f"（余量 {margin_cm:.0f}cm），交换后残差下降")
+            new_cells = cand
+    return new_cells, notes
+
 
 
 def lattice_assign(points_by_digit, spacing_cm=GRID_CELL_CM, weights=None,
@@ -635,6 +711,10 @@ class NineGridLevel:
         真机日志与诊断使用。
         """
         self.deadline = time.time() + TOTAL_TIME_BUDGET_S
+        # 锁定相机白平衡/对焦（可选曝光）：一局开始钉一次，消除 fswebcam 每次
+        # 重新测光/白平衡造成的跨帧漂移（现场实测白点 R/B 差 16% → 粉 7 漏检）。
+        # 锁不上不影响继续：归一化仍能兜（见 core.robot_core.lock_camera_controls）。
+        lock_camera_controls()
         self.layout_scan()
         print(f"[布局] 数字→格: {self.digit_cell}  "
               f"仲裁冲突格: {sorted(self.cell_conflict)}")
@@ -725,7 +805,21 @@ class NineGridLevel:
                     if missing else "")
             if not missing:
                 # 参数网格自标定 + 格阵拟合（见 _lattice_grid_fit）
-                fit = self._lattice_grid_fit(pix_obs)
+                # 颜色歧义表：{数字: {竞争数字}}，供拟合后的格阵共识复核（E）
+                ambig = {}
+                n_amb = 0
+                for _p, _h, obs_list in frame_obs:
+                    for o in obs_list:
+                        if not o.ambiguous:
+                            continue
+                        n_amb += 1
+                        cands = {k for k in o.candidates if k != o.digit}
+                        if cands:
+                            ambig.setdefault(o.digit, set()).update(cands)
+                if n_amb:
+                    print(f"[布局] 颜色歧义观测 {n_amb} 个"
+                          f"（涉及数字 {sorted(ambig)}），交由形状仲裁/格阵共识")
+                fit = self._lattice_grid_fit(pix_obs, ambig)
                 info = fit.info
                 for w in fit.warnings:
                     print(f"[布局] 警告: {w}")
@@ -773,7 +867,7 @@ class NineGridLevel:
         return ((1500 - pitch_pulse) * SERVO_DEG_PER_US
                 + self._pitch_offset_deg)
 
-    def _lattice_grid_fit(self, pix_obs):
+    def _lattice_grid_fit(self, pix_obs, ambig=None):
         """参数网格自标定 + 格阵拟合 → LatticeFit
 
         相机安装偏移/高度无法精确预知（装配离散、俯仰随头部姿态微变），在
@@ -968,6 +1062,13 @@ class NineGridLevel:
         spread_max = max(pick["spread"].values()) if pick["spread"] else 0.0
         info = (f"{len(combos)}/{n_assign} 组合收敛（{len(pick['clean'])} 个"
                 f"数字有干净观测，跨帧离散 ≤{spread_max:.1f}cm）")
+        # 歧义修复（E）：颜色歧义面板（同位置双色命中 / 中位 H 贴窗口边界）
+        # 若形状仲裁没能定案，这里用**格阵共识**复核一次——置信数字先定刚体
+        # 变换，再看歧义数字的观测点离"本格"还是"竞争数字那格"更近。
+        cells, rep_notes = ambiguity_repair(cells, pick, ambig or {})
+        for n in rep_notes:
+            warnings.append(n)
+            print(f"[布局] 歧义修复: {n}")
         return LatticeFit(cells=cells, info=info, offset_deg=off,
                           cam_height_cm=hcm, pts_robot=dict(pick["med"]),
                           clean=set(pick["clean"]), weights=dict(pick["wts"]),

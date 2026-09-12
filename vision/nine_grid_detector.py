@@ -777,13 +777,14 @@ class NineGridDetector:
                 d_lo = (float(hmed) - h_lo) % 180.0
                 d_hi = (h_hi - float(hmed)) % 180.0
                 amb_margin = float(min(d_lo, d_hi))
-                # 中位 H 贴边 ⇒ 竞争色 = 边界另一侧的颜色
+                # 中位 H 贴边 ⇒ 竞争色 = 窗口边界另一侧的颜色（查询窗口外 1°，
+                # 查窗口内会命中本色而返回 None——曾据此把竞争色全丢掉）
                 if d_lo < AMBIG_H_MARGIN_DEG:
-                    nb = palette_neighbor(color, float(hmed) - 1.0)
+                    nb = palette_neighbor(color, h_lo - 1.0)
                     if nb:
                         amb_list.append(nb)
                 if d_hi < AMBIG_H_MARGIN_DEG:
-                    nb = palette_neighbor(color, float(hmed) + 1.0)
+                    nb = palette_neighbor(color, h_hi + 1.0)
                     if nb:
                         amb_list.append(nb)
             loser = losers.get(id(item))
