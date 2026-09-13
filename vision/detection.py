@@ -68,6 +68,11 @@ class LineSegment:
     elbow_px: Optional[Tuple[float, float]] = None
     elbow_ry: float = 0.0
     points: List[Tuple[float, float]] = field(default_factory=list)
+    # 地面单应映射结果（cm，右正左负/前正），仅在启用单应映射时填充，否则为 None
+    lateral_offset_cm: Optional[float] = None   # 最近点横向偏移
+    nearest_forward_cm: Optional[float] = None  # 最近点纵向距离
+    lookahead_cm: Optional[float] = None        # lookahead 点横向偏移
+    lookahead_forward_cm: Optional[float] = None  # lookahead 点纵向距离
 
 
 @dataclass

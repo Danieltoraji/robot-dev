@@ -28,6 +28,10 @@ ELBOW_MIN_FAR_ARM_PX = 15.0   # 肘部远臂（肘点→远端）全弧长下限
 # 注：臂长按「肘点到段端点的全弧长」计，而非滑窗弦长——机器人贴近拐角时
 # 近臂在图像中只有 ~10px，但仍是真拐角；远臂必须足够长以排除噪声毛刺。
 
+# 骨架追踪段长度下限：拐角块状结构细化的毛刺残段（通常 <10 点）会被
+# 丢弃，避免其被误判为 follow 并因优先级抢赢真正的 corner 段。
+MIN_SEGMENT_LEN = 10
+
 # follow 稳健拟合参数
 FIT_MIN_RY_SPAN = 30.0      # ry 跨度小于此值（像素）时降为一次拟合（防 polyfit 病态）
 FIT_MIN_POINTS = 8          # 点数小于此值时直接量测，不拟合
@@ -123,7 +127,9 @@ class LineDetector:
                 continue
             comp = (labels == i).astype(np.uint8)
             skel = self._zhang_suen(comp)
-            segments.extend(self._trace(skel))
+            for seg in self._trace(skel):
+                if len(seg) >= MIN_SEGMENT_LEN:
+                    segments.append(seg)
         return segments
 
     @staticmethod
@@ -150,7 +156,10 @@ class LineDetector:
                         yield q
 
         deg = {p: sum(1 for _ in nbrs(p)) for p in pts}
-        endpoints = [p for p in pts if deg[p] == 1]
+        # 端点确定性排序：优先从「y 最大（离机器人最近）」的端点开始追踪，
+        # 保证 L 形拐角的主路径被完整追踪（set 无序遍历会因 hash seed 不同
+        # 产生非确定性的段划分）。
+        endpoints = sorted((p for p in pts if deg[p] == 1), key=lambda p: (-p[1], p[0]))
         visited = set()
         segs = []
 
