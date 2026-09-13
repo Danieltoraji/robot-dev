@@ -98,6 +98,21 @@ CAM_V4L2_DEVICE = "/dev/video0"
 CAM_WB_TEMPERATURE_K = 5800
 CAM_EXPOSURE_ABS = 100
 CAM_FOCUS_ABS = 270
+# 自动曝光闭环（2026-09-13 换灯实测后加）：曝光写死在换灯后直接失效
+# （均亮 7~22、归一化不生效、布局扫描三轮未定），故一局开始时按"画面均亮"
+# 闭环调 (曝光, 增益)：目标 150、曝光上限 2000、增益五档 0/16/32/48/63、
+# 最多 5 张照片；过曝超过 CAM_CLIP_MAX 就退曝光（过曝不可逆）。
+CAM_AUTO_EXPOSURE_ENABLED = True
+CAM_TARGET_MEAN = 150.0
+CAM_EXPOSURE_MAX = 3000
+# 起点取**最低增益**：暗场里增益是噪声放大器（实测增益 32 + 曝光 448 时画面
+# 均亮够，但背景噪声被蓝色窗口吃成「半屏蓝块」，直接把格阵拟合打挂）。
+# 优先「多曝光、少增益」，只有曝光顶到上限才抬增益。
+CAM_GAIN_START = 0
+CAM_GAIN_STEPS = (0, 16, 32, 48, 63)
+CAM_CALIB_MAX_SHOTS = 5
+CAM_CALIB_SKIP = 10
+CAM_CLIP_MAX = 0.05
 # 现场复扫（换场地/换灯后照做）：python tools/field_camera_sweep.py
 # 判据：白点 R/B 最接近 1、过曝 <5%、同一机位连拍均亮一致。
 _CAM_LOCK_DONE = None      # 已应用的配置（同一次运行内不重复设置）
@@ -159,6 +174,113 @@ def parse_v4l2_values(text):
         except ValueError:
             continue
     return out
+
+
+def apply_camera_controls(ctrls, device=None, quiet=True):
+    """逐条下发 {控制名: 值} → (是否全部成功, 失败列表)（单点失败不影响其它）"""
+    device = device or CAM_V4L2_DEVICE
+    failed = []
+    for name, want, cmd in build_camera_lock_cmds(
+            device, [(k, v) for k, v in ctrls.items()]):
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                               timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:
+            failed.append(f"{name}: {e}")
+            continue
+        if r.returncode != 0:
+            tail = r.stderr.strip().splitlines()[-1][:50] if r.stderr.strip() else ""
+            failed.append(f"{name}: rc={r.returncode} {tail}")
+    return (not failed), failed
+
+
+def measure_frame_brightness(frame):
+    """→ (均亮, 过曝比例)；过曝 = 任一分量打满（≥NORM_CLIP_LEVEL 同义 250）"""
+    import cv2
+    if frame is None or frame.size == 0:
+        return 0.0, 0.0
+    small = frame[::4, ::4] if frame.shape[1] > 800 else frame
+    mean = float(small.mean())
+    clip = float(np.count_nonzero((small >= 250).any(axis=2))) / float(
+        small.shape[0] * small.shape[1])
+    return mean, clip
+
+
+def auto_calibrate_exposure(state, target=None, exposure_max=None,
+                            max_shots=None, skip=None, quiet=False):
+    """闭环把画面亮度调到目标值（换灯/换场地后不必手改常数）
+
+    动机（2026-09-13 实测）：曝光写死 100 在上一种光照下正好（过曝 1%），
+    换灯后整帧均亮只剩 7~22，白点估不出、归一化不生效、布局扫描三轮未定。
+    做法：先在当前 (曝光, 增益) 下测均亮 → 按比例换算曝光（亮度对曝光近似
+    线性）→ 复测；曝光顶到上限还不够就抬增益（0/16/32/48/63 五档）。
+    只调 (exposure_time_absolute, gain)，**不动白平衡/对焦**。
+    返回 info：{ok, exposure, gain, mean, clip, shots, log}
+    """
+    from core.camera_config import CAMERA_WIDTH, CAMERA_HEIGHT   # noqa: F401
+    target = CAM_TARGET_MEAN if target is None else float(target)
+    exposure_max = CAM_EXPOSURE_MAX if exposure_max is None else int(exposure_max)
+    max_shots = CAM_CALIB_MAX_SHOTS if max_shots is None else int(max_shots)
+    skip = CAM_CALIB_SKIP if skip is None else int(skip)
+    info = {"ok": False, "exposure": None, "gain": None, "mean": None,
+            "clip": None, "shots": 0, "log": []}
+    if os.name != "posix" or not os.path.exists(CAM_V4L2_DEVICE):
+        info["log"].append("非 Linux 或无相机设备，跳过自动曝光标定")
+        return info
+
+    def _shot():
+        info["shots"] += 1
+        return state.capture_frame()
+
+    gain = CAM_GAIN_START
+    exposure = int(info["exposure"] or CAM_EXPOSURE_ABS)
+    apply_camera_controls({"auto_exposure": 1, "gain": gain,
+                           "exposure_time_absolute": exposure}, quiet=quiet)
+    best = None
+    for _ in range(max_shots):
+        frame = _shot()
+        mean, clip = measure_frame_brightness(frame)
+        info["log"].append(f"曝光 {exposure} 增益 {gain} → 均亮 {mean:.1f}、"
+                           f"过曝 {clip:.1%}")
+        if best is None or (abs(mean - target) < abs(best[0] - target)):
+            best = (mean, clip, exposure, gain)
+        if clip > CAM_CLIP_MAX:
+            exposure = max(1, int(exposure * 0.6))
+        elif mean < target * 0.92:                 # 偏暗：先加曝光，到顶再加增益
+            if exposure < exposure_max:
+                exposure = min(exposure_max, max(exposure + 1,
+                                                 int(exposure * target / max(mean, 1.0))))
+            else:
+                nxt = [g for g in CAM_GAIN_STEPS if g > gain]
+                if not nxt:
+                    break
+                gain = nxt[0]
+        elif mean > target * 1.12:                 # 偏亮：先降曝光，曝光见底再降增益
+            if exposure > 60:
+                exposure = max(60, int(exposure * target / max(mean, 1.0)))
+            else:
+                prev = [g for g in CAM_GAIN_STEPS if g < gain]
+                if not prev:
+                    break
+                gain = prev[-1]
+        else:
+            break
+        apply_camera_controls({"gain": gain, "exposure_time_absolute": exposure},
+                              quiet=quiet)
+    if best is not None:
+        mean, clip, exposure, gain = best
+        apply_camera_controls({"gain": gain, "exposure_time_absolute": exposure},
+                              quiet=quiet)
+        info.update({"exposure": exposure, "gain": gain, "mean": mean,
+                     "clip": clip, "ok": clip <= CAM_CLIP_MAX
+                     and mean >= target * 0.5})
+    if not quiet:
+        print(f"[相机] 自动曝光标定{'成功' if info['ok'] else '未达目标'}："
+              f"曝光 {info['exposure']} 增益 {info['gain']} "
+              f"均亮 {info['mean']:.1f} 过曝 {info['clip']:.1%}"
+              f"（{info['shots']} 张）")
+    return info
+
 
 
 def lock_camera_controls(device=None, wb_k=None, exposure=None, focus=None,

@@ -171,6 +171,11 @@ DIGIT_V_MAX = 60              # "黑字"判据（归一化工作帧：黑字 V�
 DIGIT_EVIDENCE_MIN = 0.012    # 有证据判据（软，供 _see_target 优先择取）
 DIGIT_EVIDENCE_MAX = 0.22     # 硬门上限：占比过大 = 大片阴影/深色物件
 DIGIT_EVIDENCE_MIN_AREA = 5000   # 面积下限（工作分辨率）：低于此判不了，免检
+# 面积理智门：*单块面板*不可能占到 35% 画幅。暗场里背景噪声能被蓝色窗口吃成
+# 「半屏蓝块」（实测 68 万工作像素、中心都跑到画幅外），这种观测会把格阵拟合
+# 直接打挂。导航的到达判据用 color_ratio（不经此门），靠近时目标面板实测最多
+# 也只占约 13% 画幅，故 35% 不会误杀。
+MAX_AREA_FRAME_FRAC = 0.35
 
 # 形状仲裁（C3）：**只在颜色有歧义时**才允许用数字形状改判
 # ---------------------------------------------------------------------
@@ -262,6 +267,10 @@ WHITE_V_REL = 0.70          # 白参考亮度下限 = 该比例 × 亮参考分�
 WHITE_S_FALLBACK = 120      # 兜底一的饱和度上限（白板强偏色后 S≈100~115）
 WHITE_V_FALLBACK_REL = 0.55
 WHITE_FALLBACK_MIN_FRAC = 0.01
+# 兜底二（暗场，2026-09-13 换灯实测新增）：绝对亮度下限让到 40、相对下限 0.6，
+# 只在"整帧变暗导致前两条一个样本都选不出"时生效（否则行为与原来完全一致）。
+WHITE_V_MIN_DIM = 40
+WHITE_V_DIM_REL = 0.60
 
 
 def estimate_white_bgr(frame):
@@ -299,6 +308,19 @@ def estimate_white_bgr(frame):
     frac2 = n / float(m.size) if m.size else 0.0
     if n >= WHITE_MIN_SAMPLES and frac2 >= WHITE_FALLBACK_MIN_FRAC:
         return np.median(small[m].astype(np.float64), axis=0), frac2, "bright"
+    # 兜底二：**暗场**。相机参数是场地相关的（曝光锁定值来自上一场的光照），
+    # 换灯后整帧变暗时前两条会被"绝对亮度下限 120"整条挡住 ⇒ 白点估不出、
+    # 归一化不生效、彩色面板只剩最亮的那个还能匹配（真机实测：换灯后 30 帧
+    # 只见数字 5、布局扫描三轮未定）。这里只把**绝对下限**让到
+    # WHITE_V_MIN_DIM，相对亮度仍按全场 95 分位取——"画面里最亮的低饱和
+    # 大块区域"这一语义不变，只是允许它整体变暗。
+    v_floor3 = max(float(WHITE_V_MIN_DIM),
+                   WHITE_V_DIM_REL * bright_ref)
+    m = (hsv[:, :, 1] < WHITE_S_FALLBACK) & (hsv[:, :, 2] > v_floor3)
+    n = int(np.count_nonzero(m))
+    frac3 = n / float(m.size) if m.size else 0.0
+    if n >= WHITE_MIN_SAMPLES and frac3 >= WHITE_FALLBACK_MIN_FRAC:
+        return np.median(small[m].astype(np.float64), axis=0), frac3, "dim"
     # 不再往"纯最亮"退：合成/无白底场景里最亮的往往是彩贴纸本身（实测合成帧
     # 灰底 V=90、面板 V=200 ⇒ 纯最亮会把面板当白点，整帧被带偏、误检丛生）。
     # 找不到可信白点就**不归一化**（返回原帧），由现场锁曝光兜底。
@@ -735,6 +757,9 @@ class NineGridDetector:
                        or x + w > self.work_width - border_px
                        or y + h > work_h - border_px)
             if drop_border and clipped:
+                continue
+            if area > MAX_AREA_FRAME_FRAC * self.work_width * work_h:
+                self.last_rejected.append((color, (x, y, w, h), 0.0, "too_big"))
                 continue
             # 数字证据门（C1）：色块内没有黑字且不贴边 ⇒ 场内同色杂物
             ev = digit_evidence(hsv[:, :, 2], hull, (x, y, w, h))

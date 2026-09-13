@@ -24,13 +24,16 @@ import time
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 
-from core.robot_core import RobotState, lock_camera_controls
+from core.robot_core import (RobotState, lock_camera_controls,
+                                auto_calibrate_exposure,
+                                CAM_AUTO_EXPOSURE_ENABLED)
 from levels.nine_grid import NineGridLevel, PITCH_NAV, TOTAL_TIME_BUDGET_S
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="九宫格布局扫描（单阶段）")
-    ap.add_argument("--no-lock", action="store_true", help="跳过相机锁定")
+    ap.add_argument("--no-lock", action="store_true",
+                    help="跳过相机锁定与自动曝光标定")
     ap.add_argument("--budget", type=float, default=600.0, help="本阶段时间预算(s)")
     ap.add_argument("--out", default="field_layout_scan.json")
     args = ap.parse_args(argv)
@@ -44,15 +47,38 @@ def main(argv=None):
             print(f"[扫描] 读回不一致: {lock_info['mismatch']}")
 
     state = RobotState()
+    if CAM_AUTO_EXPOSURE_ENABLED and not args.no_lock:
+        calib = auto_calibrate_exposure(state)
+        lock_info["auto_exposure"] = {k: calib[k] for k in
+                                      ("ok", "exposure", "gain", "mean", "clip")}
     level = NineGridLevel(state)
     level.deadline = time.time() + args.budget
-    # 拍照计数：layout_scan 不走 _count_frame，故在 capture_frame 上挂个钩子
+    # 拍照计数 + **逐帧光照记录**：layout_scan 不走 _count_frame，故在
+    # capture_frame 上挂钩子。光照记录是"换灯后还能不能认色"的直接证据
+    # （白点/增益/过曝比例），出问题时可据此判断是光源变了还是算法退化了。
     shots = {"n": 0}
+    norms = []
+
+    def _info_of(frame):
+        try:
+            from vision.nine_grid_detector import normalize_illumination
+            _out, info = normalize_illumination(frame)
+            return {"white_bgr": None if info.get("white_bgr") is None
+                    else [round(float(v)) for v in info["white_bgr"]],
+                    "gain": [round(float(g), 3) for g in info.get("gain", [])],
+                    "method": info.get("white_method"),
+                    "clip_frac": round(float(info.get("clip_frac", 0.0)), 4)}
+        except Exception as e:                  # noqa: BLE001
+            return {"error": f"{type(e).__name__}: {e}"}
+
     _orig_capture = state.capture_frame
 
     def _counting_capture(*a, **kw):
         shots["n"] += 1
-        return _orig_capture(*a, **kw)
+        frame = _orig_capture(*a, **kw)
+        if frame is not None:
+            norms.append(_info_of(frame))
+        return frame
 
     state.capture_frame = _counting_capture
     t0, err, rc = time.time(), None, 0
@@ -79,6 +105,7 @@ def main(argv=None):
         "cell_conflict": sorted(int(v) for v in (level.cell_conflict or ())),
         "frames": dict(level.phase_frames or {}),
         "photos": int(shots["n"]),
+        "lighting": norms,
         "elapsed_s": round(dt, 1),
         "lock": {"ok": lock_ok, "ctrls": lock_info.get("ctrls"),
                  "mismatch": lock_info.get("mismatch"),
@@ -102,6 +129,20 @@ def main(argv=None):
         print(f"失败（rc={rc}）: {err}")
     print(f"拍照 {out['photos']} 张，耗时 {dt:.0f}s（预算 {args.budget:.0f}s / 全局 "
           f"{TOTAL_TIME_BUDGET_S:.0f}s）")
+    if norms:
+        wps = [n["white_bgr"] for n in norms if n.get("white_bgr")]
+        clips = [n.get("clip_frac", 0.0) for n in norms]
+        gains = [g for n in norms for g in n.get("gain", [])]
+        meth = sorted({n.get("method") for n in norms if n.get("method")})
+        if wps:
+            print(f"光照: 白点 {wps[0]} → {wps[-1]}（{len(wps)} 帧都有白点，"
+                  f"判据 {meth}）")
+        print(f"      过曝 最大 {max(clips):.1%}"
+              + "（>5% 建议重扫相机参数：tools/field_camera_sweep.py）"
+              if max(clips) > 0.05 else f"      过曝 最大 {max(clips):.1%}（可接受）")
+        if gains:
+            print(f"      归一化增益范围 {min(gains):.3f}~{max(gains):.3f}"
+                  "（1.0 附近=光源本来就近中性）")
     print(f"结论已写 {args.out}")
     return rc
 

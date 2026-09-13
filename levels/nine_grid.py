@@ -86,7 +86,9 @@ from core.ground_homography import (
     GroundHomography, grid_cell_center, cell_index,
     CAMERA_TO_BODY_FORWARD_CM, GRID_CELL_CM,
 )
-from core.robot_core import RobotState, lock_camera_controls
+from core.robot_core import (RobotState, lock_camera_controls,
+                                auto_calibrate_exposure,
+                                CAM_AUTO_EXPOSURE_ENABLED)
 from vision.nine_grid_detector import NineGridDetector, ID_TO_COLOR
 
 # 相机光心高度缺省值：来自 camera_config（机器人自身属性）；layout_scan
@@ -715,6 +717,10 @@ class NineGridLevel:
         # 重新测光/白平衡造成的跨帧漂移（现场实测白点 R/B 差 16% → 粉 7 漏检）。
         # 锁不上不影响继续：归一化仍能兜（见 core.robot_core.lock_camera_controls）。
         lock_camera_controls()
+        # 自动曝光闭环：把画面均亮拉到目标值。**换灯/换场地后不必手改常数**
+        # （实测曝光写死 100 时换灯后均亮只剩 7~22，归一化失效、扫描三轮未定）。
+        if CAM_AUTO_EXPOSURE_ENABLED:
+            auto_calibrate_exposure(self.state)
         self.layout_scan()
         print(f"[布局] 数字→格: {self.digit_cell}  "
               f"仲裁冲突格: {sorted(self.cell_conflict)}")
