@@ -79,12 +79,27 @@ MULTIVIEW_EXTRINSICS_PATH = os.path.join(RESULT_DIR, "multiview_extrinsics.json"
 # 曝光默认**不锁**（CAM_LOCK_EXPOSURE=False）：亮度漂移已由
 # vision.nine_grid_detector.normalize_illumination 归一化消除；而手动曝光在
 # 新场地上有欠曝/过曝风险，且过曝是不可逆的信息丢失。需要时再开。
+#
+# ===== 2026-09-13 场地实测更新（机器人上场地后逐项扫出来的）=====
+# 自动曝光（auto_exposure=3）在该场地会把白板打到过曝 21~54%，橙/黄贴纸被
+# 洗成白色 → 12 帧里橙 0 次、黄 0 次检出；改手动曝光后稳定：
+#   曝光 60/100/150/200/250 → 过曝 0%/0%/59%/57%/21%，检出 5/7/2/2/3
+#   ⇒ 取 exposure_time_absolute=100（过曝 ≈1.3%，连拍 6 张均亮 143.4 完全一致）
+# 白平衡温度扫描（固定曝光 100，看白板是否中性，R/B 越接近 1 越准）：
+#   2800K/3400K 全画面偏色（白点估不出）→ 4000K R/B 0.54 → 4600K 0.60
+#   → **5200K 0.92（判据回到"低饱和"）** → **5800K 0.96、白点均值 162≈归一化目标**
+#   → 6500K 1.28 偏蓝   ⇒ 取 5800K（原 4000K 是上一场地的值，在本场地太暖）
+# 对焦：`focus_absolute` 写入被驱动拒绝（Permission denied，值停在默认 270）；
+# 有效的只有 `focus_automatic_continuous=0`（关掉连续对焦、锁在当前焦平面）。
+# 故 CAM_FOCUS_ABS 记为实际生效值 270；写不进去不影响（不再来回拉风箱）。
 CAM_LOCK_CONTROLS_ENABLED = True
-CAM_LOCK_EXPOSURE = False
+CAM_LOCK_EXPOSURE = True
 CAM_V4L2_DEVICE = "/dev/video0"
-CAM_WB_TEMPERATURE_K = 4000
-CAM_EXPOSURE_ABS = 313
-CAM_FOCUS_ABS = 166
+CAM_WB_TEMPERATURE_K = 5800
+CAM_EXPOSURE_ABS = 100
+CAM_FOCUS_ABS = 270
+# 现场复扫（换场地/换灯后照做）：python tools/field_camera_sweep.py
+# 判据：白点 R/B 最接近 1、过曝 <5%、同一机位连拍均亮一致。
 _CAM_LOCK_DONE = None      # 已应用的配置（同一次运行内不重复设置）
 
 
@@ -114,6 +129,15 @@ def build_camera_lock_cmd(device, ctrls):
     """设置命令（一次调用设完全部控制，避免中间态被 fswebcam 抢到）"""
     pairs = ",".join(f"{k}={v}" for k, v in ctrls)
     return f"v4l2-ctl -d {device} -c {pairs}"
+
+
+def build_camera_lock_cmds(device, ctrls):
+    """**逐条**设置命令 —— 真机实测（2026-09-13）：合成一条 `-c k1=v1,k2=v2`
+    时，只要其中一个控制没有写权限（`focus_absolute: Permission denied`），
+    v4l2-ctl 整条返回 255、**其余控制也不会被设置**（白平衡就白锁了）。
+    逐条设置后单点失败不影响其它控制。
+    """
+    return [(k, v, f"v4l2-ctl -d {device} -c {k}={v}") for k, v in ctrls]
 
 
 def build_camera_readback_cmd(device, ctrls):
@@ -147,7 +171,7 @@ def lock_camera_controls(device=None, wb_k=None, exposure=None, focus=None,
     device, ctrls = camera_lock_controls(device, wb_k, exposure, focus,
                                          lock_exposure)
     info = {"device": device, "ctrls": dict(ctrls), "applied": False,
-            "readback": {}, "mismatch": [], "reason": ""}
+            "readback": {}, "mismatch": [], "failed": [], "reason": ""}
     if not CAM_LOCK_CONTROLS_ENABLED and not force:
         info["reason"] = "锁定已关闭(CAM_LOCK_CONTROLS_ENABLED=False)"
         return False, info
@@ -159,16 +183,24 @@ def lock_camera_controls(device=None, wb_k=None, exposure=None, focus=None,
     if os.name != "posix" or not os.path.exists(device):
         info["reason"] = f"非 Linux 或无 {device}（PC 开发环境按未锁处理）"
         return False, info
-    try:
-        r = subprocess.run(build_camera_lock_cmd(device, ctrls), shell=True,
-                           capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError) as e:
-        info["reason"] = f"v4l2-ctl 调用失败: {e}"
+    failed = []
+    for name, want, cmd in build_camera_lock_cmds(device, ctrls):
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                               timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:
+            failed.append(f"{name}: 调用失败({e})")
+            continue
+        if r.returncode != 0:
+            failed.append(f"{name}: rc={r.returncode} "
+                          f"{r.stderr.strip().splitlines()[-1][:60] if r.stderr.strip() else ''}")
+    info["failed"] = failed
+    info["applied"] = len(failed) < len(ctrls)
+    if not info["applied"]:
+        info["reason"] = "全部控制设置失败: " + "; ".join(failed)
         return False, info
-    if r.returncode != 0:
-        info["reason"] = f"v4l2-ctl 返回 {r.returncode}: {r.stderr.strip()[:200]}"
-        return False, info
-    info["applied"] = True
+    if failed:
+        info["reason"] = "部分控制设置失败: " + "; ".join(failed)
     try:
         rb = subprocess.run(build_camera_readback_cmd(device, ctrls),
                             shell=True, capture_output=True, text=True,
@@ -182,10 +214,11 @@ def lock_camera_controls(device=None, wb_k=None, exposure=None, focus=None,
             info["mismatch"].append(f"{k}: 期望 {want} 实读 {got[k]}")
     _CAM_LOCK_DONE = dict(ctrls)
     if not quiet:
-        print(f"[相机] 已锁定 {device}: "
+        print(f"[相机] 锁定 {device}: "
               + ", ".join(f"{k}={v}" for k, v in ctrls)
+              + (f"；失败 {failed}" if failed else "")
               + (f"；读回不一致 {info['mismatch']}" if info["mismatch"] else "；读回一致"))
-    return True, info
+    return info["applied"], info
 
 
 # =====================================================================

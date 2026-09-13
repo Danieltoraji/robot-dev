@@ -17,8 +17,8 @@ sys.path.insert(0, os.path.dirname(_HERE))
 
 import core.robot_core as rc
 from core.robot_core import (
-    camera_lock_controls, build_camera_lock_cmd, build_camera_readback_cmd,
-    parse_v4l2_values, lock_camera_controls,
+    camera_lock_controls, build_camera_lock_cmd, build_camera_lock_cmds,
+    build_camera_readback_cmd, parse_v4l2_values, lock_camera_controls,
 )
 
 
@@ -35,9 +35,16 @@ def test_command_construction():
     assert "white_balance_temperature=" in cmd and "," in cmd
     rb = build_camera_readback_cmd(device, ctrls)
     assert "--get-ctrl=" in rb
+    # 逐条命令：真机实测批量 `-c a=1,b=2` 中任一控制无写权限 ⇒ 整条返回 255、
+    # 其余控制也不生效（`focus_absolute: Permission denied` 时白平衡白锁）
+    cmds = build_camera_lock_cmds(device, ctrls)
+    assert len(cmds) == len(ctrls)
+    assert [k for k, _v, _c in cmds] == names
+    assert all(" -c " in c and c.count("=") == 1 for _k, _v, c in cmds)
     # 曝光默认不锁，显式要求时才加入
     _d, c2 = camera_lock_controls(lock_exposure=True)
-    assert ("auto_exposure", 1) in c2 and ("exposure_time_absolute", 313) in c2
+    assert ("auto_exposure", 1) in c2
+    assert ("exposure_time_absolute", rc.CAM_EXPOSURE_ABS) in c2
     _d, c3 = camera_lock_controls(lock_exposure=False)
     assert not any(k.startswith("exposure") or k == "auto_exposure"
                    for k, _v in c3)

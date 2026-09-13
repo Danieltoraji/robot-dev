@@ -63,13 +63,13 @@ COLOR_THRESHOLDS = {
 #     （写 models/nine_grid/palette.json，运行时优先读它，失败回退本表）。
 USE_PALETTE = True
 PALETTE = {          # color: (h_lo, h_hi, s_lo%, v_lo%)；h_lo > h_hi = 环绕窗口
-    "red":    (174, 3, 25.0, 25.0),     # 环绕另一段 (0, 3] 见 _palette_ranges
-    "orange": (4, 16, 25.0, 25.0),
-    "yellow": (17, 42, 25.0, 25.0),
-    "green":  (43, 88, 25.0, 19.7),
-    "blue":   (89, 113, 25.0, 25.0),
-    "purple": (114, 144, 25.0, 24.7),
-    "pink":   (145, 173, 10.6, 25.0),   # 粉贴纸本身饱和度低（实测 S 12~35%）
+    "red":    (176, 5, 25.0, 25.0),     # 环绕另一段 (0, 5] 见 _palette_ranges
+    "orange": (6, 15, 25.0, 25.0),
+    "yellow": (16, 42, 22.9, 25.0),
+    "green":  (43, 87, 25.0, 19.7),
+    "blue":   (88, 113, 25.0, 25.0),
+    "purple": (114, 143, 25.0, 25.0),
+    "pink":   (144, 175, 10.0, 25.0),   # 粉贴纸本身饱和度低（实测 S 12~35%）
 }
 PALETTE_JSON_PATH = os.path.join(PROJECT_ROOT, "models", "nine_grid",
                                  "palette.json")
@@ -179,13 +179,14 @@ DIGIT_EVIDENCE_MIN_AREA = 5000   # 面积下限（工作分辨率）：低于此
 #   - 歧义信号二：色块中位 H 距本窗口边界 < AMBIG_H_MARGIN_DEG（红↔橙只差 7°，
 #     现场光照漂移足以把红贴纸推到橙窗口边）。
 #   - 裁决依据：现场帧自建的数字模板（tools/gen_ninegrid_digit_templates.py）。
-#     留一实测（41 样本）：匹配"间隔"≥0.20 时 20/20 正确（覆盖 20/41），
-#     ≥0.15 时 24/25；故门限取 0.20——宁可不改判，也不要用形状把对的颜色
-#     改错（旧 SVM 在现场帧与颜色一致率仅 23%，等于用噪声否决真值）。
+#     留一实测（2026-09-13，25 帧 71 样本）：间隔 ≥0.30 时 24/24 正确（覆盖
+#     24/71），≥0.20 时 35/37（95%），≥0.15 时 43/45（96%）。取 0.30——
+#     改判颜色是"能翻盘"的动作，宁可少判也不要用形状把对的颜色改错
+#     （旧 SVM 在现场帧与颜色一致率仅 23%，等于用噪声否决真值）。
 SHAPE_ENABLED = True
 SHAPE_TEMPLATE_PATH = os.path.join(PROJECT_ROOT, "models", "nine_grid",
                                    "digit_templates.npz")
-SHAPE_OVERRIDE_MIN_CONF = 0.20
+SHAPE_OVERRIDE_MIN_CONF = 0.30
 AMBIG_IOU = 0.5
 AMBIG_H_MARGIN_DEG = 4.0
 # 墨迹（黑色数字）提取参数：形状仲裁与模板生成共用，保证训练/推理同一链路
