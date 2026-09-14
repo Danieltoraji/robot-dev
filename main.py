@@ -29,7 +29,10 @@ from levels import stairs_hurdle as level_stairs_hurdle
 #   - 把详细日志输出到 archive/result/real_trace_*.txt
 #   - 把定位轨迹保存为 archive/result/real_trajectory_*.png
 # False 时保持原有真机行为，不引入额外依赖。
-TRACE_ENABLED = False
+# 2026-09-11 由 False 改为 True：数字宫格真机跑完整局后暴露出"终点不停/找 3
+# 异常/踩不到微动开关"三类问题，定位这些都只能靠逐动作 trace（PC 仓库是唯一
+# 真源，机器人侧随后同步）。trace 只是额外写两个文件，不影响控制流。
+TRACE_ENABLED = True
 
 
 # =====================================================================
