@@ -125,8 +125,10 @@ def save_trajectory_png(recorder, level, path=None):
     # 赛道外框
     ax.add_patch(Rectangle((0, 0), 100, 100, fill=False, edgecolor="black", linewidth=2))
 
-    # 墙壁
-    for rect in level.WALLS:
+    # 墙壁（关卡模块可选提供 WALLS/ROUTE：数字宫格这类无墙无路点的关卡没有，
+    # 用 getattr 兜底——2026-09-13 真机 trace 就是因为 level.WALLS 报
+    # "module 'levels.nine_grid' has no attribute 'WALLS'" 而丢轨迹图）
+    for rect in getattr(level, "WALLS", []):
         x_min, x_max, y_min, y_max = rect
         ax.add_patch(Rectangle(
             (x_min, y_min), x_max - x_min, y_max - y_min,
@@ -134,7 +136,7 @@ def save_trajectory_png(recorder, level, path=None):
         ))
 
     # 路点
-    for i, wp in enumerate(level.ROUTE, 1):
+    for i, wp in enumerate(getattr(level, "ROUTE", []), 1):
         if wp.stop > 0:
             ax.plot(wp.pos[0], wp.pos[1], "bs", markersize=9, markeredgecolor="black")
             ax.annotate(f"停{i}", (wp.pos[0], wp.pos[1]), textcoords="offset points",
@@ -147,7 +149,7 @@ def save_trajectory_png(recorder, level, path=None):
             ax.plot(wp.pos[0], wp.pos[1], "g.", markersize=5)
 
     # AprilTag
-    for tid, pts in level.tag_poses.items():
+    for tid, pts in getattr(level, "tag_poses", {}).items():
         p = pts[0][:2]
         ax.plot(p[0], p[1], "g^", markersize=7)
         ax.annotate(f"Tag{tid}", (p[0], p[1]), textcoords="offset points",
