@@ -13,9 +13,10 @@ docs/关卡算法/数字宫格攻略.md §3.2b）：
         对角线交点失效（实测偏差 150~800px），改用颜色掩膜凸包面积质心。
   导航  **v3 视觉伺服（默认）**：地板会形变 → 机体俯仰/相机高度大幅变化
         （按 ±15° 考虑，可见地面带 4 倍摆动），因此导航主链只用相对量：
-        搜索（头部五档 + 按死推提示转向 / 盲走）→ 对准（像素 yaw，死区 8°）
-        → 接近（目标框宽 ≥820px ≈ 进 50cm）→ 低头到达（颜色占比**峰值跟踪**：
-        跌破峰值 55% 即判压过该格）→ 蹭步确认 → 死推位姿锚到格心。
+        搜索（头部五档 + 按死推提示转向 / 盲走）→ 对准（像素 yaw，小转角
+        闭环、死区 3.5°）→ 接近（目标框宽 ≥920px ≈ 进 35cm）→ 低头到达
+        （颜色占比**峰值跟踪 + 分段前压**：跌破峰值 55% 即判压过该格）→
+        蹭步确认 → 死推位姿锚到格心。
         地图（布局扫的 digit_cell + 动作模型死推位姿）只作"往哪转/盲走多远"
         的粗提示；GN 地图定位降级为可选校正（USE_MAP_CORRECTION，失败只记
         日志、不触发恢复链）。现场应急：VIS_NAV_ENABLED=False 回 v2 地图路径。
@@ -31,10 +32,11 @@ docs/关卡算法/数字宫格攻略.md §3.2b）：
         `_act` 硬门拒绝）。转向用「在线 EMA 估计小转实际角（误差源 = 像素
         yaw 或地图方位），连续 2 批 <0.5°/次→升级大转」+ 大转防振荡。
   容错  卡滞检测（框宽不涨/定位不改善 → 后退脱困）、目标丢失（头部扫找回
-        → 回退半步 → 重搜）、分格时间预算 + 全局看门狗 + 预算不足自动收缩
-        低头段迭代、到达确认（颜色出现→消失主判 + 蹭步压微动开关）。
-        绝不跳格：跳格断 70 分计分链（ESP32 顺序错只日志不断链，借道
-        穿越其他面板计分安全）。
+        → 回退半步 → 重搜）、分格时间预算 + **单格硬熔断**（VIS_CELL_HARD_*：
+        时间/拍照/动作三重护栏，任一触发即"本格记未确认、立即返回"）
+        + 全局看门狗 + 预算不足自动收缩低头段迭代、到达确认（颜色出现→
+        消失主判 + 蹭步压微动开关）。绝不跳格：跳格断 70 分计分链（ESP32
+        顺序错只日志不断链，借道穿越其他面板计分安全）。
 
 到达确认为什么不改回"低头色占比绝对阈值"：参考实现的每色阈值（0.002~0.17）
 在本机俯角下判不到（实测峰值仅 0.13）——v3 用**尺度无关**的"峰值跟踪 + 相对
@@ -187,17 +189,58 @@ GN_RMS_OK_PX = 3.0        # 多起点早停阈值：RMS 已足够好就不再试
 VIS_NAV_ENABLED = True          # False → 退回 v2 地图路径（现场应急开关）
 USE_MAP_CORRECTION = False      # True → 每格尝试一次地图 GN 校正（失败只打日志）
 CAMERA_FOV_H_DEG = 60.0         # yaw = -(dx/W)*FOV：名义水平视场，仅作伺服增益
-VIS_ALIGN_TOL_DEG = 8.0         # 对准死区（参考 epsilon=8）
+# 对准死区 = **一个真实动作分辨率**（2026-09-13 真机"在死区里打转"复盘）：
+# 现场实测小转一次 ≈10°（目视；打滑本就大，不可能更准），而旧死区收到 3.5°
+# **小于一个步长** → 每轮都规划 1 步、每步过冲 6~10°、永远进不了死区：
+#     yaw +4° →（转 1 步，实际 -10°）→ -6° →（转 1 步）→ +4° → … 无限振荡
+# 6 轮后对准放弃 → 回到搜索再转 → 现场看到的就是"在死区莫名其妙打转"，
+# 最后转向叠加盲走把机器人带出场地（2026-09-13 手工重跑实录）。
+# 结论：**死区必须 ≥ 一个步长**（12° ≈ 10° + 打滑裕量），不追求度数精度。
+# 也试过"用在线单步估计自适应取死区"（clip(1.2×估计, 4°, 12°)）：仿真里小转被
+# 地面吞掉后估计崩到 0.8°，死区跟着收到 4° → 与 22° 大转步长严重失配 → 反而
+# 把标称场景（无变形的基线）打挂（面板5 未确认）。**现场只有一个可靠数字：
+# 小转一步 ≈10°，所以死区就取一个步长，不自适应**。
+# 落点精度交给低头段的**厘米级横移纠偏**（VIS_ARRIVE_LAT_VIA_SIDESTEP：
+# 2.2cm/步）+ 920px 交棒点——角度的分辨率被机械步长卡死，位置的分辨率没有。
+VIS_ALIGN_TOL_DEG = 12.0        # 对准死区（≥ 一个真实小转步长）
 VIS_BIG_TURN_DEG = 30.0         # 大/小转角分界（参考 BIG_TURN_THRESHOLD=30）
+# **真机小转一步的真实角度（现场目视实测 ≈10°，2026-09-13；带打滑裕量取 11°）**
+# 只用于"死区 ≥ 一个步长"这条不变量的自检，**不参与任何控制计算**。
+# 为什么单独立成一个常量：现场唯一可靠的数字就是"小转一步多大"，而它决定了
+# 死区的下限。详见文件末尾 `_check_align_invariant()`——死区小于一个步长会产生
+# "规划 1 步 → 过冲 → 反向再规划 1 步 → 再过冲"的极限环（现场"在死区里莫名
+# 打转"+6 轮后对准放弃→回搜索再转）。这条不变量以前只写在注释里，结果死区被
+# 改成 3.5°（远小于 10° 的步长）而没有任何东西拦住——现在由代码强制。
+FIELD_SMALL_TURN_STEP_DEG = 11.0
+# 小转角闭环的规划下限（°/步）：规划步数 n = floor(|yaw| / max(EMA估计, 此值))。
+# 为什么需要下限：真机/仿真都出现"小转被地面吞掉"→ EMA 估计崩到 0.3°/次 →
+# n 被算成 SMALL_TURN_MAX_STEPS，一次请求 6 步 → 过冲 → 再算 n → 振荡。
+# 有下限后最多请求 6 小步（≈12°），且**每轮都重新拍帧复测 yaw**，过冲由下
+# 一轮吸收——收敛靠闭环，不靠这个常数准。
+VIS_SMALL_TURN_MIN_STEP_DEG = 0.8
 PANEL_WIDTH_CM = 28.0           # 色块宽（像素↔厘米换算基准；与 PANEL_HALF_CM 同源）
-# 到达触发：目标框宽（px）——"目标已进入 ~50cm"的**相对深度**代理。
-# 实测（sim，目标正前方，面板 28cm，pitch1200：150/100/80/60/50/40/30cm →
-# 376/530/624/742/808/880/954 px；pitch1040 同距离同量级）：
-# 本相机俯角大（有效 46~60°），地面点的**沿轴深度** ≈ d·cosθ + h·sinθ 在近距
-# 趋于 h·sinθ ≈ 36~43cm，所以框宽在 50cm 内几乎饱和（808→954）——框宽不是
-# 精细距离，只用来触发"交棒低头段"。精细到达由低头颜色"出现→消失"判定
-# （绝对几何关系，抗形变）。
-VIS_ARRIVE_BOX_PX = 820.0
+# 到达触发：目标框宽（px）——"目标已进入 ~35cm"的**相对深度**代理
+# （2026-09-11 由 820 收紧到 920，真机"踩不到微动开关"的根因之一）。
+# 换算（针孔 + 沿轴深度）：box_px ≈ fx·W / Z，Z = d·cosθ + h·sinθ
+#   fx = 1944.9px（camera_config 内参）、W = 28cm（色块宽；33cm 格含缝，
+#   现场口径"面板 33cm"含缝，用 33 算只差 15%）、θ = 有效俯角
+#   （pitch1200 = 名义27° + 安装18.5° = 45.5°）、h = 相机高 56cm
+#   （camera_config 现值 = 现场双帧拟合 + 布局扫运行时自标定；用户口径的
+#    39cm 是该文件的**历史粗值**，按 39 算 Z 会小 22cm、框宽虚大 ~40%）。
+#   目标在 35cm 处：Z = 35·cos45.5° + 56·sin45.5° = 24.5+39.9 = 64.4cm
+#   → 28cm 色块跨视轴的像宽 ≈ 1944.9×28/64.4 = 845px；实测 918px（色块自身
+#   有沿轴尺寸 + 斜视投影 + 径向畸变，实测比针孔估算大 ~8%）。
+# 实测（sim，目标正前方、h=56cm、安装偏移 18.5°，pitch1200 正对色块 bbox 宽）：
+#   60cm→744  50cm→810  45cm→845  40cm→880  35cm→918  32cm→940
+#   30cm→956（≤30cm 起 bbox 贴画幅下沿被裁切，框宽饱和失真 → 不能再细）
+# 取 920px ⇔ ≈35cm（离裁切拐点 32cm 还有 2cm 裕量）：
+#   - 旧值 820px ⇔ ≈48cm，交棒太早 → 低头段还得盲推 ~50cm 才压到格心，
+#     这 50cm 里横向偏差没人纠（旧代码只在"从未见到颜色"时纠横），
+#     压过去时偏半个开关区是常态 —— 这就是"踩不到按钮"；
+#   - 35cm 交棒把盲推距离砍掉 ~13cm，且 pitch1040 在 34cm 处色块仍完整可见
+#     （实测 box 902px、占比 0.0996、未裁切），低头段一开始就有视觉反馈。
+# 框宽不是精细距离（近距接近饱和），精细到达仍由低头颜色"峰值→回落"判定。
+VIS_ARRIVE_BOX_PX = 920.0
 VIS_BATCH_MAX_STEPS = 5         # 远距批量上限（5×2cm=10cm，仍是小步幅）
 # 低头到达判据（**尺度无关**版本，2026-09-11 实测重设计）：
 # 参考实现用每色绝对占比阈值（0.002~0.17），但我们的相机俯角大、色块占比峰值
@@ -209,24 +252,197 @@ VIS_COLOR_DROP_FRAC = 0.55      # 占比跌破峰值的此比例 → 判定压�
 # 实测（sim 红1/紫6 等）：占比曲线 0.06 → 峰值 0.13 → 平稳回落；取 0.55 是
 # "跌掉 45%" 的保守证据，同时避免机器人刚好停在峰值附近时判不出来。
 VIS_ARRIVE_MAX_ITERS = 30       # 低头段迭代上限（时间预算护栏）
-VIS_ARRIVE_FALLBACK_CM = 15.0   # 视觉判据走不完时，死推距离兜底（纵向 cm）
-VIS_ARRIVE_FALLBACK_LAT_CM = 12.0  # 同上（横向 cm）
-VIS_LAT_MAX_CORRECTIONS = 3     # 低头段横向小转纠偏次数上限（防抖动）
+# 迭代上限与"分段前压"对齐：前压封顶 45cm、精压段 2cm/帧 → 最多 23 帧，
+# 再加 VIS_LAT_MAX_CORRECTIONS(3) 次纠横帧 + 首帧 = 27 ≤ 30，够用不空转。
+# ---- 分段前压（2026-09-11 真机"踩不到微动开关"根因，重设计） ----
+# 旧实现的收尾是"一次死推兜底"：低头段迭代走完就直接看死推距离（≤15cm 即
+# 判成功）。它有三个毛病：① 15cm 已经大于微动开关有效区（±5.5cm）；② 这段
+# 盲推里**横向偏差不纠**（旧代码只在"从未见到颜色"时纠横，而交棒时颜色早就
+# 见到了）；③ 段中不复查颜色，压过头/没压到都看不出来。
+# 改为**分段前压 + 每段复查占比峰值**：每段只压 2~6cm，段间必拍一帧复查
+# （占比跌破峰值 → 立即判到位；占比还在涨 → 继续压；横向偏差超容差 → 先
+# 小幅纠横再压）。总前压距离封顶 VIS_ARRIVE_PRESS_MAX_CM。
+# 45cm 依据：新交棒点 ≈35cm（见 VIS_ARRIVE_BOX_PX）+ 面板半径 14cm ≈ 压过
+# 格心的理论上限；留 4cm 裕量，同时保证绝不会一路压出 1.5 格（1 格 33cm）。
+VIS_ARRIVE_PRESS_MAX_CM = 45.0
+VIS_ARRIVE_PRESS_COARSE_STEPS = 3   # 占比还在涨时每段步数（3×2cm=6cm，赶路）
+VIS_ARRIVE_PRESS_FINE_STEPS = 1     # 到峰/过峰后每段步数（2cm，精压）
+# ---- 到达证据门（2026-09-13 假到达根因修复，语义修正） ----
+# 背景（真机"到 2 之后找 3 异常"的正解所在，实测复现）：形变阶跃 +15° 场景里
+# 面板 3 **在离格心 89.5cm 处被判"到达"**。抓到的当帧证据是：
+#   ratio 0.0419 →（连续 3 帧）→ 0.0088  ⇒ 跌破峰值 55% ⇒ 判"压过"
+#   而那个"色块"观测是：clip、bbox 1100×380、hull 210162 —— **h/w = 0.35**，
+#   它只是恰好擦过画幅下沿的**细长条**，随后被 2 次横移推出画幅。
+# 也就是说：**"占比峰值→回落"描述的只是"整帧该颜色像素变少了"**，而颜色变少
+# 有三种完全不同的物理原因（① 机器人真的压过；② 目标从画幅侧边滑出；
+# ③ 另一个同色面板/地板色块离开视野），旧判据把 ②③ 也当成了 ①。
+# 修法：**"压过"必须由一次"面板级"的视觉证据支持** —— 即本次接近里至少有一帧
+# 看到过一块**形状与尺度都像面板**的同色区域（不是擦边条）。
+# 门限取值（三场景全量实测，见 tools/diag_arrive.py 的"证据"列）：
+#   合法到达（BASE/RW/STEP 全部确认格）: 峰值帧色块/画幅 ∈ [0.118, 0.184]
+#   唯一的假到达（STEP 面板3）          : 峰值帧色块/画幅 = 0.042（h/w = 0.35）
+# 取 0.08 = 落在分离带中间，两侧各留 ~2 倍余量（首版取 0.12 会把合法值 0.118
+# 误杀——**这个值必须贴着实测下界取，不能"取个好看的整数"**）。它是**投影
+# 不变量**（不依赖光照、不依赖相机俯仰、不依赖位姿），所以抗形变。
+# 为什么用"峰值帧的面板面积"而不是"当前帧的形状"：机器人**真正压上去**时
+# 色块面积会大到 12~18% 画幅，这一点与光照无关；而"形状"在临门那几帧会退化
+# 成画幅下沿的粗边（实测 clip、h/w 0.29~0.46），拿形状当判据会把合法到达
+# 一起误杀（首版就踩了这个坑）。所以证据取**占比峰值那一帧**的面板级面积：
+# 语义上与"峰值"同步，尺度上不引入新依赖。而"当前帧是不是擦边条"只用来否决
+# **横移控制**（见 _arrive_visual）——擦边条的凸包质心不是面板中心的合理估计。
+VIS_ARRIVE_EVIDENCE_MIN_ASPECT = 0.5   # 证据区域的 h/w 下限（擦边条 ≈0.35）
+VIS_ARRIVE_EVIDENCE_MIN_COVER = 0.08   # 证据区域面积占画幅比下限（假到达 0.042）
+# 前压物理合理性上限（与视觉判据**独立**的第二道防线）：交棒 ≈35cm（见
+# VIS_ARRIVE_BOX_PX）+ 一格 34cm ≈ 70cm —— 一次接近里前压超过这个距离，说明
+# "落下去的"是更远处的东西，不是目标被压过。它只用**本格内累积的前压量**
+# （每格到达后 _reanchor_pose 重置，格内只累积几步 2cm 的模型误差），
+# 因此**不受长期位姿漂移影响**，可以放心用来否决视觉判据。
+VIS_ARRIVE_PRESS_PLAUSIBLE_CM = 70.0
+# 死推兜底（15/12cm → 6/5cm）：只在**分段前压已执行完**之后使用。判据收紧到
+# 微动开关真实有效区：面板 33cm 的中心 2/3 ≈ ±5.5cm；蹭步（back3.2+forward2.0）
+# 净 -1.2cm，故纵向 ≤6cm、横向 ≤5cm 才算"蹭步后仍能压到开关"。旧值 15cm 会把
+# "离格心 15cm"也判成到位（真机现象：日志判成功、按钮没响、白丢 10 分）。
+VIS_ARRIVE_FALLBACK_CM = 6.0    # 视觉判据走不完时，死推距离兜底（纵向 cm）
+VIS_ARRIVE_FALLBACK_LAT_CM = 5.0   # 同上（横向 cm）
+# 死推到位即停压（2026-09-13 形变阶跃场景新增的**第二个独立判据**）：
+# "颜色峰值回落"在相机俯仰被地板形变改掉时会失效（deform 阶跃 +15° 实测：
+# 前压 44cm 占比仍不回落 → 该判据根本发不出声），而**格内相对死推距离**
+# （每格到达后由 _reanchor_pose 重置，格内只累积几步 2cm 的模型误差）与俯仰
+# 无关。任一判据成立即判到位，遥测里写清是哪一条（诚实遥测）。
+# 取 2.0cm：蹭步 = back3.2 + forward2.0（净 -1.2cm），停在格心前 2cm、蹭步后
+# 再退 1.2cm ⇒ 落点 ≈ 格心 -3.2cm，仍在开关有效区（±5.5cm）内。
+VIS_ARRIVE_STOP_FWD_CM = 2.0
+# 纠横：**每次最多 3 步（6.6cm），且"看到色块之后"也继续纠**（2026-09-13 实测）。
+# ① 执行方式用横移而不是小转：小转 2° 在 35cm 上前压只能挪 1.2cm，纠 7cm 要 6 次；
+# ② 窗口不限制在"看到色块之前"：形变随机游走场景实测，把窗口收回
+#    peak < VIS_COLOR_SEEN_MIN 后，面板 6/7 直接丢（占比已在涨、横偏还没纠完就
+#    开始前压 → 压出去时偏半个开关区）。这与现场"踩不到微动开关"同源。
+# dx_cm 是投影不变量，相机俯仰被形变改掉时会失真——所以次数有上限
+# （VIS_LAT_MAX_CORRECTIONS），纠过头由下一帧复测接管，不会一路横着走。
+VIS_LAT_MAX_CORRECTIONS = 4     # 低头段横向纠偏次数上限（防抖动）
 VIS_STALL_BOX_PX = 5.0          # 前进无效判据（参考 proximity_change<5）
 VIS_MIN_RATIO_CHANGE = 0.002    # 低头段占比变化下限（参考；紫6 取 0）
 VIS_LAT_TOL_CM = 3.0            # 低头段横向容差（由 dx/box_w*PANEL_WIDTH_CM 换算）
+# 纠横执行方式开关（可回退）：True = 横移（left/right_move，cm 级、直接消
+# 偏差）；False = 旧行为（turn_*_small_step，度级——小转 2° 在 35cm 上前压
+# 只能挪 35·sin2° ≈ 1.2cm，纠 10cm 偏差要 8 次，等于没纠）。
+# 换算式 dx_cm = (px − W/2)/box_w · PANEL_WIDTH_CM 是投影不变量（抗形变），
+# sim 实测精度：真值横偏 5/10cm（@30cm）→ 估 4.7/9.2cm。
+VIS_ARRIVE_LAT_VIA_SIDESTEP = True
+VIS_ARRIVE_LAT_MAX_STEPS = 3    # 单次纠横步数上限（3×2.2cm≈6.6cm，防纠过头）
 VIS_SEARCH_MAX_ROUNDS = 4       # 搜索轮次上限（每轮 = 头部五档扫 + 转一步）
 VIS_SEARCH_PROBE_STEPS = 3      # （保留）早前的前进探测步数
 VIS_SEARCH_BLIND_CM = 25.0      # 盲走判据：死推纵向大于此值时先走近再由视觉接管
 VIS_SEARCH_BLIND_MAX_STEPS = 10  # 单轮盲走上限（10×2cm=20cm）
+# 单格盲走**总量**上限（2026-09-13 真机"其它异常行动"）：搜索靠"死推提示"决定
+# 往哪转/往哪走，而提示来自死推位姿——位姿在长时间盲走+转向后会发散（仿真形变
+# 阶跃场景实测：一次失败的搜索盲走约 1m，随后位姿与真相差 111.9cm）。盲走越多
+# 位姿越离谱、下一格的提示越不可用：宁可本格记未确认，也不要在场上瞎走。
+# 60cm ≈ 2 格——目标在 2 格内都没进过视野，就不是"再走走"能解决的。
+VIS_SEARCH_BLIND_TOTAL_CM = 60.0
 VIS_SEARCH_MAX_FRAMES = 26      # 单格搜索拍照硬上限（时间预算护栏）
+# ---- 单格转向护栏（2026-09-13 真机"一直转 → 冲出场地"复盘，安全项） ----
+# 现场现象：机器人在某一格内持续转向（对准与搜索互相接管），最后转出场外。
+# 旧实现只在时间/拍照数/动作数上设了上限，而**转向是最便宜的动作**（不拍照、
+# 不耗帧）：没有"转够了就停"的概念，它可以在死区里空转很久。
+# 对策：单格累计**命令**转角（含搜索/对准/大转/纠横的所有 turn_*）超预算即
+# 熔断本格，并**拒绝执行**那最后一次转向（见 _act）——宁可本格记未确认。
+# 360° 依据（180° → 360°，2026-09-13 形变随机游走实测修正）：一格里**正常**
+# 的转向总量 = 对准 ≤60°（几个 10° 小步）+ 搜索换视角最多两轮大转
+# （每轮 ≤129°）≈ 320°；取"整圈" 360° 只拦"已经在原地打转"的情形，
+# 正常最坏路径不误伤（仿真单格实测最大 180°）。早期取 180° 会在"目标在身后、
+# 一轮搜索没扫到"时误熔断——deform 随机游走场景面板 4 就是这样丢的。
+VIS_TURN_BUDGET_DEG = 360.0     # 单格累计命令转角上限（一整圈）
+VIS_TURN_STALL_TURNS = 4        # 连续 N 次转向后 |yaw| 都没变小 → 打转判据
+VIS_ALIGN_MAX_FLIPS = 3         # 死区外左右来回摆 N 次 → 判定打转（直接收手）
+VIS_ALIGN_WORSEN_DEG = 5.0      # 单次转向把 |yaw| 转大超过此值 = "变差"
+# ---- 离场护栏（同上，安全项） ----
+# 场地是 1m×1m 台面（格心 16.7~83.3cm），起点在台面南侧 (50,-20)（见 __init__）。
+# 外框取"台面 ± 1 格"（33cm）：拦的是**彻底失控**（已经跑到台面外一整格），
+# 不是防跌落预案。为什么不收得更紧：死推位姿本身在形变下实测能偏 30cm+
+# （到达判据"颜色峰值回落"在俯仰 ±15° 时会误判，_reanchor_pose 又把位姿锚到
+# "以为"的格心——deform 随机游走实测落点残差最大 36.6cm）。真按 ±18cm 收，
+# 会拿一个已经不可信的位姿把好局误熔断（该场景实测：面板4 之后整局被误中止）。
+# **真正管住"继续动"的是上面三条**：转向预算 360°、停转/来回摆判据、前压封顶。
+# 越界即站立并**中止整局**（不再搜索下一格）——走下台面的代价远大于丢分。
+VIS_FIELD_X_CM = (-33.0, 133.0)
+VIS_FIELD_Y_CM = (-48.0, 133.0)
+
+
+def _check_align_invariant():
+    """导入时自检：**对准死区必须 ≥ 一个真实小转步长**（设计不变量）
+
+    为什么要在 import 时硬失败，而不是写在注释里：
+    2026-09-13 真机"在死区里莫名其妙打转、最后转出场地"的根因就是这个不变量
+    被破坏了——死区当时是 3.5°，而现场小转一步 ≈10°：
+        yaw +4° →（规划 1 步，实际转过 10°）→ yaw −6° →（再规划 1 步）→ +4° …
+    每轮都过冲、永远进不了死区；6 轮后对准放弃 → 回搜索再转 ⇒ 人看到的就是
+    "打转"。这不是"参数没调好"，是**两个常数之间的关系**错了，所以只有代码
+    断言能拦住下一次。
+
+    同时校验死区不能超过"大/小转角分界"（否则大转兜底永远用不上、精度失控）。
+    """
+    if VIS_ALIGN_TOL_DEG < FIELD_SMALL_TURN_STEP_DEG:
+        raise AssertionError(
+            f"VIS_ALIGN_TOL_DEG({VIS_ALIGN_TOL_DEG}°) < 现场小转一步"
+            f"({FIELD_SMALL_TURN_STEP_DEG}°，见该常量注释)：死区小于一个步长时"
+            "闭环必然过冲振荡（真机现场表现='在死区里打转'）。"
+            "要改小死区，必须先用现场日志证明小转一步真的变小了。")
+    if VIS_ALIGN_TOL_DEG > VIS_BIG_TURN_DEG:
+        raise AssertionError(
+            f"VIS_ALIGN_TOL_DEG({VIS_ALIGN_TOL_DEG}°) > "
+            f"VIS_BIG_TURN_DEG({VIS_BIG_TURN_DEG}°)：死区比大转分界还大，"
+            "对准会直接接受任意姿态")
+
+
+_check_align_invariant()
 
 # =====================================================================
 # 容错预算
 # =====================================================================
-TARGET_TIME_BUDGET_S = 110.0   # 单格预算（15min/7格 ≈ 128s，留裕量）
+TARGET_TIME_BUDGET_S = 110.0   # 单格软预算（15min/7格 ≈ 128s，留裕量）
 TOTAL_TIME_BUDGET_S = 780.0    # 全局看门狗 13min（给上下场留 2min）
-STALL_EPS_CM = 0.5             # 卡滞判据：前进单步距目标改善低于此
+# ---- 单格硬熔断（2026-09-11 真机"终点不停"后新增，安全项） ----
+# 现场现象：走到第 7 块面板后机器人仍在继续行动；日志显示它并没有"越界"，
+# 而是第 7 格一直没确认到位，于是"搜索→对准→接近→低头→蹭步"整条链在单格内
+# 反复重试，直到格预算耗尽——人看着就是"到了终点不停"。
+# 旧实现的问题：超时只在**子循环入口**判（`while time.time() < t_end`），而真机
+# 拍照 2~4s/张，一次 `_see_target_any`（头部五档）就是 10~20s，嵌套后单格实际
+# 能跑到 150s+，且过冲量随嵌套层数叠加。
+# 对策（三重护栏，任一触发即"本格记未确认、立刻返回"）：
+#   1) 时间：VIS_CELL_HARD_TIMEOUT_S，且在**每次拍照前**判（最细粒度，过冲
+#      最多 1 张照片 2~4s，而不是一个子循环 20s+）；
+#   2) 拍照数 VIS_CELL_HARD_FRAMES /   3) 动作数 VIS_CELL_HARD_ACTIONS：
+#      与时钟无关的确定性护栏——即使某环节出现"不拍照也不动作"的空转或
+#      "疯狂动作"的失控，也一定在有限步内退出（防新增死循环的保险丝）。
+# 取值依据（时间 70s）：
+#   - 总预算：全局 780s，布局扫真机实测 60~90s，剩 ~690s / 7 格 ≈ 98s/格；
+#     70s 给"搜索/对准/接近/低头"四段各留失败重试余量，同时保证**最坏情况**
+#     （7 格全熔断）90 + 7×70 = 580s < 780s，绝不拖过看门狗；
+#   - 实测（sim，7 格全程只花 ~13s，单格最长 ≈3s；见 test_nine_grid_sim 的
+#     [进度] 行）：70s 在仿真里永不触发 —— 它只对真机的拍照耗时生效。
+VIS_CELL_HARD_TIMEOUT_S = 70.0
+# 全局剩余时间按剩余格数分摊的比例（自适应收缩）：硬熔断 = min(70s,
+# 剩余时间/剩余格数 × 0.9)。这样即使每格都被熔断，累计也不会超过全局看门狗
+# （分摊是望远镜求和：Σ 剩余/剩余格数 = 剩余时间），0.9 再留 10% 余量。
+# 下限 45s：避免最后一格因前面拖时而只剩几秒、连一次搜索都跑不完。
+VIS_CELL_HARD_BUDGET_FRAC = 0.9
+VIS_CELL_HARD_TIMEOUT_MIN_S = 45.0
+VIS_CELL_HARD_FRAMES = 140     # 单格拍照硬上限（基线整局 206 张、单格最多 ~38 张）
+VIS_CELL_HARD_ACTIONS = 300    # 单格动作硬上限（基线整局 176 次、单格最多 ~55 次）
+# ---- 单格"拍照数"预算（与时间预算绑定，让真机不会被拍照耗光时间） ----
+# 为什么需要它：真机单张 = fswebcam 子进程 + 写盘 + cv2.imread ≈ 2~4s，而仿真是
+# 瞬时的。于是**同一份代码在两个环境里的时间可行性完全不同**：基线整局 206 张
+# 在仿真里 13s、在真机上是 7~14min（撞 780s 全局看门狗）；单格 70s 只够 ~23 张，
+# 而实测单格拍照需求（本机仿真）：基线最大 38、随机游走 42、阶跃 61 张。
+# 旧护栏 VIS_CELL_HARD_FRAMES=140 是死判据（永远不触发），完全拦不住这种失控。
+# 做法：把"本格还剩多少时间"换算成"还允许拍几张"——
+#     frame_budget = 本格硬预算秒数 / 单张耗时估计
+# 单张耗时估计由 state.capture_cost_s 提供：真机默认 3.0s（2~4s 的保守中值），
+# 仿真里 SimNineGridRobot 声明一个极小值，于是同一公式在两边都"等效可用"
+# （仿真下该闸实际上不会先于时间闸触发，但真机下它才是那个真正生效的闸）。
+VIS_CAPTURE_COST_S = 3.0       # 真机单张耗时保守估计（秒）——只影响拍照预算
+VIS_CAPTURE_COST_SAFETY = 0.9  # 再留 10% 裕量（动作/转头也吃时间）STALL_EPS_CM = 0.5             # 卡滞判据：前进单步距目标改善低于此
 STALL_CONSEC = 2               # 连续多次触发即卡滞
 RETRY_LIMIT = 2                # 单格 CONFIRM 失败重试上限
 ENTER_FAIL_LIMIT = 3           # 进入段连续定位失败上限
@@ -697,10 +913,160 @@ class NineGridLevel:
         # 到达确认状态（每格重置）
         self._target_seen = False   # 接近/进入段是否检出过目标数字面板
         self._loc_count = 0         # 本格定位次数（时间预算诊断）
+        # 转向/离场护栏状态（见 VIS_TURN_* / VIS_FIELD_*；每格重置）
+        self._cell_turn_cmd_deg = 0.0   # 本格累计**命令**转角（含搜索/对准/大转）
+        self._align_stall = 0       # 连续"转向后 |yaw| 没改善"次数（打转判据）
+        self._align_worsen = 0      # 连续"同号误差被转得更大"次数（方向自检）
+        self._align_flips = 0       # 死区外左右来回摆的次数（打转判据）
+        self._align_ladder = 0      # 打转升级阶梯档位（1 换大转 / 2 放弃对准 / 3 熔断）
+        self._align_sign = 1.0      # 对准转向符号；方向自检判反了取 -1（整局保持）
+        self._abort_level = None    # 非 None = 整局收手原因（离场护栏）
+        # 诚实遥测：本格"到达"的依据 / 交棒 yaw / 落点死推残差（不参与决策）
+        self._arrive_evidence = None
+        self._cell_handoff_yaw = None
+        self._cell_arrive_resid_cm = None
+        # 单格硬熔断状态（每格重置；见 VIS_CELL_HARD_* 常量）
+        self._cell_deadline = None  # 本格硬熔断时刻（None = 未开预算，不拦）
+        self._cell_t0 = None        # 本格开始时刻（日志用）
+        self._cell_frames = 0       # 本格拍照数
+        self._cell_actions = 0      # 本格动作数
+        self._cell_tripped = None   # 熔断原因（None = 未熔断）
+        self.cell_trips = {}        # {数字: 熔断原因}——未确认格的可观测记录
         # FSM 阶段标签（纯诊断：日志/仿真可视化用，不参与任何决策）
         self.phase = "INIT"
         # 逐阶段拍照计数（真机时间预算诊断：拍照 2~4s/张，7 格总预算 780s）
         self.phase_frames = {}
+        # 逐格**落点真值**留档：{digit: (离格心 cm, 来源)}。来源 "真值"（仿真有
+        # state.pos）或 "死推"（真机只有位姿估计）。用于回归时直接抓"假到达"
+        # ——视觉判 ✓ 但真值不在格上（2026-09-13 面板3 就是 89.5cm 判 ✓）。
+        self.panel_landing = {}
+
+    # =================================================================
+    # 单格硬熔断（安全项：宁可早停记未确认，也不要失控）
+    # =================================================================
+
+    def _cell_budget_begin(self, digit):
+        """开本格预算：返回**软预算** t_end（旧语义），并装好硬熔断闸
+
+        软预算（TARGET_TIME_BUDGET_S）= 各子循环入口的既有超时判据，保持
+        不变以最小化行为改动；硬熔断（VIS_CELL_HARD_*）= 新增的、在**每次
+        拍照前**都判的细粒度闸，先于软预算生效（70s < 110s），保证任何环节
+        卡住都在有限时间内退出。两者都取 min(self.deadline)，绝不越过全局
+        看门狗。
+        """
+        now = time.time()
+        if self.deadline is None:       # 直接调用 go_to_panel（测试/工具）时的兜底
+            self.deadline = now + TOTAL_TIME_BUDGET_S
+        t_soft = min(now + TARGET_TIME_BUDGET_S, self.deadline)
+        cells_left = max(1, 8 - int(digit))          # 含本格
+        share = (self.deadline - now) / cells_left * VIS_CELL_HARD_BUDGET_FRAC
+        hard = float(np.clip(share, VIS_CELL_HARD_TIMEOUT_MIN_S,
+                             VIS_CELL_HARD_TIMEOUT_S))
+        self._cell_deadline = min(now + hard, t_soft)
+        self._cell_t0 = now
+        self._cell_frames = 0
+        # 单格拍照预算：本格时间预算 ÷ 单张耗时估计（见 VIS_CAPTURE_COST_*）。
+        # 真机上它 ≈ 70/3×0.9 = 21 张——与"70s 里真能拍几张"一致，所以它才是
+        # 真机真正生效的那道闸；仿真里 state 声明单张≈0 → 该闸不会先于时间闸
+        # 触发，于是回归结果不受影响，而"真机跑不完"这件事在仿真里也能被看见。
+        self._cell_frame_budget = int(np.clip(
+            (self._cell_deadline - now)
+            / max(float(getattr(self.state, "capture_cost_s",
+                                VIS_CAPTURE_COST_S)), 1e-3)
+            * VIS_CAPTURE_COST_SAFETY,
+            1.0, float(VIS_CELL_HARD_FRAMES)))
+        self._cell_actions = 0
+        self._cell_tripped = None
+        # 转向护栏 + 诚实遥测（每格重置；_align_sign 是整局标定，刻意不重置）
+        self._cell_turn_cmd_deg = 0.0
+        self._align_stall = 0
+        self._align_worsen = 0
+        self._align_flips = 0
+        self._align_ladder = 0
+        self._arrive_evidence = None
+        self._cell_handoff_yaw = None
+        self._cell_arrive_resid_cm = None
+        print(f"[熔断] 面板{digit} 单格护栏：硬 {hard:.0f}s"
+              f"（软预算 {(t_soft - now):.0f}s，全局剩余 "
+              f"{self.deadline - now:.0f}s/{cells_left}格）"
+              f"｜拍照预算 {self._cell_frame_budget} 张"
+              f"（单张按 {float(getattr(self.state, 'capture_cost_s', VIS_CAPTURE_COST_S)):.1f}s 估）")
+        return t_soft
+
+    def _cell_expired(self):
+        """单格硬熔断判据（**每次拍照/动作前**调用；True = 本格立即收手）
+
+        三重护栏（时间 / 拍照数 / 动作数）任一超限即 True，并把原因记在
+        self._cell_tripped（供 run_level 汇总打印与 self.cell_trips 留档）。
+        设计上只"允许收手"，不改变任何既有判据的语义——所以它能在不引入
+        新死循环的前提下，兜住搜索/对准/接近/低头补步任一环节。
+        """
+        if self._cell_tripped is not None:      # 已熔断：保持熔断（不反复打印）
+            return True
+        reason = None
+        if self._cell_actions > VIS_CELL_HARD_ACTIONS:
+            reason = f"动作数 {self._cell_actions}>{VIS_CELL_HARD_ACTIONS}"
+        elif self._cell_frames > VIS_CELL_HARD_FRAMES:
+            reason = f"拍照数 {self._cell_frames}>{VIS_CELL_HARD_FRAMES}"
+        elif self._cell_frames > self._cell_frame_budget:
+            # 与时间预算等价的拍照闸（见 VIS_CAPTURE_COST_S）：真机上"拍满了"
+            # 就等于"时间快用完了"，但它在**拍照前**就能判，不必等时间闸响。
+            reason = (f"拍照数 {self._cell_frames}>本格预算 "
+                      f"{self._cell_frame_budget}（按单张 "
+                      f"{float(getattr(self.state, 'capture_cost_s', VIS_CAPTURE_COST_S)):.1f}s"
+                      " 折算的时间预算）")
+        elif self._cell_deadline is not None \
+                and time.time() > self._cell_deadline:
+            reason = (f"单格用时 {time.time() - self._cell_t0:.0f}s "
+                      f"超硬上限 {VIS_CELL_HARD_TIMEOUT_S:.0f}s")
+        if reason is None:
+            return False
+        self._cell_tripped = reason
+        return True
+
+    def _trip_cell(self, reason, abort_level=False):
+        """立即熔断本格（安全项统一出口）；abort_level=True 时整局一起收手
+
+        与 _cell_expired 的三重护栏同源：置 _cell_tripped 后，所有子循环在
+        下一次 _cell_expired() 处退出，go_to_panel 返回 False，run_level 记
+        "未确认"。**绝不"再试一次"**——现场教训：为了"再试一次"继续留在场上
+        动，代价是机器人转出场地。
+        """
+        if self._cell_tripped is None:
+            self._cell_tripped = reason
+        print(f"[护栏] {reason} → 本格收手，站立不动")
+        if abort_level and self._abort_level is None:
+            self._abort_level = reason
+        self.state.act("stand")
+        return True
+
+    def _field_guard(self):
+        """离场护栏：死推位姿越出场地外框（台面 ±1 格）→ 熔断本格 + 中止整局
+
+        定位是"拦彻底失控"的兜底，不是防跌落预案：死推位姿在形变场景下实测
+        能偏 30cm+（到达判据本身有误差，_reanchor_pose 又把它锚到"以为"的
+        格心），所以外框放到台面 ±1 格。真正管住"继续动"的是转向预算 360°、
+        停转/来回摆判据、前压封顶 45cm 这三条。
+        """
+        if self._abort_level is not None:
+            # 已判定整局收手：保持熔断（新格开预算会清 _cell_tripped，这里补回）
+            if self._cell_tripped is None:
+                self._cell_tripped = self._abort_level
+            return True
+        x = float(self.pose[0])
+        y = float(self.pose[1])
+        if (VIS_FIELD_X_CM[0] <= x <= VIS_FIELD_X_CM[1]
+                and VIS_FIELD_Y_CM[0] <= y <= VIS_FIELD_Y_CM[1]):
+            return False
+        return self._trip_cell(
+            f"位姿越界 (x={x:.0f}, y={y:.0f}) 超出 x{VIS_FIELD_X_CM} "
+            f"y{VIS_FIELD_Y_CM}", abort_level=True)
+
+    def _capture(self):
+        """统一拍照入口：单格拍照计数（硬熔断用）+ 转发 state.capture_frame"""
+        self._cell_frames += 1
+        self._count_frame()
+        return self.state.capture_frame()
 
     # =================================================================
     # 入口
@@ -731,12 +1097,35 @@ class NineGridLevel:
             done.append((k, ok))
             self.state.act("stand")
             elapsed = TOTAL_TIME_BUDGET_S - (self.deadline - time.time())
-            print(f"[进度] 面板{k} {'完成' if ok else '未确认(以微动开关实际触发为准)'}，"
-                  f"已用时 {elapsed:.0f}s")
+            note = ""
+            if not ok and self._cell_tripped:
+                # 熔断收尾（安全项）：本格记为未确认，继续下一格/收尾，
+                # 绝不为了"再试一次"把机器人继续留在场上动。
+                note = f"（单格熔断：{self._cell_tripped}）"
+                self.cell_trips[k] = self._cell_tripped
+                print(f"[熔断] 面板{k} 收手：{self._cell_tripped}"
+                      "——记为未确认，不再纠缠")
+            print(f"[进度] 面板{k} {'完成' if ok else '未确认(以微动开关实际触发为准)'}"
+                  f"{note}，已用时 {elapsed:.0f}s")
+            # 单格诚实遥测：一行给出现场复盘需要的全部数字（事后不用翻半个日志）
+            hy = self._cell_handoff_yaw
+            rs = self._cell_arrive_resid_cm
+            print(f"[遥测] 面板{k} 用时{elapsed:.0f}s 拍照{self._cell_frames} "
+                  f"动作{self._cell_actions} 命令转角{self._cell_turn_cmd_deg:.0f}°"
+                  f" 交棒yaw{'—' if hy is None else f'{hy:+.1f}°'}"
+                  f" 落点残差{'—' if rs is None else f'{rs:.1f}cm'}")
+            print(f"[遥测] 面板{k} 依据: {self._arrive_evidence or '（未到达）'}")
+            if self._abort_level:
+                # 离场护栏：已经越界，绝不再去"找下一格"——站立收手，保已得分
+                print(f"[护栏] 整局收手：{self._abort_level}"
+                      "（机器人保持站立，不再动作）")
+                break
             if time.time() > self.deadline:
                 print("[看门狗] 全局超时，停止（保已得分，不冒进）")
                 break
         self.results = done
+        if self.cell_trips:
+            print(f"[诊断] 单格熔断: {self.cell_trips}")
         frames = sorted(self.phase_frames.items(), key=lambda kv: -kv[1])
         print(f"[诊断] 逐阶段拍照数: {frames}  合计 {sum(self.phase_frames.values())}")
         return all(ok for _, ok in done)
@@ -1389,14 +1778,57 @@ class NineGridLevel:
         v3（缺省）：全程只用相对量（像素 yaw / 目标框宽 / 低头颜色占比），
         不依赖相机高度与俯仰——地板形变 ±15° 下仍可用。
         v2（VIS_NAV_ENABLED=False）：地图 GN 路径，仅作现场应急回退。
+
+        **硬熔断保证**：本函数一定在"单格预算"内返回（见 _cell_budget_begin /
+        _cell_expired）。任何子环节（搜索/对准/接近/低头补步）卡住，都会在
+        t_end 或 VIS_CELL_HARD_* 处被 _cell_expired 拦下 → 本格记为未确认
+        （results 里 False、cell_trips 记原因）→ 立刻返回 False，不再动作。
         """
+        try:
+            return self._go_to_panel_v3(digit)
+        finally:
+            # 真值落点留档（诊断/回归用，不参与控制）：**必须在返回前记**，
+            # 因为调用方随后就会走向下一格，事后再取位置已经不是这一格的落点。
+            # SimNineGridRobot 有 .pos（真值），真机 RobotState 两者都没有 →
+            # 取不到就留 None，对真机零影响。
+            self._record_landing(digit)
+
+    def _record_landing(self, digit):
+        """把"跑完本格时机器人离目标格格心的距离"记进 self.panel_landing
+
+        真机（无真值）退化为用死推位姿 self.pose 估计，并在日志里标明来源；
+        仿真里 state.pos 是真值，因此这个数字可以用来抓"假到达"。
+        """
+        cell = self.digit_cell.get(digit)
+        if cell is None:
+            self.panel_landing[digit] = None
+            return
+        center = np.asarray(grid_cell_center(cell), float)
+        truth = getattr(self.state, "pos", None)
+        if truth is not None:
+            src, pos = "真值", np.asarray(truth, float)[:2]
+        else:
+            src, pos = "死推", np.asarray(self.pose, float)[:2]
+        self.panel_landing[digit] = (float(np.linalg.norm(pos - center)), src)
+
+    def _go_to_panel_v3(self, digit):
         if not VIS_NAV_ENABLED:
             return self._go_to_panel_map(digit)
-        t_end = min(time.time() + TARGET_TIME_BUDGET_S, self.deadline)
+        t_end = self._cell_budget_begin(digit)
         self._target_seen = False
         self._loc_count = 0
         self._current_digit = digit
+        # 仿真接缝：把"当前目标数字"告知 sim，让地板形变可以**按格**注入
+        # （见 sim/nine_grid_sim._update_deform 的 step_at_digit 说明）。
+        # 真机 RobotState 没有这个方法 → getattr 兜底，对真机零影响。
+        setter = getattr(self.state, "set_deform_digit", None)
+        if setter is not None:
+            setter(digit)
         for attempt in range(RETRY_LIMIT + 1):
+            # 双重判据：软预算（旧语义）+ 硬熔断（新增，先到先算）
+            if self._cell_expired():
+                print(f"[面板{digit}] 单格熔断收手：{self._cell_tripped}")
+                return False
             if time.time() > t_end:
                 print(f"[面板{digit}] 时间预算耗尽")
                 return False
@@ -1407,6 +1839,9 @@ class NineGridLevel:
                     if USE_MAP_CORRECTION:
                         self._map_correction()
                     return True
+            if self._cell_expired():
+                print(f"[面板{digit}] 单格熔断收手：{self._cell_tripped}")
+                return False
             print(f"[面板{digit}] 第{attempt + 1}轮未到位")
             if attempt < RETRY_LIMIT:
                 self._act("back_one_step", 1)
@@ -1416,12 +1851,15 @@ class NineGridLevel:
         """搜索 → 对准 → 接近（框宽达标即返回 True）
 
         对准期目标短暂丢失（转过冲/近距窄视野）不算失败：重搜一次再试。
+        任一子环节熔断 → 直接返回 False（不在这里再重试，交 go_to_panel 收手）。
         """
         if self._search_target(digit, t_end) is None:
             print(f"[搜索] 未找到面板{digit}（遮挡/光照？）")
             return False
         self._target_seen = True
         for _try in range(2):
+            if self._cell_expired():
+                return False
             if self._align_visual(digit, t_end) is not None:
                 return self._approach_visual(digit, t_end)
             print(f"[对准] 目标{digit}丢失 → 重搜一次")
@@ -1429,6 +1867,8 @@ class NineGridLevel:
                 break
         # 目标始终不入视野，但死推说到位了：交给低头颜色判据裁决（抗形变、
         # 不需要看见目标数字本身——色块压过与否是机器人与色块的相对关系）。
+        if self._cell_expired():
+            return False
         if digit in self.digit_cell:
             fwd, lat, _b = self.target_relative(digit)
             if abs(fwd) <= VIS_ARRIVE_FALLBACK_CM and abs(lat) <= 20.0:
@@ -1458,7 +1898,7 @@ class NineGridLevel:
         self._count_frame()
         if head is not None:
             self.state.set_head(head)
-        frame = self.state.capture_frame()
+        frame = self._capture()
         if frame is None:
             return None
         obs = self.detector.detect_panels(frame,
@@ -1494,6 +1934,34 @@ class NineGridLevel:
         self.state.set_head(HEAD_CENTER)
         return None
 
+    def _align_ladder_step(self, why):
+        """打转升级阶梯（打转判据的统一出口）：换策略在先，熔断在最后
+
+        1) 弃用小转、改用大转（小转被地面吞掉是已知现场情形）；
+        2) 放弃本次对准（返回 None，让调用方走"死推到位→低头到达"或重搜）；
+        3) 仍打转 → 熔断本格。
+        返回值：True = 调用方可以继续（已换策略）；False = 调用方应 return None。
+
+        为什么不直接熔断（2026-09-13 仿真复核）：标称场景里一次摆动就熔断会白丢
+        整格；打转真正要的结果是"别再原地转"，不是"这格不要了"。而"别再原地转"
+        另有 VIS_TURN_BUDGET_DEG(360°) 硬预算兜底，所以这条阶梯不会无限升。
+        """
+        self._align_stall = 0
+        self._align_worsen = 0
+        self._align_flips = 0
+        self._align_ladder += 1
+        if self._align_ladder == 1:
+            self._small_turn_usable = False
+            print(f"[对准] 打转判据（{why}）→ 策略1：弃用小转，改用大转")
+            return True
+        if self._align_ladder == 2:
+            print(f"[对准] 打转判据（{why}）→ 策略2：放弃本次对准"
+                  "（交死推/低头路径，不再原地转）")
+            return False
+        self._trip_cell(f"打转判据连续触发 3 次（{why}，本格已转 "
+                        f"{self._cell_turn_cmd_deg:.0f}°）——判定无法收敛")
+        return False
+
     def _search_target(self, digit, t_end):
         """搜索目标：当前朝向头部五档 → 按死推提示转一步 → 后段前进探测
 
@@ -1502,12 +1970,15 @@ class NineGridLevel:
         """
         self.phase = f"SEARCH{digit}"
         frames = 0
+        blind_cm = 0.0
         for rnd in range(VIS_SEARCH_MAX_ROUNDS):
-            if time.time() > t_end or frames >= VIS_SEARCH_MAX_FRAMES:
+            if time.time() > t_end or frames >= VIS_SEARCH_MAX_FRAMES \
+                    or self._cell_expired():
                 break
             for head in (HEAD_CENTER, HEAD_LEFT, HEAD_RIGHT,
                          HEAD_WIDE_LEFT, HEAD_WIDE_RIGHT):
-                if time.time() > t_end or frames >= VIS_SEARCH_MAX_FRAMES:
+                if time.time() > t_end or frames >= VIS_SEARCH_MAX_FRAMES \
+                        or self._cell_expired():
                     break
                 seen = self._see_target(digit, PITCH_NAV, head)
                 frames += 1
@@ -1517,6 +1988,18 @@ class NineGridLevel:
                           f"用掉 {frames} 帧）")
                     return seen[0], seen[1]
             self.state.set_head(HEAD_CENTER)
+            # 补一帧**低头档**（2026-09-13 形变场景）：导航档可见地面带在形变后
+            # 会整体移走（名义 42° 时 19~184cm，57° 时 5~86cm），目标可能正好
+            # 落在导航档之外、低头档之内（0.16~1.47m）。只在导航档整轮没找到时
+            # 补 1 帧（真机 2~4s + 两次俯仰伺服）：比"整轮五档低头扫"便宜 5 倍。
+            self.state.set_pitch(PITCH_DOWN)
+            seen_down = self._see_target(digit, PITCH_DOWN, HEAD_CENTER)
+            frames += 1
+            self.state.set_pitch(PITCH_NAV)
+            if seen_down is not None:
+                print(f"[搜索] 面板{digit} 低头档找到（第{rnd + 1}轮，"
+                      f"用掉 {frames} 帧）")
+                return seen_down[0], seen_down[1]
             # 按死推提示转向（提示无效时固定左转）：**按提示大小转足**，
             # 一次转 1~5 个大转步（22~129°）——动作不花帧，只有头部扫花帧，
             # 这样"目标在身后 180°"也能两轮内覆盖到。
@@ -1533,20 +2016,35 @@ class NineGridLevel:
             if digit in self.digit_cell:
                 fwd = self.target_relative(digit)[0]
                 if fwd > VIS_SEARCH_BLIND_CM:
+                    if blind_cm >= VIS_SEARCH_BLIND_TOTAL_CM:
+                        print(f"[搜索] 面板{digit} 盲走累计 {blind_cm:.0f}cm 仍未入"
+                              f"视野（上限 {VIS_SEARCH_BLIND_TOTAL_CM:.0f}cm）"
+                              "→ 停手（不再瞎走，位姿提示已不可信）")
+                        break
                     n = int(np.clip(round((fwd - VIS_SEARCH_BLIND_CM) / 4.0
                                           / FORWARD_ONE_STEP_CM),
                                     1, VIS_SEARCH_BLIND_MAX_STEPS))
                     print(f"[搜索] 面板{digit} 未入视野（死推纵向 {fwd:.0f}cm）"
                           f"→ 盲走 {n} 步")
                     self._act("go_forward_one_step", n)
+                    blind_cm += n * FORWARD_ONE_STEP_CM
         print(f"[搜索] 面板{digit} 搜索用尽（{frames} 帧）")
         return None
 
     def _align_visual(self, digit, t_end, max_iters=6, first_seen=None):
         """闭环对准（误差源 = 像素 yaw）→ (obs, frame, box) 或 None
 
-        小转角用在线 EMA 估计（与 do_turn 同一套常量/语义），但误差来自画面
-        偏移而不是地图方位——形变不影响它。
+        误差来自画面偏移而不是地图方位——形变不影响它。
+        **小转角闭环（2026-09-11 真机"转向精度太粗/找下一格异常"重设计）**：
+        只要误差在大转分界（VIS_BIG_TURN_DEG）以内，就永远走"小步多次逼近"，
+        每轮重新拍帧复测 yaw，规划步数 = floor(|yaw| / max(EMA估计, 下限))。
+        为什么不沿用"小转被吞就全局弃用小转、全走大转"：真机日志正是这条
+        升级链把整局带偏——弃用小转后只剩 22°/25.7° 量化大转，在 8°（现 3.5°）
+        死区外反复过冲 → _big_turn 判"振荡"后干脆**不动** → 对准循环空转
+        （日志连打"大转修正 yaw -34.2°"却没有任何动作）→ 丢目标 → 重搜。
+        "走到数字 2 之后找数字 3 异常"与"其它异常行动"都出自这里。
+        仿真标定的"小转 1.7°/次"只作规划参考（且有下限保护），现场以闭环
+        收敛为准：不依赖固定 °/次 常数，估计偏大偏小都由下一轮复测吸收。
         first_seen：调用方刚拍到的那一帧（搜索/接近的观测）可直接复用，
         省一次拍照（真机 2~4s/张）。
         """
@@ -1554,7 +2052,7 @@ class NineGridLevel:
         prev_yaw, prev_n = None, 0
         last_act, last_n = None, 0
         for _ in range(max_iters):
-            if time.time() > t_end:
+            if time.time() > t_end or self._cell_expired():
                 return None
             if first_seen is not None:
                 seen, first_seen = first_seen, None
@@ -1574,7 +2072,8 @@ class NineGridLevel:
                 return None
             obs, frame, yaw, box = seen
             # 用"转过前后 yaw 的变化"更新单次小转实际角（过冲按 |a|+|b| 折算，
-            # 否则 per_step 变负 → EMA 崩向 0 → 下一轮请求更多步 → 更过冲）
+            # 否则 per_step 变负 → EMA 崩向 0 → 下一轮请求更多步 → 更过冲）。
+            # 注意：EMA 只用于**规划步数**，不再用它决定"是否弃用小转"。
             if prev_yaw is not None and prev_n:
                 if abs(yaw) < abs(prev_yaw):
                     per = (abs(prev_yaw) - abs(yaw)) / prev_n
@@ -1587,25 +2086,77 @@ class NineGridLevel:
                 self._turn_updates += 1
                 self._small_turn_deg = ((1 - alpha) * self._small_turn_deg
                                         + alpha * per)
+                # 仍记录"被地面吞掉"的次数（v2 do_turn 会据此升级大转，
+                # 日志诊断也需要），但 v3 对准**不再因为这条就弃用小转**。
                 if per < MIN_EFFECTIVE_TURN_DEG:
                     self._small_turn_fail += 1
                     if self._small_turn_fail >= SMALL_TURN_FAIL_BATCHES:
-                        print("[对准] 小转连续被地面吞掉，升级大转")
                         self._small_turn_usable = False
                 else:
                     self._small_turn_fail = 0
+                # ---- 打转判据（2026-09-13 现场"在死区里打转"）----
+                # 转过一次之后 |yaw| 反而没变小 → 记一次；连续 VIS_TURN_STALL_TURNS
+                # 次都没变小 = 这套闭环在这一格收敛不了（机械步长吃掉误差/打滑/
+                # 目标不稳）：先试**一次**大转兜底（小转被地面吞掉是已知现场情形），
+                # 再不动就熔断本格——绝不再"再转一次试试"。
+                if abs(yaw) < abs(prev_yaw) - 0.5:
+                    self._align_stall = 0
+                    self._align_worsen = 0
+                else:
+                    self._align_stall += 1
+                    # 方向自检：同号误差被**转得更大**（>VIS_ALIGN_WORSEN_DEG）
+                    # = 转向方向反了（左右约定/头部符号）。连续 2 次就翻符号重试；
+                    # 翻错也只是再错 2 次，被停转判据兜住。
+                    if abs(yaw) > abs(prev_yaw) + VIS_ALIGN_WORSEN_DEG \
+                            and (yaw > 0) == (prev_yaw > 0):
+                        self._align_worsen += 1
+                    else:
+                        self._align_worsen = 0
+                    if self._align_worsen >= 2:
+                        self._align_sign = -self._align_sign
+                        self._align_stall = 0
+                        self._align_worsen = 0
+                        print(f"[对准] 方向自检：同向转向把误差转得更大"
+                              f"（{prev_yaw:+.1f}°→{yaw:+.1f}°）→ 反转转向符号"
+                              f"（现 {self._align_sign:+.0f}）")
+                    elif self._align_stall >= VIS_TURN_STALL_TURNS:
+                        if self._align_ladder_step(
+                                f"连续{self._align_stall}次转向 |yaw| 无改善"
+                                f"（{abs(prev_yaw):.1f}°→{abs(yaw):.1f}°）"):
+                            self._big_turn(-yaw * self._align_sign)
+                            prev_yaw, prev_n = None, 0
+                            continue
+                        return None
+                # 左右来回摆（误差跨过 0、两边都还在死区外）= 打转的直接证据
+                # （现场"在死区莫名其妙打转"的另一半：步长 > 误差，一步就过冲）
+                if (yaw > 0) != (prev_yaw > 0) \
+                        and abs(yaw) > VIS_ALIGN_TOL_DEG:
+                    self._align_flips += 1
+                    if self._align_flips > VIS_ALIGN_MAX_FLIPS:
+                        if not self._align_ladder_step(
+                                f"死区外左右来回摆 {self._align_flips} 次"
+                                f"（{prev_yaw:+.1f}°→{yaw:+.1f}°）"):
+                            return None
             if abs(yaw) <= VIS_ALIGN_TOL_DEG:
                 print(f"[对准] 已对准（yaw {yaw:+.1f}°，框宽 {box:.0f}px）")
                 return obs, frame, box
-            if abs(yaw) > VIS_BIG_TURN_DEG or not self._small_turn_usable:
-                print(f"[对准] 大转修正 yaw {yaw:+.1f}°")
-                self._big_turn(-yaw)     # _big_turn 用"右正"约定，故取负
+            # 大转**只作兜底**：① 误差本来就大（>30°）；② 大转振荡记忆未生效时
+            # 才用。振荡已发生时不再调 _big_turn（它会直接 return，等于空转），
+            # 落到下面的小转闭环——保证每一轮都发出**真实动作**，不会空转。
+            if abs(yaw) > VIS_BIG_TURN_DEG and not self._turn_oscillation:
+                print(f"[对准] 大转兜底修正 yaw {yaw:+.1f}°")
+                # _big_turn 用"右正"约定，故取负；_align_sign 见方向自检
+                self._big_turn(-yaw * self._align_sign)
                 prev_yaw, prev_n = None, 0
                 continue
-            n = int(np.clip(round(abs(yaw) / max(self._small_turn_deg, 0.3)),
+            # 小转角闭环：floor 保证"规划转角 ≤ 剩余误差"（不计划性过冲）；
+            # 估计角有下限保护（见 VIS_SMALL_TURN_MIN_STEP_DEG），
+            # 真实收敛靠下一轮复测。
+            step = max(self._small_turn_deg, VIS_SMALL_TURN_MIN_STEP_DEG)
+            n = int(np.clip(int(np.floor(abs(yaw) / step)),
                             1, SMALL_TURN_MAX_STEPS))
-            # yaw > 0 = 目标在画面左侧 → 左转
-            action = ("turn_left_small_step" if yaw > 0
+            # yaw > 0 = 目标在画面左侧 → 左转（符号由方向自检标定）
+            action = ("turn_left_small_step" if yaw * self._align_sign > 0
                       else "turn_right_small_step")
             self._act(action, n)
             self._last_turn = (action, n)
@@ -1626,7 +2177,7 @@ class NineGridLevel:
         prev_box = None
         stall = 0
         for _ in range(max_iters):
-            if time.time() > t_end:
+            if time.time() > t_end or self._cell_expired():
                 return False
             seen = self._see_target(digit)
             if seen is None or abs(seen[2]) > VIS_ALIGN_TOL_DEG:
@@ -1639,6 +2190,14 @@ class NineGridLevel:
                 box = seen[3]
             print(f"[接近] 框宽 {box:.0f}px（交棒 {arr:.0f}px）")
             if box >= arr:
+                # 交棒 yaw 只作遥测：死区 12° 下它最大可到 ~12°，
+                # 由此产生的横向残余由低头段的厘米级横移纠偏吸收。
+                self._cell_handoff_yaw = float(seen[2]) if seen is not None \
+                    else None
+                if self._cell_handoff_yaw is not None:
+                    print(f"[接近] 交棒 yaw 残余 {self._cell_handoff_yaw:+.1f}°"
+                          f"（死区 {VIS_ALIGN_TOL_DEG:.0f}°，"
+                          "横向残余交低头段纠）")
                 return True
             if prev_box is not None and abs(box - prev_box) < VIS_STALL_BOX_PX:
                 stall += 1
@@ -1667,8 +2226,19 @@ class NineGridLevel:
         VIS_COLOR_DROP_FRAC → 已压过该格。它描述的是"色块从机器人视野里
         由出现到消失"这一**机器人与色块的相对几何关系**，与相机高度/俯仰
         无关 → 抗地板形变。
-        横向纠偏用 dx/box_w × PANEL_WIDTH_CM（投影不变量，同样抗形变），
-        但在看到颜色前最多纠 VIS_LAT_MAX_CORRECTIONS 次（防抖动空耗帧）。
+        **横向纠偏是厘米级的**（2026-09-13 接线修正）：dx/box_w×PANEL_WIDTH_CM
+        是投影不变量，换算成横向厘米后用 left/right_move 一步 2.2cm 直接消掉，
+        而不是"小转 1 步"（2° 在 35cm 上只挪 1.2cm，纠 7cm 要 6 次＝等于没纠）。
+        纠偏**不再限制在"见到颜色之前"**：交棒点死区 12° → 横向残余可达
+        35·tan12° ≈ 7cm，这段正是"踩不到微动开关"的来源；只要还在前进前压
+        阶段，就允许继续纠（总次数上限 VIS_LAT_MAX_CORRECTIONS）。
+        前压总量封顶 VIS_ARRIVE_PRESS_MAX_CM（45cm）：压满仍未判到回落就交
+        死推兜底复核，绝不一路压出去。
+        **到达证据门（2026-09-13 假到达修复）**：见 VIS_ARRIVE_EVIDENCE_* 常量
+        注释。"占比峰值→回落"只是"整帧色像素变少"，必须叠加"本次接近里见过
+        一块形状/尺度都像面板的同色区域"，才允许判"压过"；另有与前压量挂钩的
+        物理合理性上限 VIS_ARRIVE_PRESS_PLAUSIBLE_CM。被拒的次数与原因进
+        遥测——现场靠它区分"视觉没到位"和"门太严"。
         """
         self.phase = f"ARRIVE{digit}"
         self.state.set_pitch(PITCH_DOWN)
@@ -1676,6 +2246,13 @@ class NineGridLevel:
         peak = 0.0
         prev_ratio = None
         lat_fixes = 0
+        press_cm = 0.0
+        # 到达证据门：峰值帧的"面板级"证据 + 拒因（诚实遥测）
+        peak_cover = -1.0       # 占比峰值那一帧的面板 hull / 画幅（-1 = 未测到）
+        ev_cover_best = 0.0     # 本次接近里见过的最大 hull/画幅（仅遥测）
+        ev_aspect_best = 0.0    # 上述那帧的 h/w（仅遥测）
+        ev_reject = 0           # 因证据不足被拒的"回落"次数（诚实遥测）
+        ev_reasons = []         # 去重后的拒因
         # 时间预算自适应：剩余时间不足时收缩迭代上限（真机拍照 2~4s/张；
         # 仿真里动作/拍照是瞬时的，因此这条只影响真机行为）
         iters_max = VIS_ARRIVE_MAX_ITERS
@@ -1687,48 +2264,161 @@ class NineGridLevel:
                 if time.time() > t_end:
                     return False
                 self._count_frame()
+                self._cell_frames += 1      # 低头段不走 _capture()，这里补记
                 frame = self.state.capture_frame()
                 if frame is None:
                     return False
                 ratio = self.detector.color_ratio(frame, color)
-                peak = max(peak, ratio)
+                # 峰值帧也升格（见 VIS_ARRIVE_EVIDENCE_MIN_COVER 注释）：峰值出现
+                # 的那一帧才是"面板在画面里最大/最完整"的一帧，它的面板级面积
+                # 才是该用来验证"这个峰值真的来自一块面板"的证据。
+                if ratio > peak:
+                    peak = ratio
+                    peak_cover = -1.0
                 print(f"[到达] 色占比 {ratio:.4f}（峰值 {peak:.4f}，"
                       f"判据 <{VIS_COLOR_DROP_FRAC * peak:.4f}）")
-                if peak >= VIS_COLOR_SEEN_MIN \
-                        and ratio < VIS_COLOR_DROP_FRAC * peak:
-                    print(f"[到达] 颜色由峰值 {peak:.4f} 跌到 {ratio:.4f}"
-                          " → 判定压过目标格")
-                    return True
+                # 证据门素材：同一帧里找"最像面板"的同色区域（保留观测里的
+                # 最大 hull）。它在后面既给"是否见过面板"作证，也决定能不能
+                # 用它的质心做横移纠偏（擦边条不是合格的控制对象）。
                 obs = self.detector.detect_panels(frame, colors=[color],
                                                   arbitrate=False,
                                                   drop_border=False)
-                if obs and peak < VIS_COLOR_SEEN_MIN \
-                        and lat_fixes < VIS_LAT_MAX_CORRECTIONS:
-                    o = max(obs, key=lambda x: x.hull_area)
-                    px = o.hull_centroid_px if o.clipped else o.center_px
-                    box = max(float(o.bbox[2]), 1.0)
-                    dx_cm = ((float(px[0]) - frame.shape[1] / 2.0) / box
-                             * PANEL_WIDTH_CM)
-                    if abs(dx_cm) > VIS_LAT_TOL_CM:
-                        print(f"[到达] 横向 {dx_cm:+.1f}cm → 小转纠偏"
-                              f"（{lat_fixes + 1}/{VIS_LAT_MAX_CORRECTIONS}）")
-                        self._act("turn_right_small_step" if dx_cm > 0
-                                  else "turn_left_small_step", 1)
-                        lat_fixes += 1
-                        continue
+                frame_area = float(frame.shape[0] * frame.shape[1])
+                ev = max(obs, key=lambda x: x.hull_area) if obs else None
+                # 证据门素材：本次接近里见过的**最大**面板级同色区域（单调不减，
+                # 只会因为有东西真的靠近而变大）；以及"当前帧的最大观测是不是
+                # 画幅下沿的擦边条"（只影响横移控制与临门帧的形状审查）。
+                ev_cover_now = 0.0
+                ev_strip_now = False
+                if ev is not None:
+                    bw = max(float(ev.bbox[2]), 1.0)
+                    bh = max(float(ev.bbox[3]), 1.0)
+                    ev_cover_now = float(ev.hull_area) / max(frame_area, 1.0)
+                    if ev_cover_now > ev_cover_best:
+                        ev_cover_best = ev_cover_now
+                        ev_aspect_best = bh / bw
+                    ev_strip_now = (bh / bw < VIS_ARRIVE_EVIDENCE_MIN_ASPECT)
+                if peak == ratio:       # 本帧就是峰值帧：钉住它的面板级证据
+                    peak_cover = max(peak_cover, ev_cover_now)
+                if peak >= VIS_COLOR_SEEN_MIN \
+                        and ratio < VIS_COLOR_DROP_FRAC * peak:
+                    # ① 证据门：**峰值那一帧**必须真见过"大到像面板"的同色区域，
+                    #    不能只靠整帧色像素变少（后者可能是侧滑出画/别的同色块
+                    #    离开视野）。用峰值帧而不是"历史最大"：形变会把整条曲线
+                    #    的尺度一起改掉（同一面板在不同俯仰下 box 面积差 30%），
+                    #    只有跟着峰值自身的语义走才不引入新的尺度依赖。
+                    if peak_cover < VIS_ARRIVE_EVIDENCE_MIN_COVER:
+                        ev_reject += 1
+                        why = (f"峰值帧面板证据仅占画幅 {peak_cover:.3f}"
+                               f"<{VIS_ARRIVE_EVIDENCE_MIN_COVER}")
+                        if why not in ev_reasons:
+                            ev_reasons.append(why)
+                        print(f"[到达] 占比回落但**证据不足**（{why}）"
+                              "→ 不判到达（继续前压/兜底）")
+                    # ② 物理合理性：前压超过"交棒 + 一格"就不可能是在压目标
+                    elif press_cm > VIS_ARRIVE_PRESS_PLAUSIBLE_CM:
+                        why = (f"前压{press_cm:.0f}cm>"
+                               f"{VIS_ARRIVE_PRESS_PLAUSIBLE_CM:.0f}cm")
+                        ev_reject += 1
+                        if why not in ev_reasons:
+                            ev_reasons.append(why)
+                        print(f"[到达] 占比回落但{why}（已越过一整格）"
+                              "→ 不判到达（继续前压/兜底）")
+                    else:
+                        self._arrive_evidence = (
+                            f"低头颜色峰值 {peak:.4f}→回落 {ratio:.4f}"
+                            f"（<{VIS_COLOR_DROP_FRAC * peak:.4f} 判据），"
+                            f"前压{press_cm:.0f}cm 纠横{lat_fixes}次｜"
+                            f"证据 峰值帧色块占画幅{peak_cover:.3f}"
+                            f"（h/w{ev_aspect_best:.2f}，门"
+                            f"{VIS_ARRIVE_EVIDENCE_MIN_COVER}）"
+                            f"｜门拒 {ev_reject} 次"
+                            + (f"（{'；'.join(ev_reasons)}）"
+                               if ev_reasons else ""))
+                        print(f"[到达] 颜色由峰值 {peak:.4f} 跌到 {ratio:.4f}"
+                              f"（证据 峰值帧色块占画幅{peak_cover:.3f}）"
+                              "→ 判定压过目标格")
+                        return True
+                if ev is not None and lat_fixes < VIS_LAT_MAX_CORRECTIONS:
+                    o = ev
+                    bw = max(float(o.bbox[2]), 1.0)
+                    bh = max(float(o.bbox[3]), 1.0)
+                    # 横移控制的对象健全性（2026-09-13 实测）：擦边条（细长）的
+                    # 凸包质心不是合理的面板中心估计，拿它做横移会把目标推出
+                    # 画幅——阶跃场景的假到达正是"用 1100×380 的擦边条做 2 次
+                    # ×3 步横移"。遇到这种对象就**先前进**，让观测变干净再纠横。
+                    if ev_strip_now:
+                        print(f"[到达] 观测是擦边条（h/w={bh / bw:.2f}"
+                              f"<{VIS_ARRIVE_EVIDENCE_MIN_ASPECT}）"
+                              "→ 跳过横移纠偏，先前压取干净观测")
+                        o = None
+                    if o is not None:
+                        px = o.hull_centroid_px if o.clipped else o.center_px
+                        box = max(float(o.bbox[2]), 1.0)
+                        dx_cm = ((float(px[0]) - frame.shape[1] / 2.0) / box
+                                 * PANEL_WIDTH_CM)
+                        if abs(dx_cm) > VIS_LAT_TOL_CM:
+                            if VIS_ARRIVE_LAT_VIA_SIDESTEP:
+                                step_cm = (RIGHT_MOVE_CM if dx_cm > 0
+                                           else LEFT_MOVE_CM)
+                                n_lat = int(np.clip(
+                                    round(abs(dx_cm) / step_cm),
+                                    1, VIS_ARRIVE_LAT_MAX_STEPS))
+                                print(f"[到达] 横向 {dx_cm:+.1f}cm → 横移纠偏 "
+                                      f"{'右' if dx_cm > 0 else '左'}{n_lat}步"
+                                      f"（{lat_fixes + 1}/{VIS_LAT_MAX_CORRECTIONS}）")
+                                self._act("right_move" if dx_cm > 0
+                                          else "left_move", n_lat)
+                            else:
+                                print(f"[到达] 横向 {dx_cm:+.1f}cm → 小转纠偏"
+                                      f"（{lat_fixes + 1}/{VIS_LAT_MAX_CORRECTIONS}）")
+                                self._act("turn_right_small_step" if dx_cm > 0
+                                          else "turn_left_small_step", 1)
+                            lat_fixes += 1
+                            continue
+                # 第二个独立判据：**死推到位即停压**（见 VIS_ARRIVE_STOP_FWD_CM）。
+                # 它让"踩到格心"这件事不完全依赖颜色曲线的形状——相机俯仰被地板
+                # 形变改掉时，颜色判据可能永远不回落（实测前压 44cm 仍不回落），
+                # 而死推距离不受俯仰影响。任一判据成立即到位，依据写清哪一条。
+                if digit in self.digit_cell:
+                    fwd_now, lat_now, _bn = self.target_relative(digit)
+                    if abs(fwd_now) <= VIS_ARRIVE_STOP_FWD_CM \
+                            and abs(lat_now) <= VIS_ARRIVE_FALLBACK_LAT_CM:
+                        ev_txt = (f"峰值帧色块占画幅{peak_cover:.3f}"
+                                  f"（h/w{ev_aspect_best:.2f}）")
+                        self._arrive_evidence = (
+                            f"死推到位（纵向{fwd_now:+.1f} 横向{lat_now:+.1f}cm，"
+                            f"前压{press_cm:.0f}cm；色占比峰值{peak:.4f} 未回落｜"
+                            f"{ev_txt}｜门拒 {ev_reject} 次）")
+                        print(f"[到达] 死推到位（纵向{fwd_now:+.1f} "
+                              f"横向{lat_now:+.1f}cm）→ 判定到达")
+                        return True
                 # 步长自适应：占比**还在涨**时用 3 步批量（6cm）赶路，一旦不再涨
                 # （到峰/过峰）改单步（2cm）精停。实测：用"与峰值比"判据会
                 # 在爬升段误判成"接近峰值"而一路 2cm 挪（占比 0.06→0.13 花了
                 # 18 次迭代＝低头段占了全程 61% 的拍照）。
                 rising = prev_ratio is None or ratio >= prev_ratio
                 prev_ratio = ratio
-                self._act("go_forward_one_step", 3 if rising else 1)
-            print(f"[到达] 迭代/时间用尽（峰值占比 {peak:.4f}）")
+                press_steps = (VIS_ARRIVE_PRESS_COARSE_STEPS if rising
+                               else VIS_ARRIVE_PRESS_FINE_STEPS)
+                if press_cm + press_steps * FORWARD_ONE_STEP_CM \
+                        > VIS_ARRIVE_PRESS_MAX_CM:
+                    print(f"[到达] 前压已封顶 {press_cm:.0f}cm"
+                          f"（{VIS_ARRIVE_PRESS_MAX_CM:.0f}cm）且占比未回落"
+                          " → 交死推兜底复核")
+                    break
+                press_cm += press_steps * FORWARD_ONE_STEP_CM
+                self._act("go_forward_one_step", press_steps)
+            print(f"[到达] 迭代/前压用尽（峰值占比 {peak:.4f}，"
+                  f"已前压 {press_cm:.0f}cm）")
             # 兜底：视觉判据没走完（例如峰值后占比掉得不够）时，用**死推距离**
             # 复核——位姿每格到达后已重置，短程死推（≤1格）精度足够。
             fwd, lat, _b = self.target_relative(digit)
             if abs(fwd) <= VIS_ARRIVE_FALLBACK_CM \
                     and abs(lat) <= VIS_ARRIVE_FALLBACK_LAT_CM:
+                self._arrive_evidence = (
+                    f"死推兜底（纵向{fwd:+.1f} 横向{lat:+.1f}cm，"
+                    f"前压{press_cm:.0f}cm 后占比未回落，峰值{peak:.4f}）")
                 print(f"[到达] 死推距离兜底判定到位（纵向{fwd:+.1f} "
                       f"横向{lat:+.1f}cm）")
                 return True
@@ -1737,7 +2427,13 @@ class NineGridLevel:
             self.state.set_pitch(PITCH_NAV)
 
     def _confirm_switch(self, digit):
-        """到达收尾：蹭步压微动开关 + 仲裁冲突近距复核（沿用 v2 行为）"""
+        """到达收尾：蹭步压微动开关 + 仲裁冲突近距复核
+
+        **诚实声明（2026-09-13）**：微动开关是场地侧器件（计分由 ESP32 读），
+        Pi 侧**读不到它的状态**——本函数只能保证"机器人已按判据压过格心一遍"，
+        不能保证按钮真的触发。因此日志打印**依据**（到达判据 + 落点死推残差）
+        而不是无条件"到达 ✓"；残差大时明确打警告，供赛后与计分表核对。
+        """
         self.phase = f"CONFIRM{digit}"
         self._act("back_one_step", 1)
         self._act("go_forward_one_step", 1)
@@ -1752,21 +2448,39 @@ class NineGridLevel:
                         print(f"[复核] 格{cell} 近距SVM={o.model_digit}"
                               f"({o.model_conf:.2f}) vs 颜色={digit}——{verdict}")
         self.state.act("stand")
-        print(f"[确认] 面板{digit} 到达 ✓")
+        # 落点残差：位姿此刻仍是死推值（_reanchor_pose 在返回后才重置），
+        # 所以这是"机器人与期望格心的差距"的独立估计，不是自证。
+        resid = None
+        if digit in self.digit_cell:
+            fwd, lat, _b = self.target_relative(digit)
+            resid = float(np.hypot(fwd, lat))
+            self._cell_arrive_resid_cm = resid
+        shaky = "  ⚠ 残差偏大（>半格），按钮可能没压到" \
+            if (resid is not None and resid > GRID_CELL_CM / 2) else ""
+        resid_txt = "—（无格心映射）" if resid is None else f"{resid:.1f}cm"
+        print(f"[确认] 面板{digit} 已按格心压过｜依据: {self._arrive_evidence or '无'}"
+              f"｜落点残差 {resid_txt}{shaky}")
+        print("[确认] 微动开关状态 Pi 侧不可读——是否触发以场地计分为准")
         return True
 
     def _reanchor_pose(self, digit):
         """到达后把死推位姿锚到该格格心（消除逐格漂移，保搜索提示可用）
 
-        位置断言来自"到达判定成立"（机器人确实压在该色块/格上）；航向保持
-        死推值（视觉对准已把目标对正，残余误差只影响粗提示）。
+        航向保持死推值（视觉对准已把目标对正，残余误差只影响粗提示）。
+        位置断言来自"到达判定成立"（机器人压在该色块上），同时打印**残差**
+        （到达时的死推距离）——它是"这次锚定有多可信"的唯一现场证据。
+        试过"残差超半格就不锚定"：标称场景直接打挂（面板6 未确认）——因为标称
+        场景里残差大恰恰是**死推漂移**造成的，而锚定正是修它的手段。所以锚定
+        照旧，但把残差写进遥测，让现场一眼看出哪一格的"到达"不可信。
         """
         if digit not in self.digit_cell:
             return
+        resid = self._cell_arrive_resid_cm
         c = grid_cell_center(self.digit_cell[digit])
         self.pose = np.array([c[0], c[1], self.pose[2]])
         print(f"[锚定] 死推位姿重置到格{self.digit_cell[digit]}"
-              f"（{c[0]:.0f},{c[1]:.0f}）")
+              f"（{c[0]:.0f},{c[1]:.0f}"
+              f"{'' if resid is None else f'，到达残差 {resid:.1f}cm'}）")
 
     def _map_correction(self):
         """可选的地图 GN 校正：成功才采纳，失败只打一行日志
@@ -1978,7 +2692,11 @@ class NineGridLevel:
                         print(f"[复核] 格{cell} 近距SVM={o.model_digit}"
                               f"({o.model_conf:.2f}) vs 颜色={digit}——{verdict}")
         self.state.act("stand")
-        print(f"[确认] 面板{digit} 到达 ✓")
+        # v2 路径的"到达"本身就是位姿判据（上面 on_panel 已卡 ±4cm）：
+        # 记残差 0 让 _reanchor_pose 的锚定门放行（保持 v2 原有行为）。
+        self._cell_arrive_resid_cm = float(np.hypot(fwd, lat))
+        print(f"[确认] 面板{digit} 位姿覆盖中心（纵向{fwd:+.1f} "
+              f"横向{lat:+.1f}cm）——到位；微动开关状态 Pi 侧不可读")
         return True
 
     # =================================================================
@@ -1990,6 +2708,12 @@ class NineGridLevel:
 
         白名单硬门：本场地禁用的大步幅动作（go_forward / go_forward_fast）
         直接拒绝，避免后续改动误用导致摔倒。
+
+        **转向护栏（2026-09-13 真机"一直转 → 转出场地"）**：转向是最便宜的
+        动作（不拍照、不耗帧），旧实现没有任何"转够了就停"的概念，对准与搜索
+        可以互相接管、在死区里无限转下去。这里累计单格**命令**转角，超预算就
+        **拒绝执行**这次转向并熔断本格（安全项，宁可本格记未确认）。
+        **离场护栏**：动作执行后统一检查死推位姿是否越出场地外框。
         """
         if action in DISABLED_ACTIONS:
             raise ValueError(
@@ -1997,12 +2721,30 @@ class NineGridLevel:
                 f"前进请用 go_forward_one_step 小批量")
         if action not in ACTION_MODEL:
             raise ValueError(f"未登记的动作: {action}（动作白名单见 ACTION_MODEL）")
+        if self._field_guard():
+            # 已经判定越界（整局收手）：拒绝再动，只保持站立
+            return
+        kind, delta = ACTION_MODEL[action]
+        req = abs(float(delta)) * int(times)
+        if kind == "turn" \
+                and self._cell_turn_cmd_deg + req > VIS_TURN_BUDGET_DEG:
+            self._trip_cell(
+                f"单格累计命令转角 {self._cell_turn_cmd_deg:.0f}°+{req:.0f}° "
+                f"超上限 {VIS_TURN_BUDGET_DEG:.0f}°（防原地打转/转出场地）")
+            return
         self.state.act(action, times=times)
+        # 单格动作计数（硬熔断第三重 + 遥测）：按**实际执行的原语数**记
+        # （times 批量算 times 次）——2026-09-13 发现这个计数从来没被累加过，
+        # 也就是说 VIS_CELL_HARD_ACTIONS（300）此前是死判据，遥测里恒显示 0。
+        self._cell_actions += max(1, int(times))
         self.predict_pose(action, times)
-        if ACTION_MODEL.get(action, (None, 0))[0] != "turn":
+        if kind == "turn":
+            self._cell_turn_cmd_deg += req
+        else:
             # 期间发生平移：旧转向不可盲目撤销，大转振荡记忆也失效
             self._last_turn = None
             self._last_big_turn = None
+        self._field_guard()
 
     def do_turn(self, bearing, digit, fwd_cm=None):
         """按航向差转向（右正）。近目标先退格再转（防面板边缘转向）。"""

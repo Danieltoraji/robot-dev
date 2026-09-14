@@ -117,6 +117,11 @@ class SimNineGridRobot(RobotState):
         self.layout = layout                 # cell -> digit
         self.rng = np.random.RandomState(seed)
         self.n_captures = 0
+        # 单张拍照耗时（秒）：告诉关卡"这个环境下拍照有多贵"，用于把单格时间
+        # 预算折算成拍照数预算（见 levels/nine_grid.py 的 VIS_CAPTURE_COST_*）。
+        # 真机 ≈2~4s/张；仿真里帧是瞬时的，取极小值 → 仿真下**不会**被拍照预算
+        # 先熔断（回归数字保持可比），而真机上那道闸才真正生效。
+        self.capture_cost_s = 0.001
         self.action_log = []
         # 可选图形化 viewer（sim/nine_grid_view.NineGridView）；None = 纯无头
         self.viewer = viewer
@@ -125,6 +130,9 @@ class SimNineGridRobot(RobotState):
         self.deform_tilt_deg = 0.0
         self.deform_height_cm = 0.0
         self.deform_actions = 0
+        # 当前目标数字（由 sim/level 侧每格开始前写入；供"按格触发阶跃"使用）
+        self.current_digit = None
+        self._step_done_digits = set()
         self._deform = dict(deform) if deform else None
         self._deform_rng = np.random.RandomState(int(seed) + 977)
 
@@ -133,6 +141,13 @@ class SimNineGridRobot(RobotState):
     def set_head(self, pulse, move_time_ms=500):
         self.head = pulse
         self.current_head_pulse = pulse  # 与真机 RobotState.set_head 行为一致
+
+    def set_deform_digit(self, digit):
+        """关卡开新格时通知 sim 当前目标数字（仅供"按格触发阶跃"使用）
+
+        真机 RobotState 没有这个方法 → 关卡侧用 getattr 兜底调用，不影响真机。
+        """
+        self.current_digit = int(digit)
 
     def set_pitch(self, pulse, move_time_ms=500):
         self.pitch = pulse
@@ -152,9 +167,16 @@ class SimNineGridRobot(RobotState):
           sigma_tilt_deg / sigma_h_cm  每动作随机游走步长（默认 0 = 无形变）
           max_tilt_deg  / max_h_cm     形变幅度上限（默认 15° / 3cm）
           step_after_actions           第 N 个动作后施加一次性阶跃
+          step_at_digit                第 N 格（目标数字）开始时施加一次性阶跃
           step_tilt_deg / step_h_cm    阶跃幅度
         注意：形变只在**动作**时变化 —— 静止扫头部（布局扫）期间保持不变，
         与现场"站定扫描时地板不再继续形变"一致。
+        **为什么要有 step_at_digit（2026-09-13 新增）**：`step_after_actions` 与
+        动作流强耦合——任何改变动作数的代码改动都会把阶跃触发点挪到另一个
+        格子，于是同一个"回归测试"在两次改动之间测的根本不是同一个场景
+        （实测：HEAD 244/191 过、本轮 206 张不过，部分原因就在这里）。
+        按格触发让"第几格踩上形变"成为**场景定义的一部分**，与被测代码的
+        动作数解耦；旧参数保留（用于复现历史日志），但新回归一律用 step_at_digit。
         """
         cfg = self._deform
         if not cfg:
@@ -168,6 +190,14 @@ class SimNineGridRobot(RobotState):
                 self._deform_rng.normal(0.0, float(cfg["sigma_h_cm"])))
         if cfg.get("step_after_actions") \
                 and self.deform_actions == int(cfg["step_after_actions"]):
+            self.deform_tilt_deg += float(cfg.get("step_tilt_deg", 0.0))
+            self.deform_height_cm += float(cfg.get("step_h_cm", 0.0))
+        # 按格触发（与被测代码的动作数解耦，见上文说明）：关卡每开一格会调用
+        # set_deform_digit(K)，第 K 格开始后的**第一个动作**上施加阶跃。
+        k = cfg.get("step_at_digit")
+        if k is not None and self.current_digit == int(k) \
+                and int(k) not in self._step_done_digits:
+            self._step_done_digits.add(int(k))
             self.deform_tilt_deg += float(cfg.get("step_tilt_deg", 0.0))
             self.deform_height_cm += float(cfg.get("step_h_cm", 0.0))
         mt = float(cfg.get("max_tilt_deg", 15.0))
@@ -319,6 +349,10 @@ def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
         "small_turn_deg": level._small_turn_deg,
         "small_turn_usable": level._small_turn_usable,
         "banned_used": sorted(used & set(DISABLED_ACTIONS)),
+        "cell_trips": dict(level.cell_trips),
+        # 逐格落点：{digit: [离格心 cm, 来源]}；来源应为 "真值"（仿真有 state.pos）
+        "panel_landing": {d: (None if v is None else [round(v[0], 2), v[1]])
+                          for d, v in level.panel_landing.items()},
         "deform_tilt_deg": robot.deform_tilt_deg,
         "deform_height_cm": robot.deform_height_cm,
     }
