@@ -40,14 +40,18 @@ import numpy as np
 from sim.nine_grid_sim import run_simulation
 from levels.nine_grid import GRID_CELL_CM
 
-# 拍照数护栏（真机时间代理：单张 2~4s、整局 780s 看门狗。基线 206 / 随机游走
-# 219 / 阶跃 246 张；取 260 留 ~6% 余量，再高就该怀疑"定位风暴"回来了）
+# 拍照数护栏（防"定位风暴"回归：基线 206 / 随机游走 219 / 阶跃 246 张；
+# 取 260 留 ~6% 余量。注意它是**回归判据**，不是真机时间预算——后者见下）
 CAPTURE_GUARD = 260
-# 真机整体可行性：全局看门狗 780s ÷ 单张保守 3s ≈ 260 张的**总**预算，
-# 再扣掉开局自动曝光标定与 7 次转向/移动的机械时间，实际可用约 200 张。
-# 仿真里帧是瞬时的、测不出这条，所以在这里用"换算"把它显式化——
-# **这是"仿真 7/7 ≠ 真机跑得完"这个盲区唯一的守门人**。
-REAL_CAPTURE_BUDGET = 200
+# 真机整体可行性（仿真测不出时间，只能在这里换算显式化）：
+#   2026-09-13 现场实测 capture_frame() = **0.70s/张**（fswebcam 0.62s/张）。
+#   全局看门狗 780s，扣掉布局扫 60~90s 与自动曝光标定 ≤5 张，剩 ~690s
+#   ⇒ 约 985 张的理论上限；取 700 张（≈8.2min）作为告警线，留足机械时间裕量。
+# 历史教训：这条原先按"真机 2~4s/张"取 200 张，于是**每场都误报**"上真机前应先
+# 降帧"——那个 2~4s 的估计偏高约 4 倍（疑似把网络 RTT 当成了拍照耗时）。
+# 校验方式：跑真机一局后看整局耗时，若 7 格总耗时 >> 3min 才需要重估这个值。
+REAL_CAPTURE_BUDGET = 700
+REAL_CAPTURE_COST_S = 0.70     # 真机实测单张耗时（秒），用于打印时间换算
 # 落点真值容差：微动开关有效区 ±5.5cm，取半格（16.7cm）作为"至少压在正确格上"
 ARRIVE_TRUTH_TOL_CM = GRID_CELL_CM / 2.0
 
@@ -95,12 +99,17 @@ def _check(tag, run):
           f"动作 {stats['actions']} 次；形变终值 俯仰 "
           f"{stats['deform_tilt_deg']:+.1f}° / "
           f"高度 {stats['deform_height_cm']:+.1f}cm")
-    # 真机可行性（仿真测不出时间，只能用帧数换算）：超了要显式喊出来，
-    # 但**不判失败**——它是"下一轮上真机前必须先去降帧"的提示，不是回归判据。
+    # 真机时间成本换算（仿真帧是瞬时的，测不出时间，所以在这里显式打印）：
+    # 正常区间就打印一行供现场比对；超告警线才喊"需要降帧"，且**不判失败**。
+    est_min = stats["captures"] * REAL_CAPTURE_COST_S / 60.0
     if stats["captures"] > REAL_CAPTURE_BUDGET:
-        print(f"      ⚠ 真机可行性：{stats['captures']} 张 × 3s ≈ "
-              f"{stats['captures'] * 3 / 60:.1f}min > 全局看门狗 13min 的可用份额"
-              f"（{REAL_CAPTURE_BUDGET} 张）——**上真机前应先降帧**")
+        print(f"      ⚠ 真机可行性：{stats['captures']} 张 × "
+              f"{REAL_CAPTURE_COST_S}s ≈ {est_min:.1f}min 超过告警线"
+              f"（{REAL_CAPTURE_BUDGET} 张 ≈ 8.2min）——上真机前应考虑降帧")
+    else:
+        print(f"      真机时间成本：{stats['captures']} 张 × "
+              f"{REAL_CAPTURE_COST_S}s ≈ {est_min:.1f}min"
+              f"（看门狗 13min，余量充足）")
 
 
 def test_baseline_no_deform():
