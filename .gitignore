@@ -16,3 +16,8 @@ __pycache__/
 _cm.txt
 _tmp_*.py
 _tmp_code.py
+
+# 本地会话计划：plan-sess_<uuid>.md 属会话过程产物，默认不入库
+# （已跟踪的历史 plan 文件不受影响，git 对被跟踪文件忽略此规则；
+#   确需入库时用 `git add -f` 显式点名，遵循"禁止 git add -A"的协作铁律）
+/.zcode/plans/
