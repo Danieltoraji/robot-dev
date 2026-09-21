@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# debug.sh —— 视觉调试镜像服务器启停（机器人在 Robot_control_self_module 根目录执行）
+# debug.sh —— 视觉调试镜像服务器启停（机器人在 Robot_Competition 根目录执行）
 # 用法: bash debug.sh [start|stop|status|log]   （默认 start）
 set -u
 cd "$(dirname "$0")"
