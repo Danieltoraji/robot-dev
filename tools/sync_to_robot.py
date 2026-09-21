@@ -246,6 +246,16 @@ def main():
             continue
         with open(local_path, "rb") as f:
             data = f.read()
+        # shell 脚本必须 LF 上机：Windows 侧 core.autocrlf=true 会把工作树 checkout
+        # 成 CRLF，而本脚本是**逐字节**传工作树，于是机器人上的 bash 会把 \r 当成
+        # 命令的一部分而语法报错（2026-09-21 实战：`bash debug.sh` 报
+        # "invalid option: set: -"、"cd: $'.\r'"、case 语句语法错误）。
+        # 注意：.py 不需要这样处理——Python 解释器对 CRLF 无感，实测 v3 的
+        # nine_grid/stairs_hurdle 在机器人上 import 与真机运行均正常。
+        if rel.lower().endswith((".sh", ".bash")) and b"\r\n" in data:
+            n_cr = data.count(b"\r\n")
+            data = data.replace(b"\r\n", b"\n")
+            print(f"[行尾] {rel}: CRLF→LF（{n_cr} 处，shell 脚本必须 LF）")
         if len(data) > 80 * 1024 * 1024:
             print(f"[WARN] 超大文件跳过: {rel} ({len(data) // 1024 // 1024}MB)")
             failed += 1
