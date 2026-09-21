@@ -4,7 +4,15 @@
 sync_to_robot.py —— PC → 机器人代码同步（Jupyter Contents API，零第三方依赖）
 
 机器人端 Jupyter: http://192.168.31.209:8888（密码登录）；
-目标目录: Robot_control_self_module（即 /home/pi/Robot_control_self_module）。
+目标目录: Robot_Competition（即 /home/pi/Robot_Competition）。
+
+⚠️ 2026-09-21 订正：目标根目录原为 Robot_control_self_module，但机器人换 SD 卡
+镜像（Debian 13 / Python 3.13.5）后该目录**不存在**，机器人上实际存放并运行本
+仓库代码的目录是 /home/pi/Robot_Competition（其 main.py/core/levels/vision/
+tools/models 结构与本仓库同源）。若沿用旧默认值，sync 会在 /home/pi 下新建一个
+空目录并写入代码，而机器人仍在跑旧目录 —— 两边分叉、排查方向被带偏。
+换镜像后 robot 上环境已由本轮补齐：fswebcam + scipy/matplotlib/sklearn/
+skimage/joblib/onnxruntime/apriltag（装进 /home/pi/jupyter-env）。
 
 原理：
   1. GET /login 取 _xsrf → POST /login（password）拿会话 cookie；
@@ -20,9 +28,15 @@ sync_to_robot.py —— PC → 机器人代码同步（Jupyter Contents API，�
     python tools/sync_to_robot.py --paths core main.py # 只同步指定路径
     python tools/sync_to_robot.py --host http://IP:8888 --password xxx
 
-默认同步集合: main.py + core/ vision/ levels/ tools/ models/
+默认同步集合: main.py + debug.sh + core/ vision/ levels/ tools/ models/
 （sim/ docs/ tests/ archive/ release/ 仅 PC 使用，不进机器人；
-  例外：archive/result/ninegrid_homography.json 是数字宫格运行时标定产物，附加同步。）
+  例外：archive/result/ 下的运行时标定产物按 EXTRA_FILES 附加同步。）
+
+⚠️ 上机前务必干跑 + 忽略本地清单全量重传：
+    python tools/sync_to_robot.py --check                    # 看将传什么
+    python tools/sync_to_robot.py --full                     # 真传（忽略清单）
+   换 SD 卡/重装机器人后**必须加 --full**：archive/sync_manifest.json 会按
+   (size, mtime) 把"本地未变化"的文件全部跳过，机器人侧全空也照样跳过。
 """
 
 import argparse
@@ -39,7 +53,7 @@ import urllib.request
 
 DEFAULT_HOST = os.environ.get("ROBOT_HOST", "http://192.168.31.209:8888")
 DEFAULT_PASSWORD = "pi"
-DEFAULT_REMOTE_ROOT = "Robot_control_self_module"
+DEFAULT_REMOTE_ROOT = "Robot_Competition"
 DEFAULT_PATHS = ["main.py", "debug.sh", "core", "vision", "levels", "tools", "models"]
 
 # 机器人运行时需要的标定产物：archive/ 默认不同步（PC 专用），这些文件例外。
@@ -174,7 +188,7 @@ def main():
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--password", default=DEFAULT_PASSWORD)
     parser.add_argument("--remote-root", default=DEFAULT_REMOTE_ROOT,
-                        help="机器人侧目标目录（Jupyter 根下，默认 Robot_control_self_module）")
+                        help="机器人侧目标目录（Jupyter 根下，默认 Robot_Competition）")
     parser.add_argument("--paths", nargs="+", default=DEFAULT_PATHS,
                         help="要同步的本地文件/目录（相对仓库根）")
     parser.add_argument("--check", action="store_true",
