@@ -287,6 +287,9 @@ class Analyzers:
                 "overridden": bool(o.shape_override),
                 "clipped": int(o.clipped),
                 "bbox": [x, y, w, h],
+                # 凸包多边形（原生像素 [[x,y],...]）：只包住色块本身，比 bbox
+                # 更贴形。前端优先画它，画不出再退回 bbox 方框。
+                "poly": [[round(px, 1), round(py, 1)] for px, py in o.hull_poly],
             })
         top = panels[0]
         conf = top["shape_conf"] if top["overridden"] else 1.0
@@ -477,6 +480,9 @@ class Hub:
             if dg:
                 for p in dg.get("panels") or []:
                     p["bbox"] = [round(v * scale, 1) for v in p["bbox"]]
+                    if p.get("poly"):
+                        p["poly"] = [[round(px * scale, 1), round(py * scale, 1)]
+                                     for px, py in p["poly"]]
             ln = results.get("line")
             if ln and ln.get("points"):
                 ln["points"] = [[round(x * scale, 1), round(y * scale, 1)]
@@ -640,12 +646,19 @@ function draw() {
          20, sl += 40, p.problems.length ? '#ff8888' : '#ffff88');
   }
   if (ly('ly_digit') && state.results.digit && state.results.digit.panels) {
-    // 与关卡同一链路：每个色块画框并标注 颜色→关卡认定的数字
-    // （* = 被形状仲裁改判；conf 为形状间隔，仅改判时有意义）
+    // 与关卡同一链路：每个色块画**凸包多边形**（只包色块本身，比 bbox 贴形）
+    // 并标注 颜色→关卡认定的数字（* = 被形状仲裁改判）
     const dg = state.results.digit;
     for (const p of dg.panels) {
       const col = p.overridden ? '#ff44ff' : '#ff8800';
-      box(p.bbox, col, 5);
+      if (p.poly && p.poly.length >= 3) {
+        ctx.strokeStyle = col; ctx.lineWidth = 5; ctx.beginPath();
+        p.poly.forEach((q, i) => i ? ctx.lineTo(q[0]*k, q[1]*k)
+                                   : ctx.moveTo(q[0]*k, q[1]*k));
+        ctx.closePath(); ctx.stroke();
+      } else {
+        box(p.bbox, col, 5);   // 退路：多边形拿不到时仍画方框
+      }
       let s = p.color + '→' + p.digit + (p.overridden ? '*' : '');
       if (document.getElementById('ly_conf').checked) {
         s += p.overridden ? ' Δ' + p.shape_conf.toFixed(2)

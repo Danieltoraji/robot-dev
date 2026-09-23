@@ -552,13 +552,13 @@ class PanelObservation:
                  "solidity", "model_digit", "model_conf",
                  "clipped", "hull_centroid_px", "hull_area", "digit_evidence",
                  "shape_digit", "shape_conf", "ambig_color", "ambig_margin_deg",
-                 "ambig_candidates")
+                 "ambig_candidates", "hull_poly")
 
     def __init__(self, color, bbox, center_px, area, solidity,
                  model_digit=None, model_conf=0.0, clipped=False,
                  hull_centroid_px=None, hull_area=0.0, digit_evidence=None,
                  shape_digit=None, shape_conf=0.0, ambig_color=None,
-                 ambig_margin_deg=None, ambig_candidates=()):
+                 ambig_margin_deg=None, ambig_candidates=(), hull_poly=()):
         self.color = color
         self.color_id = COLOR_TO_ID[color]
         self.bbox = bbox                      # (x,y,w,h) 原生像素
@@ -576,6 +576,10 @@ class PanelObservation:
         self.ambig_color = ambig_color         # 主要竞争色（跨色去重的落败者）
         self.ambig_margin_deg = ambig_margin_deg   # 中位 H 距本窗口边界的角度
         self.ambig_candidates = tuple(ambig_candidates)   # 全部竞争色
+        # 色块凸包多边形（原生像素 [(x,y), ...]）。**只包住色块本身**，比 bbox
+        # 更贴形：bbox 会把色块外的背景一起框进来。诊断/可视化用（debug 页面
+        # 画多边形叠加），不参与任何控制判据。
+        self.hull_poly = tuple((float(px), float(py)) for px, py in hull_poly)
 
     @property
     def digit(self):
@@ -816,6 +820,15 @@ class NineGridDetector:
             loser = losers.get(id(item))
             if loser and loser not in amb_list:
                 amb_list.append(loser)
+            # 凸包多边形（工作分辨率 → 原生），供 debug 可视化画"只包色块"的
+            # 多边形叠加。用 approxPolyDP 抽稀，避免每帧几百个点拖慢弱上行链路。
+            try:
+                _poly = cv2.approxPolyDP(
+                    np.asarray(_hull, dtype=np.int32).reshape(-1, 1, 2),
+                    2.0, True).reshape(-1, 2)
+                _poly = [(float(px) * scale, float(py) * scale) for px, py in _poly]
+            except Exception:
+                _poly = []
             obs = PanelObservation(
                 color=color,
                 bbox=(x * scale, y * scale, w * scale, h * scale),
@@ -830,6 +843,7 @@ class NineGridDetector:
                 ambig_color=loser,
                 ambig_margin_deg=amb_margin,
                 ambig_candidates=amb_list,
+                hull_poly=_poly,
             )
             if arbitrate:
                 roi = work[y:y + h, x:x + w]
