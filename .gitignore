@@ -16,6 +16,9 @@ __pycache__/
 _cm.txt
 _tmp_*.py
 _tmp_code.py
+# 例外：现场测量包装器是"可复用工具"而非一次性脚本（两个交互测量脚本只能靠它
+# 远程跑），故显式放行；`_tmp_` 前缀保留以标记"现场任务结束后可删"。
+!tools/_tmp_field_session.py
 
 # 本地会话计划：plan-sess_<uuid>.md 属会话过程产物，默认不入库
 # （已跟踪的历史 plan 文件不受影响，git 对被跟踪文件忽略此规则；

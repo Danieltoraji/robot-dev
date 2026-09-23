@@ -187,17 +187,36 @@ tools/train/train_baseline.sh</code></pre>
 </ul>
 
 <h2>6. PC 侧远程操作（不用登机器人）</h2>
-<pre><code># 通用：在机器人上跑脚本（现场推荐用这个包装器）
+
+<div class="warn">
+<b>⚠️ 交互脚本必须走"终端"，不能走"内核"</b>（2026-09-21 实测更正）<br>
+<code>exec_on_robot.py</code> 与包装器的<b>旧版</b>走的是 Jupyter <b>内核会话</b>，而内核<b>没有 stdin</b>。
+凡是带 <code>input()</code> 的脚本（<code>_tmp_measure_motion.py</code>、<code>_tmp_dist_sweep.py</code>）走内核会直接抛：<br>
+<code>StdinNotImplementedError: raw_input was called, but this frontend does not support input requests.</code><br>
+现已改为走 Jupyter <b>终端</b>（terminado，真 TTY）：有 stdin、ANSI 正常、并自动先激活 venv。
+</div>
+
+<pre><code># 交互脚本：走 Jupyter 终端（有真 TTY，能应答 input()）
 python tools/_tmp_field_session.py --check
 python tools/_tmp_field_session.py --script _tmp_measure_motion.py --args "--group 1a --run"
+python tools/_tmp_field_session.py --script _tmp_dist_sweep.py --args "--tag m2 --distances 40..10,-2 --repeats 2"
+python tools/_tmp_field_session.py --down        # 清理遗留终端
 
-# 底层：直接执行 shell / Python 代码
+# 非交互：内核会话就够（输出干净、无 ANSI）
 python tools/exec_on_robot.py --cmd "iw dev wlan0 get power_save"
 python tools/exec_on_robot.py --code "print(1+1)"
 
 # 传文件
 python tools/sync_to_robot.py --check
 python tools/pull_from_robot.py --remote "archive/result/measure_frames" --dest "tests/fixtures/field_photos"</code></pre>
+
+<div class="warn">
+<b>机器人侧默认 shell 是 dash，不是 bash</b> —— 两处会咬人：<br>
+① <code>sh debug.sh</code> ❌（<code>set -u</code> 不支持）→ 用 <code>bash debug.sh</code>；<br>
+② <code>source /home/pi/jupyter-env/bin/activate</code> 在 <b>dash 里会报 <code>source: not found</code></b>
+（<code>source</code> 是 bash 扩展）→ 用 POSIX 的 <code>. /home/pi/jupyter-env/bin/activate</code>，
+或干脆<b>直接写全解释器路径</b> <code>/home/pi/jupyter-env/bin/python3 &lt;脚本&gt;</code>（最省心，不依赖 shell 状态）。
+</div>
 
 <div class="warn">
 <b>PC 侧每个新终端都要先设一次：</b>
@@ -213,10 +232,13 @@ PY=/home/pi/jupyter-env/bin/python3
 $PY main.py nine_grid                         # 跑关卡
 $PY tools/run_layout_scan.py --no-lock --out m5_pos1.json   # 跑工具（给路径，不要 -m）
 bash debug.sh                                 # 跑 shell（不要 sh）
+. /home/pi/jupyter-env/bin/activate           # 激活 venv（不要用 source：dash 不认）
+                                              # 等价且更省心：直接用上面那个 $PY 全路径
 
 # ============ PC 侧 ============
 $env:PYTHONIOENCODING='utf-8'                 # 每个新终端先设一次
-python tools/_tmp_field_session.py --check    # 远程跑机器人脚本
+python tools/_tmp_field_session.py --check    # 远程跑机器人脚本（走终端，支持交互）
+python tools/exec_on_robot.py --cmd "..."     # 非交互远程执行（走内核，输出干净）
 python tests\test_nine_grid_sim.py            # 跑测试（给路径，不要 -m）</code></pre>
 
 <h2>8. 故障排查：机器人连不上</h2>
