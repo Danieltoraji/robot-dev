@@ -10,8 +10,10 @@ case "${1:-start}" in
   start)
     pkill -f "[d]ebug_server" 2>/dev/null   # 方括号防自匹配；杀掉旧实例
     sleep 1
-    nohup $PY tools/debug_server.py --port $PORT \
-      --digit-templates tools/digit_templates/arial40 \
+    # 2026-09-23：去掉 --digit-templates（digit 分析器改走关卡链路，不再用
+    # 字体模板：色块 → 字形掩膜 → 颜色主判/形状仲裁），并默认打开 digit
+    # 分析器 —— 它的叠加现在反映关卡会认定的数字，是现场排查的关键视图。
+    nohup $PY tools/debug_server.py --port $PORT --enable-digit \
       > /tmp/debug_server.log 2>&1 &
     sleep 3
     IP=$(hostname -I | awk '{print $1}')

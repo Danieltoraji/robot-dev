@@ -249,28 +249,54 @@ class Analyzers:
         return {"yolo": [{"cls": d.cls, "conf": round(d.confidence, 3),
                           "bbox": [round(v, 1) for v in d.bbox]} for d in dets]}
 
-    # ---- digit：DigitRecognizer（模板缺失自动禁用）----
-    def _load_digit(self):
-        from vision.digit_recognizer import DigitRecognizer
-        tdir = self.args.digit_templates
-        templates = {}
-        if os.path.isdir(tdir):
-            cv2 = _cv()
-            for fn in sorted(os.listdir(tdir)):
-                if fn.endswith(".png") and os.path.splitext(fn)[0].isdigit():
-                    tpl = cv2.imread(os.path.join(tdir, fn), 0)
-                    if tpl is not None:
-                        templates[os.path.splitext(fn)[0]] = tpl
-        if not templates:
-            raise RuntimeError(f"数字模板目录为空: {tdir}")
-        self._digit = DigitRecognizer(templates=templates)
-
+    # ---- digit：与关卡同一条链路（色块 → 字形掩膜 → 仲裁/形状裁决）----
+    #
+    # 2026-09-23 重写。旧实现把**整帧**交给 vision.digit_recognizer.DigitRecognizer，
+    # 而那个识别器是为**单字符掩膜**设计的（min_area 默认仅 30px²、且没有任何
+    # 置信度门槛）。实测整帧会产生 84 个候选框（其中 62 个是皮尺刻度级碎片），
+    # 每个框都强行输出一个数字 ⇒ 页面底部出现一条 80+ 位的无意义数字串。
+    #
+    # 现在改为复刻关卡的实际链路（见 levels/nine_grid.layout_scan）：
+    #   detect_panels(arbitrate=True, shape=True)
+    #     → 每个色块的 .color / .color_id / .digit / .shape_digit / .shape_conf
+    #   其中 .digit 即关卡认定的数字：颜色为主判，形状仅在**颜色有歧义**且
+    #   间隔 ≥ SHAPE_OVERRIDE_MIN_CONF(0.30) 时才允许改判。
+    #
+    # 注意：不再需要 --digit-templates（那些 arial/consolas 字体模板只服务于
+    # 旧的整帧识别）；形状仲裁用的是现场自建 models/nine_grid/digit_templates.npz。
     def run_digit(self, frame):
+        from vision.nine_grid_detector import NineGridDetector
         if self._digit is None:
-            self._load_digit()
-        r = self._digit.detect(frame)
-        return {"digit": {"digits": r.digits, "conf": round(r.confidence, 3),
-                          "center": list(r.center_px) if r.center_px else None}}
+            self._digit = NineGridDetector()
+        obs = self._digit.detect_panels(frame, arbitrate=True, shape=True)
+        if not obs:
+            return {"digit": {"digits": "", "conf": 0.0, "center": None,
+                              "panels": [], "note": "未检出任何色块"}}
+        # 按可见面积降序，前端只画前几个以免刷屏
+        obs = sorted(obs, key=lambda o: o.hull_area, reverse=True)[:6]
+        panels = []
+        for o in obs:
+            x, y, w, h = (int(v) for v in o.bbox)
+            panels.append({
+                "color": o.color,
+                "color_id": int(o.color_id),
+                "digit": int(o.digit),              # ← 关卡认定的数字
+                "shape_digit": (None if o.shape_digit is None
+                                else int(o.shape_digit)),
+                "shape_conf": round(float(o.shape_conf), 3),
+                "overridden": bool(o.shape_override),
+                "clipped": int(o.clipped),
+                "bbox": [x, y, w, h],
+            })
+        top = panels[0]
+        conf = top["shape_conf"] if top["overridden"] else 1.0
+        label = " ".join(
+            f"{p['color']}→{p['digit']}" + ("*" if p["overridden"] else "")
+            for p in panels)
+        cx = sum(p["bbox"][0] + p["bbox"][2] / 2.0 for p in panels) / len(panels)
+        cy = sum(p["bbox"][1] + p["bbox"][3] / 2.0 for p in panels) / len(panels)
+        return {"digit": {"digits": label, "conf": round(float(conf), 3),
+                          "center": [cx, cy], "panels": panels}}
 
     def _load_line(self):
         # 兼容两种导入风格：仓库版 line_detector 用 `from vision.detection
@@ -606,10 +632,24 @@ function draw() {
     text(`定位 (${p.position[0]}, ${p.position[1]})cm 朝向(${p.orientation[0]}, ${p.orientation[1]}) 重投影${p.reproj}px${warn}`,
          20, sl += 40, p.problems.length ? '#ff8888' : '#ffff88');
   }
-  if (ly('ly_digit') && state.results.digit && state.results.digit.digits) {
+  if (ly('ly_digit') && state.results.digit && state.results.digit.panels) {
+    // 与关卡同一链路：每个色块画框并标注 颜色→关卡认定的数字
+    // （* = 被形状仲裁改判；conf 为形状间隔，仅改判时有意义）
     const dg = state.results.digit;
-    if (dg.center) box([dg.center[0]-60, dg.center[1]-60, 120, 120], '#ff8800', 4);
-    text('digit ' + dg.digits + ' ' + dg.conf.toFixed(2), 20, canvas.height - 20, '#ff8800');
+    for (const p of dg.panels) {
+      const col = p.overridden ? '#ff44ff' : '#ff8800';
+      box(p.bbox, col, 5);
+      let s = p.color + '→' + p.digit + (p.overridden ? '*' : '');
+      if (document.getElementById('ly_conf').checked) {
+        s += p.overridden ? ' Δ' + p.shape_conf.toFixed(2)
+                          : (p.shape_digit != null ? ' vs' + p.shape_digit : '') +
+                            (p.clipped ? ' clip' : '');
+      }
+      text(s, p.bbox[0], Math.max(p.bbox[1] - 10, 30), col);
+    }
+    const summary = dg.note ? ('digit: ' + dg.note)
+                            : ('digit ' + dg.digits);
+    text(summary, 20, canvas.height - 20, '#ff8800');
   }
   if (ly('ly_line') && state.results.line && state.results.line.points) {
     const L = state.results.line;
@@ -735,9 +775,8 @@ def main():
     ap.add_argument("--model", default=DEFAULT_MODEL,
                     help=f"YOLO onnx 模型（默认 {DEFAULT_MODEL}）")
     ap.add_argument("--conf", type=float, default=0.45, help="YOLO 置信度阈值")
-    ap.add_argument("--digit-templates",
-                    default="tools/digit_templates/arial40",
-                    help="数字模板目录（0.png~9.png；缺失则 digit 分析器禁用）")
+    # 注：2026-09-23 起 digit 分析器改走关卡链路（detect_panels + 形状仲裁），
+    # 不再使用 arial/consolas 字体模板，故 --digit-templates 已移除。
     ap.add_argument("--no-tag", action="store_true", help="初始关闭 tag 分析器")
     ap.add_argument("--no-yolo", action="store_true", help="初始关闭 yolo 分析器")
     ap.add_argument("--enable-digit", action="store_true", help="初始启用 digit 分析器")
