@@ -470,6 +470,13 @@ class Hub:
             dg = results.get("digit")
             if dg and dg.get("center"):
                 dg["center"] = [round(v * scale, 1) for v in dg["center"]]
+            # ⚠️ panels[].bbox 也必须缩 —— 否则页面上的面板框按原生分辨率画，
+            # 在降采样显示图上会放大约 1/scale 倍（960/2592 → 2.7×）而错位。
+            # 2026-09-23 实测踩坑：文字（用 center，已缩放）大致在位，框却巨大
+            # 且套不住面板，看起来像"识别错了"，实际是坐标契约不一致。
+            if dg:
+                for p in dg.get("panels") or []:
+                    p["bbox"] = [round(v * scale, 1) for v in p["bbox"]]
             ln = results.get("line")
             if ln and ln.get("points"):
                 ln["points"] = [[round(x * scale, 1), round(y * scale, 1)]
