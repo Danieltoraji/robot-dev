@@ -186,36 +186,56 @@ tools/train/train_baseline.sh</code></pre>
   <li>ℹ️ debug 镜像服务<b>不占用摄像头</b>：全文件无 <code>cv2.VideoCapture</code>，唯一碰设备处是网页按钮触发的 <code>fswebcam</code> 子进程（拍完即退）；后台 watchdog 每 0.5 秒只扫盘分析已有 JPEG。测量期间可以开着，只需别点网页上的拍照按钮。</li>
 </ul>
 
-<h2>6. PC 侧远程操作（不用登机器人）</h2>
+<h2>6. 两种操作分工（2026-09-23 定稿）</h2>
 
-<div class="warn">
-<b>⚠️ 交互脚本必须走"终端"，不能走"内核"</b>（2026-09-21 实测更正）<br>
-<code>exec_on_robot.py</code> 与包装器的<b>旧版</b>走的是 Jupyter <b>内核会话</b>，而内核<b>没有 stdin</b>。
-凡是带 <code>input()</code> 的脚本（<code>_tmp_measure_motion.py</code>、<code>_tmp_dist_sweep.py</code>）走内核会直接抛：<br>
-<code>StdinNotImplementedError: raw_input was called, but this frontend does not support input requests.</code><br>
-现已改为走 Jupyter <b>终端</b>（terminado，真 TTY）：有 stdin、ANSI 正常、并自动先激活 venv。
+<div class="ok">
+<b>定稿分工</b>：<b>人</b>全程用 SSH（PowerShell 比网页终端顺手）；<b>AI</b> 用 <code>exec_on_robot.py</code>（Jupyter REST，密码内置，无需额外配置）。
 </div>
 
-<pre><code># 交互脚本：走 Jupyter 终端（有真 TTY，能应答 input()）
-python tools/_tmp_field_session.py --check
-python tools/_tmp_field_session.py --script _tmp_measure_motion.py --args "--group 1a --run"
-python tools/_tmp_field_session.py --script _tmp_dist_sweep.py --args "--tag m2 --distances 40..10,-2 --repeats 2"
-python tools/_tmp_field_session.py --down        # 清理遗留终端
+<pre><code># ============ 人：SSH（推荐，交互脚本必须走这条）============
+ssh pi@192.168.31.209              # 密码 pi；登录 shell 就是 bash，source 可用
+cd /home/pi/Robot_Competition
+source /home/pi/jupyter-env/bin/activate
+which python                       # 应显示 /home/pi/jupyter-env/bin/python
 
-# 非交互：内核会话就够（输出干净、无 ANSI）
+# ============ AI：exec_on_robot.py（走 Jupyter 内核，非交互）============
 python tools/exec_on_robot.py --cmd "iw dev wlan0 get power_save"
 python tools/exec_on_robot.py --code "print(1+1)"
-
-# 传文件
 python tools/sync_to_robot.py --check
 python tools/pull_from_robot.py --remote "archive/result/measure_frames" --dest "tests/fixtures/field_photos"</code></pre>
 
 <div class="warn">
-<b>机器人侧默认 shell 是 dash，不是 bash</b> —— 两处会咬人：<br>
-① <code>sh debug.sh</code> ❌（<code>set -u</code> 不支持）→ 用 <code>bash debug.sh</code>；<br>
-② <code>source /home/pi/jupyter-env/bin/activate</code> 在 <b>dash 里会报 <code>source: not found</code></b>
-（<code>source</code> 是 bash 扩展）→ 用 POSIX 的 <code>. /home/pi/jupyter-env/bin/activate</code>，
-或干脆<b>直接写全解释器路径</b> <code>/home/pi/jupyter-env/bin/python3 &lt;脚本&gt;</code>（最省心，不依赖 shell 状态）。
+<b>⚠️ 内核没有 stdin：交互脚本（带 <code>input()</code> 的）不能走 <code>exec_on_robot.py</code></b><br>
+<code>exec_on_robot.py</code> 走的是 Jupyter <b>内核会话</b>，内核不支持输入请求。凡是停下等输入的脚本
+（<code>_tmp_measure_motion.py</code>、<code>_tmp_dist_sweep.py</code>）走它会直接抛：<br>
+<code>StdinNotImplementedError: raw_input was called, but this frontend does not support input requests.</code><br>
+<b>所以那两个测量脚本必须由人在 SSH 里跑</b>。AI 若需代跑，只能用管道喂 stdin
+（<code>printf '值\n值\n' | python tools/xxx.py</code>），已实测可行，但需要人先把测量值报给 AI。
+</div>
+
+<div class="warn">
+<b>机器人上 <code>python</code> 默认不是 venv</b> —— 这是最容易踩的一条：<br>
+默认 <code>python</code> = <code>/usr/bin/python3</code>，它<b>只有</b> Debian dist-packages
+（numpy / cv2 / serial / smbus / RPi），<b>没有</b> scipy / apriltag / onnxruntime / sklearn，
+我们的代码跑不起来。<br>
+三种解法（任选）：<br>
+① <code>source /home/pi/jupyter-env/bin/activate</code>（SSH/bash 下可用；<b>Jupyter 网页终端是 dash，要用 <code>.</code></b>）；<br>
+② 直接用全路径 <code>/home/pi/jupyter-env/bin/python3 &lt;脚本&gt;</code>（最省心，不依赖 shell 状态）；<br>
+③ 把 venv 的 bin 前置到 PATH（见下）。<br>
+验证：<code>which python</code> 应显示 <code>/home/pi/jupyter-env/bin/python</code>。
+</div>
+
+<div class="ok">
+<b>可选（一劳永逸，改的是机器人 <code>~/.bashrc</code>，不碰仓库代码）</b>：让 SSH 一登录就是 venv。
+<pre><code>echo 'export PATH=/home/pi/jupyter-env/bin:$PATH' &gt;&gt; ~/.bashrc   # 追加前先确认没有重复</code></pre>
+代价：<code>python</code>/<code>pip</code> 全局都指向 venv。只要不装系统级包就没副作用。
+</div>
+
+<div class="warn">
+<b>机器人侧默认 shell 的坑</b>：<br>
+① SSH 登录 shell 是 <b>bash</b>（<code>source</code> 正常）；<b>Jupyter 网页终端是 dash</b>，
+<code>source</code> 会报 <code>source: not found</code> → 用 <code>.</code>；<br>
+② <code>sh debug.sh</code> ❌（<code>set -u</code> 不支持）→ 用 <code>bash debug.sh</code>。
 </div>
 
 <div class="warn">
