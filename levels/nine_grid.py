@@ -218,6 +218,63 @@ FIELD_SMALL_TURN_STEP_DEG = 11.0
 # 有下限后最多请求 6 小步（≈12°），且**每轮都重新拍帧复测 yaw**，过冲由下
 # 一轮吸收——收敛靠闭环，不靠这个常数准。
 VIS_SMALL_TURN_MIN_STEP_DEG = 0.8
+
+# =====================================================================
+# 三档分区横向控制律（v3 对准，2026-09-23）—— 默认**关闭**，见 VIS_ZONE_ENABLED
+# =====================================================================
+# 动机：现行二值判据（|yaw| ≤ VIS_ALIGN_TOL_DEG 就前进，否则转）把"角度分辨率"
+# 当成唯一修正手段。但真机小转一步实测是**左 8.625° / 右 5.200°**（runbook §2），
+# 死区 12° 对右转只有 2.3 个步长、对左转 1.4 个 ⇒ 一步跨不出去就会
+# "转一步过冲 → 反号再转 → 再过冲"，现场表现就是"在死区里打转"。
+# 而**横移一步是厘米级的**（实测 2.497 / 2.200 cm/步），精度远好于角度量化。
+# 所以把修正手段按精度排成三档：
+#
+#   ★ 与用户给的图一一对应：
+#     绿（直行）= 方位角很小的中央梯形。图像里两腰是直线，而"方位角恒定"
+#        对应的正是**过光心的竖直平面** ⇒ 形状必然是上窄下宽的等腰梯形。
+#     蓝（横移）= 方位角已明显（> MOVE_DEG）但**够近**，横移才有权威。
+#     橙（旋转）= 方位角太大，**或太远** —— 这就是图里蓝/橙之间那条**水平分界线**。
+#
+#   ★ "够近"用尺度不变量 near = 框宽 / 画幅高，不用像素行：
+#     框宽是**投影不变量**（∝1/深度，同 _arrive_visual 的 dx_cm），除以画幅高后
+#     无量纲 ⇒ 换俯仰档、地板形变都不改阈值。物理依据：横移一步改变的"跨越偏差"
+#     恒为 2.2~2.5cm（与距离无关），但它改变方位角的效果 ∝ 1/距离 ⇒ 1m 外一步
+#     只改 ~1.4°，效率极低，该改用旋转。
+#
+#   ★ 曾试过用"跨越偏差厘米数"当门（off_cm = 像素偏移/框宽×PANEL_WIDTH_CM）：
+#     几何上更正确（恒定地面宽度走廊，反投影自检 X 极差 0.0000cm），但**离线
+#     实测更差** —— 面板被画幅裁切时框宽只剩可见窄条 ⇒ off_cm 被系统性高估，
+#     而现场 74% 的观测是裁切的 ⇒ 过度纠偏。三种阈值组合都没打赢二值基线。
+#     故两个门都只用方位角 + near。
+VIS_ZONE_MOVE_DEG = 6.0         # 方位角 ≤ 此值（度）→ 直行（绿）
+VIS_ZONE_ROT_DEG = 12.0         # 方位角 ≤ 此值（度）**且够近** → 横移（蓝）
+VIS_ZONE_ROT_NEAR = 0.35        # "够近"门槛 = 框宽/画幅高（见 _near_of）
+# 来源一：**整关仿真 + 实测运动原语**的 36 组网格扫描（tools/_tmp_zone_eval.py
+#   --sweep，4 局共 28 格）。基线（二值 12° 死区）到达 21/28；全场最优即本组
+#   6.0/12.0/0.35 → **27/28**（动作 705→911，拍照 1126→1168）。
+#   次优 6/12/0.5 与 6/18/0.5 都是 26/28 但动作更少（~740）。
+# 来源二：运动学级对照（tools/_tmp_zone_sim.py，50 组初值网格）。
+#   那里 6/18/0.35 最好（31/50 vs 基线 25/50），与整关仿真不一致——因为运动学
+#   模型没有"接近/到达"两段与识别噪声。**以整关仿真为准**（它的口径更接近真机）。
+# 二值律的失败**残余都在 150~170cm**（方向搞反后一路转出去），分区律把大部分
+# 救回来（残余降到 3~7cm）——横移档的价值：它不靠"转对方向"吃饭，只靠"看目标
+# 偏在哪边就往哪边挪"，对方向标定免疫。
+VIS_ZONE_ENABLED = False        # False → 完全走原二值死区路径（默认，见下方理由）
+# ★ 为什么默认关闭（**不是没做完，是风险控制**）：
+#   离线对照（tools/_tmp_zone_eval.py）显示分区律的收益**只在"仿真与关卡都用
+#   实测运动常量"时才体现**：
+#     仿真原语=实测 + 关卡常量=实测 → 到达 49/56(二值) vs **54/56**(分区)
+#     仿真原语=名义 + 关卡常量=名义 → 两者几乎无差别
+#       （12° 死区在 2° 步长下有 6 个步长、绝对够用；真实 5.2~8.6° 步长下只有
+#         1.4~2.3 个步长 —— 那才是现场"在死区里打转"的根因）
+#   而把仿真与关卡常量一起换成实测值，会让现有仿真基线（SIM_LAYOUT/seed=3）
+#   从 7/7 掉到 5/7 —— 那是独立一项工作（runbook 3a）。
+#   ⇒ 在常量仍是名义值的当下打开分区律，等于用"为 2° 步长调的阈值"去指挥一个
+#     5.2~8.6° 步长的机器人，离线实测退化到 2/7。所以分两步交付：
+#       ① 本次：可开关、可离线对照、**默认行为逐位不变**（本开关 False）
+#       ② 运动常量换实测值那一步做完后：把本开关翻成 True 并重跑基线
+#   翻开关前先跑 python tools/_tmp_zone_eval.py 看两律的到达/代价对照。
+
 PANEL_WIDTH_CM = 28.0           # 色块宽（像素↔厘米换算基准；与 PANEL_HALF_CM 同源）
 # 到达触发：目标框宽（px）——"目标已进入 ~35cm"的**相对深度**代理
 # （2026-09-11 由 820 收紧到 920，真机"踩不到微动开关"的根因之一）。
@@ -2041,6 +2098,47 @@ class NineGridLevel:
         print(f"[搜索] 面板{digit} 搜索用尽（{frames} 帧）")
         return None
 
+    def _off_cm_of(self, obs, frame, box):
+        """跨越偏差（cm）= 目标横向像素偏移 / 框宽 × PANEL_WIDTH_CM
+
+        投影不变量：等于"横向物理偏移 ÷ 面板物理宽"，与相机高度/俯仰/地板形变
+        全无关（同 _arrive_visual 的 dx_cm）。
+        ⚠️ 只用于**日志/遥测**，不参与分区判据：面板被画幅裁切时框宽只剩可见窄条
+        ⇒ 它会系统性高估（现场 74% 观测是裁切的）。详见 VIS_ZONE_MOVE_DEG 说明。
+        """
+        w = float(frame.shape[1])
+        center_x = float((obs.hull_centroid_px if obs.clipped
+                          else obs.center_px)[0])
+        if box <= 1.0:
+            return 0.0
+        return (center_x - w / 2.0) / box * PANEL_WIDTH_CM
+
+    def _near_of(self, box, frame):
+        """目标"够近"的尺度不变量 = 框宽 / 画幅高（见 VIS_ZONE_MOVE_DEG 说明）
+
+        框宽是投影不变量（∝1/深度），除以画幅高后无量纲 ⇒ 换分辨率、换俯仰档
+        都不用改阈值，也不受地板形变影响。远处值小 → 只许旋转；近处值大 → 允许
+        横移。这正是用户图里蓝/橙之间那条**水平分界线**的物理含义。
+        """
+        H = float(frame.shape[0])
+        return float(box) / H if H > 0 else 0.0
+
+    def _zone_of(self, yaw, off_cm=0.0, near=1.0):
+        """分区判定 → (zone, off_cm)
+
+        zone ∈ {"move" 直行, "lat" 横移, "rot" 旋转}（对应图的绿/蓝/橙）。
+        VIS_ZONE_ENABLED=False 时**完全等价于原二值死区判据**（返回 "move"/"rot"，
+        从不返回 "lat"），保证默认行为逐位不变。
+        """
+        if not VIS_ZONE_ENABLED:
+            return ("move", off_cm) if abs(yaw) <= VIS_ALIGN_TOL_DEG \
+                else ("rot", off_cm)
+        if abs(yaw) <= VIS_ZONE_MOVE_DEG:
+            return "move", off_cm
+        if abs(yaw) <= VIS_ZONE_ROT_DEG and near >= VIS_ZONE_ROT_NEAR:
+            return "lat", off_cm
+        return "rot", off_cm
+
     def _align_visual(self, digit, t_end, max_iters=6, first_seen=None):
         """闭环对准（误差源 = 像素 yaw）→ (obs, frame, box) 或 None
 
@@ -2147,9 +2245,30 @@ class NineGridLevel:
                                 f"死区外左右来回摆 {self._align_flips} 次"
                                 f"（{prev_yaw:+.1f}°→{yaw:+.1f}°）"):
                             return None
-            if abs(yaw) <= VIS_ALIGN_TOL_DEG:
+            if abs(yaw) <= VIS_ALIGN_TOL_DEG or (
+                    VIS_ZONE_ENABLED and self._zone_of(
+                        yaw, self._off_cm_of(obs, frame, box),
+                        self._near_of(box, frame))[0] == "move"):
+                # 已对准就交棒。VIS_ZONE_ENABLED=False 时后半段短路，判据与原来
+                # 逐位相同（abs(yaw) <= VIS_ALIGN_TOL_DEG）。
                 print(f"[对准] 已对准（yaw {yaw:+.1f}°，框宽 {box:.0f}px）")
                 return obs, frame, box
+            # ---- 三档分区的中间档：横移（厘米级，最准）----
+            # 仅在 VIS_ZONE_ENABLED=True 时可达；关闭时 _zone_of 只会返回
+            # move/rot，这里永不进入 ⇒ 默认行为零变化。
+            if VIS_ZONE_ENABLED and self._zone_of(
+                    yaw, self._off_cm_of(obs, frame, box),
+                    self._near_of(box, frame))[0] == "lat":
+                lat = "left_move" if yaw > 0 else "right_move"
+                self._act(lat, 1)
+                last_act, last_n = lat, 1
+                print(f"[对准] 平移档 {lat}（yaw {yaw:+.1f}°，"
+                      f"off {self._off_cm_of(obs, frame, box):+.1f}cm）")
+                # ★ 必须更新 prev_yaw：打转判据比的是"上一步之后 |yaw| 有没有变小"，
+                # 横移是**有效动作**（把目标拉回中央）；不更新会让判据拿两步前的值
+                # 比、把横移序列误判成"连续无改善"→ 假熔断。
+                prev_yaw, prev_n = yaw, 1
+                continue
             # 大转**只作兜底**：① 误差本来就大（>30°）；② 大转振荡记忆未生效时
             # 才用。振荡已发生时不再调 _big_turn（它会直接 return，等于空转），
             # 落到下面的小转闭环——保证每一轮都发出**真实动作**，不会空转。
