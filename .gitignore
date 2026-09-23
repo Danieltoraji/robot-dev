@@ -12,6 +12,11 @@ __pycache__/
 # 编辑器
 .vscode/
 
+# 真值集总图：由 tools/build_truth_matrix.py 生成（5310x3056），默认写
+# archive/result/truth/。**不要**把它留在帧目录里——任何 glob('*.jpg') 的
+# 工具都会把它当帧去检测，从而打乱真值集的 rank（曾因此让真值集整体失配）。
+tests/fixtures/nine_grid_truth/truth_matrix.jpg
+
 # 临时文件（提交信息/调试脚本，勿入库）
 _cm.txt
 _tmp_*.py

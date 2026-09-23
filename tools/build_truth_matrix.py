@@ -56,7 +56,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="生成 nine_grid 真值分类总图")
     ap.add_argument("--frames", default=DEFAULT_FRAMES,
                     help="现场帧目录（默认 tests/fixtures/nine_grid_truth）")
-    ap.add_argument("--outdir", default=None, help="输出目录（默认 = --frames）")
+    ap.add_argument("--outdir", default=None, help="JSON 输出目录（默认 = --frames）")
+    ap.add_argument("--img-dir", default=None,
+                    help="总图输出目录。**默认与 --frames 分开**：总图分辨率"
+                         "5310x3056，若留在帧目录里，任何 glob('*.jpg') 的工具"
+                         "都会把它当帧去检测，从而打乱 rank（曾因此让真值集失配）")
     ap.add_argument("--pad", type=float, default=0.40, help="bbox 外扩比例")
     ap.add_argument("--cell", type=int, default=430, help="每格边长 px")
     ap.add_argument("--min-obs", type=int, default=4,
@@ -66,6 +70,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     outdir = args.outdir or args.frames
+    img_dir = args.img_dir or os.path.join(_ROOT, "archive/result/truth")
     tpath = args.truth or os.path.join(outdir, "ground_truth.json")
     if not os.path.isfile(tpath):
         print(f"缺少人工裁定文件: {tpath}", file=sys.stderr)
@@ -180,7 +185,8 @@ def main(argv=None):
             rows.append(it)
         y += C
 
-    mpath = os.path.join(outdir, "truth_matrix.jpg")
+    mpath = os.path.join(img_dir, "truth_matrix.jpg")
+    os.makedirs(img_dir, exist_ok=True)
     cv2.imwrite(mpath, sheet, [cv2.IMWRITE_JPEG_QUALITY, 82])
 
     json.dump({"note": gt.get("note", ""), "colors": index},
