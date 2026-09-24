@@ -727,8 +727,17 @@ VIS_UNIFIED_TURN_MAX = 4
 #   机理：**地图方位 → 逐步转过去 → 每一步都拍照复测**。方位只用来决定"往哪边转"，
 #   转多少完全由视觉闭环决定（转多了下一步反向吸收）——这不违反"不用死推"：
 #   `self.pose` 是布局扫/到达锚定的结果，且**只用于选方向**，不产生任何"到位"结论。
-VIS_REACQ_MAX_TURN_DEG = 420.0   # 单次重捕获允许累计转过的角度（>360° 留余量）
-VIS_REACQ_MAX_FRAMES = 40        # 单次重捕获拍照上限（一轮 360°/5° ≈ 72 帧，取半圈量级）
+VIS_REACQ_MAX_TURN_DEG = 720.0   # 单次重捕获允许累计转过的角度（2 整圈；见下）
+VIS_REACQ_MAX_FRAMES = 110       # 单次重捕获拍照上限
+# 为什么是 720°／110 帧（实测定的，不是拍的）：
+#   上一格跑完时目标常在**正后方**。旧值（420°/40 帧 + 每 4 帧才转一步）实测只能
+#   转过 ≈55°，于是"目标在身后"的整格**一步未动就放弃**——seed 3 有 4/7 格是这种
+#   （逐格真值轨迹：起点=终点，一格都没走）。
+#   算账：小转一步实测左 8.625°/右 5.200° ⇒ 转 180° 要 21~35 步；每 2 帧转一步
+#   ⇒ 42~70 帧。取 110 帧/720°（=2 整圈）覆盖最坏情况（提示方向错、要绕一圈）。
+#   ⚠️ 与"单格 360° 转向预算"的关系：预算是防"在原地打转"，重捕获是**有目标方向**
+#   的搜索 ⇒ 二者分别记账，见 `_unified_reacquire` 对 `_cell_turn_deg` 的处理。
+VIS_REACQ_STRIDE = 2             # 每丢几帧转一步（取 2：比 4 快一倍，仍每步复测）
 # ---- 前进的快慢两档（**整帧色占比**分界，见 `_go_to_panel_unified` 的说明）----
 # 实测 `whole`↔距离：60cm→0.056｜50→0.072｜40→0.092｜35→0.103｜30→0.115
 #                    25→0.126｜20→0.137｜15→0.147（此后随裁切不再增）
@@ -2306,6 +2315,7 @@ class NineGridLevel:
         turns = 0
         self._reacq_deg = 0.0          # 本轮重捕获已累计转过的角度
         self._reacq_frames = 0
+        self._reacq_dir = None         # 本轮重捕获的转向方向（一次定死）
         prev_zone = None
         prev_cov = None
         prev_org = None
@@ -2350,6 +2360,7 @@ class NineGridLevel:
                 turns = 0
                 self._reacq_deg = 0.0
                 self._reacq_frames = 0
+                self._reacq_dir = None
                 # ---- 三档分区（判档只吃像素）----
                 head_pulse = getattr(self.state, "current_head_pulse",
                                      HEAD_CENTER)
@@ -2465,18 +2476,22 @@ class NineGridLevel:
             self.state.set_head(HEAD_CENTER)
             print(f"[重捕获] 面板{digit} 头部四档未扫到 → 按地图方位逐步转过去")
             return turns, 0.0
-        if lost % UNIFIED_LOSS_TOLERATE != 0:
+        if lost % VIS_REACQ_STRIDE != 0:
             return turns, 0.0
-        bearing = self._bearing_to_target_deg(digit)
-        # 方向：优先地图方位；拿不到时用"上次看到它在哪一侧"；都没有就固定左转
-        want_left = (bearing > 0.0) if bearing is not None else \
-            (float(getattr(self, "_last_seen_side", 1.0)) >= 0.0)
+        # ★ 转向方向**一次定死、中途不改**（见上：反复翻向会退化成原地摆动）
+        if self._reacq_dir is None:
+            bearing = self._bearing_to_target_deg(digit)
+            if bearing is not None:
+                self._reacq_dir = 1.0 if bearing > 0.0 else -1.0
+            else:
+                self._reacq_dir = (1.0 if float(getattr(
+                    self, "_last_seen_side", 1.0)) >= 0.0 else -1.0)
+        want_left = self._reacq_dir > 0.0
         step = TURN_LEFT_SMALL_DEG if want_left else -TURN_RIGHT_SMALL_DEG
         act = "turn_left_small_step" if want_left else "turn_right_small_step"
         turns += 1
-        print(f"[重捕获] 面板{digit} 连续 {lost} 帧未见"
-              f"（地图方位 {'?' if bearing is None else f'{bearing:+.0f}°'}）"
-              f" → {_action_cn(act)}（第 {turns} 步，已转 {self._reacq_deg:.0f}°）")
+        print(f"[重捕获] 面板{digit} 连续 {lost} 帧未见 → {_action_cn(act)}"
+              f"（第 {turns} 步，已转 {self._reacq_deg:.0f}°）")
         self._act(act, 1)
         return turns, step
 
