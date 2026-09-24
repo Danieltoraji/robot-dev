@@ -68,6 +68,7 @@ core.ground_homography.from_pose 的 head_in_pose）转为机器人系地面坐�
 用 state.set_pitch 保证俯仰与期望视野一致（GN 按 pitch 档投影）。
 """
 
+import math
 import time
 from collections import namedtuple
 from itertools import combinations
@@ -441,6 +442,14 @@ VIS_ARRIVE_MIN_BOX_PX = 0.0
 # 只有"这一帧的几何能否被地图解释"能分辨 ⇒ 用 `_map_anchor` 解实测位姿后，
 # 要求它落在目标格附近。
 VIS_ARRIVE_ONCELL_ENABLED = True    # 总开关
+# ★ 横向上限（cm）：**单块面板**即可判，不需要锚/对应点集 ⇒ 近距离也稳。
+#   实测门成立帧：真到达 2.5~6.5cm（中位 4.7）｜ 假到达 5.3~159.5cm（中位 29.9）
+#   —— 单看这两行像是干净可分，**但实际 A/B 是否决 0 次、指标逐位不变**：
+#   7 帧假到达里**有 6 帧横向只有 5~12cm**（它们本来就在目标格正下方偏一点，
+#   只是**纵向**不在格上），只有 1 帧是 159.5cm 那种离谱值。
+#   ⇒ 它只能拦住"横向离谱"的少数情形，**不是主判据**；默认 **0（关闭）**，
+#   常量保留以便需要时显式开启（会拦住极端的横向错位）。
+VIS_ARRIVE_LATERAL_MAX_CM = 0.0
 VIS_ARRIVE_ONCELL_TOL_CM = 16.7     # 距格心容差（= 半格；压感区半宽 5.5cm，
 #                                     但锚本身有位姿误差，取半格更稳）
 VIS_ARRIVE_ONCELL_REQUIRE = False   # 锚**不可用**时是否也拒绝
@@ -2693,6 +2702,37 @@ class NineGridLevel:
         print(f"[航向] 面板{digit} 视觉重解航向：修正 {delta:+.1f}°")
         return True
 
+    def _lateral_off_cm(self, px, box, frame_w):
+        """目标面板的**横向偏离（cm，绝对值）** —— 单块面板即可算，不需对应点集
+
+        原理：横向偏离 = 深度 × tan(方位角)，而深度可由"面板物理半宽 / 它占的半视场角"
+        给出（相似三角形）。两个量都取自**同一块面板**，所以不需要锚、也不需要
+        多块面板的对应点 —— 这正是它比 `_map_anchor` 更适合"站在格心上"这种
+        近距离情形的原因（那里画面里只有 2~4 块面板、对应点饥饿）。
+
+        ⚠️ 必须用**低阶形式** `h·tan(方位) / tan(半视场)`。
+        精确解 `a = h·cos(b)/sin(ps−b)`（b=面板中心方位、ps=观测点方位）
+        在近距离会**奇异**（实测给出 685°、−2107° 这种值，因为 ps−b 趋近 0）。
+
+        实测（门成立帧，真值打标）：
+            真到达（≤半格）2.5 ~ 6.5cm（中位 4.7）
+            假到达        5.3 ~ **159.5**cm（中位 29.9）
+        单块面板都取不到时返回 None。
+        """
+        if frame_w <= 0 or box <= 1.0:
+            return None
+        try:
+            yaw = abs(self._body_yaw_deg(px, frame_w))
+            half = box / 2.0
+            h_deg = abs(self._body_yaw_deg(px + half, frame_w)
+                        - self._body_yaw_deg(px - half, frame_w)) / 2.0
+        except Exception:
+            return None
+        t = math.tan(math.radians(max(h_deg, 0.5)))
+        if t < 1e-6:
+            return None
+        return PANEL_HALF_CM * math.tan(math.radians(yaw)) / t
+
     def _on_target_cell(self, frame, digit):
         """★ 格的同一性核验（用户方案 ②-a）：实测位姿是否真的落在目标格上？
 
@@ -2712,6 +2752,26 @@ class NineGridLevel:
         """
         if not VIS_ARRIVE_ONCELL_ENABLED:
             return "unknown", "核验开关关闭"
+        # ★ 先在**单块面板**上判横向偏离（不需要对应点集，近距离也稳）。
+        #   实测门成立帧：真到达 2.5~6.5cm ｜ 假到达 5.3~159.5cm（中位 29.9）
+        #   ⇒ 超限即否决，**这一条不需要锚**，因此不受"对应点饥饿"影响。
+        obs_here = None
+        try:
+            obs_here = self.detector.detect_panels(
+                frame, colors=[self._target_color(digit)], drop_border=False)
+        except Exception:
+            obs_here = None
+        if obs_here and VIS_ARRIVE_LATERAL_MAX_CM > 0.0:
+            o = max(obs_here, key=lambda x: x.hull_area)
+            p = o.hull_centroid_px if o.clipped else o.center_px
+            box = float(o.bbox[2])
+            if o.clipped:
+                box = max(box, float(np.sqrt(max(o.hull_area, 1.0))))
+            lat = self._lateral_off_cm(float(p[0]), box, float(frame.shape[1]))
+            if lat is not None and lat > VIS_ARRIVE_LATERAL_MAX_CM:
+                return "no", (f"横向偏离 {lat:.0f}cm > {VIS_ARRIVE_LATERAL_MAX_CM:.0f}cm"
+                              f"——目标面板不在正下方，疑为邻格同色面板"
+                              f"（单面板判据，无需锚）")
         try:
             full = self.detector.detect_panels(frame, drop_border=False)
         except Exception:
