@@ -259,3 +259,35 @@ def test_on_target_cell_disabled_switch():
         assert v == "unknown"
     finally:
         NG.VIS_ARRIVE_ONCELL_ENABLED = old
+
+
+def test_anchor_corr_returns_a_two_tuple():
+    """★ 契约闸：`_anchor_corr` 返回 **(对应点列表, 观测列表) 二元组**
+
+    钉这条是因为我连续用错：写成 `len(self._anchor_corr(...))` 会**恒等于 2**
+    （元组长度）而不是对应点数 —— 据此得出"锚只有 2 对对应点、可用率 8.3%"的
+    **错误结论**，还差点去改阈值。正确用法是 `corr, keep = ...; len(corr)`。
+    实测（修正后）：入口站位 7 个面板全未裁切 ⇒ **7 对**、锚可解（n_in=7）；
+    站在格心低头 ⇒ 6 观测 / **7 对**、锚可解（n_in=5）。
+    """
+    from core.ground_homography import grid_cell_center
+    lv = _level()
+    lv.digit_cell = {1: 3}
+
+    class _O:
+        digit = 1
+        clipped = False
+        center_px = (100.0, 200.0)
+        hull_poly = ()
+        color_id = 1
+
+    frame = np.zeros((100, 200, 3), np.uint8)
+    out = lv._anchor_corr([_O()], frame)
+    assert isinstance(out, tuple) and len(out) == 2, (
+        f"_anchor_corr 应返回 (corr, keep) 二元组，实际 {type(out)}")
+    corr, keep = out
+    assert len(corr) == 1, "1 个未裁切观测应给出 1 对对应点"
+    assert len(keep) == 1
+    g, p = corr[0][0], corr[0][1]
+    assert np.allclose(g, np.asarray(grid_cell_center(3), float)), g
+    assert np.allclose(p, (100.0, 200.0)), p
