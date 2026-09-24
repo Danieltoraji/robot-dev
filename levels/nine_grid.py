@@ -349,6 +349,18 @@ VIS_ARRIVE_PRESS_FINE_STEPS = 1     # 到峰/过峰后每段步数（2cm，精�
 # **横移控制**（见 _arrive_visual）——擦边条的凸包质心不是面板中心的合理估计。
 VIS_ARRIVE_EVIDENCE_MIN_ASPECT = 0.5   # 证据区域的 h/w 下限（擦边条 ≈0.35）
 VIS_ARRIVE_EVIDENCE_MIN_COVER = 0.08   # 证据区域面积占画幅比下限（假到达 0.042）
+# ★ 2026-09-23 修正：上一条只对**未裁切**观测生效（见 _arrive_visual 的用法）。
+#   理由（真值集量化，tests/fixtures/nine_grid_truth 的 73 条）：
+#     真面板 h/w 实测跨度 0.222~2.989，其中 **17/68（25%）落在 <0.5**；
+#     而这 17 条里有 **15 条是 clip==1**（被画幅裁切）。
+#   裁切后的 bbox 量的是"可见残片"而不是面板，拿它算长宽比没有意义——
+#   一块真面板被下沿切掉大半，可见部分自然又宽又扁。
+#   原来的用法（一律拿 bbox 的 h/w 判"是不是擦边条"，判到就**跳过横移纠偏**）
+#   会让这 15 条真面板在该纠横时不做纠横，一路盲压。
+#   改法：只对未裁切观测做擦边条判定。裁切观测保留原有的"质心不可信"保护
+#   （它本来就只对**未**裁切观测改用 center_px，见下方 px 的取法），
+#   所以这里放开不会把"用擦边条质心做横移"那个历史 bug 放回来。
+
 # 前压物理合理性上限（与视觉判据**独立**的第二道防线）：交棒 ≈35cm（见
 # VIS_ARRIVE_BOX_PX）+ 一格 34cm ≈ 70cm —— 一次接近里前压超过这个距离，说明
 # "落下去的"是更远处的东西，不是目标被压过。它只用**本格内累积的前压量**
@@ -2426,7 +2438,8 @@ class NineGridLevel:
                     if ev_cover_now > ev_cover_best:
                         ev_cover_best = ev_cover_now
                         ev_aspect_best = bh / bw
-                    ev_strip_now = (bh / bw < VIS_ARRIVE_EVIDENCE_MIN_ASPECT)
+                    ev_strip_now = (int(ev.clipped) == 0
+                                    and bh / bw < VIS_ARRIVE_EVIDENCE_MIN_ASPECT)
                 if peak == ratio:       # 本帧就是峰值帧：钉住它的面板级证据
                     peak_cover = max(peak_cover, ev_cover_now)
                 if peak >= VIS_COLOR_SEEN_MIN \
@@ -2478,7 +2491,7 @@ class NineGridLevel:
                     # ×3 步横移"。遇到这种对象就**先前进**，让观测变干净再纠横。
                     if ev_strip_now:
                         print(f"[到达] 观测是擦边条（h/w={bh / bw:.2f}"
-                              f"<{VIS_ARRIVE_EVIDENCE_MIN_ASPECT}）"
+                              f"<{VIS_ARRIVE_EVIDENCE_MIN_ASPECT}，未裁切）"
                               "→ 跳过横移纠偏，先前压取干净观测")
                         o = None
                     if o is not None:
