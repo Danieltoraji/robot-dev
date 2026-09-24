@@ -52,7 +52,9 @@ from sim.nine_grid_sim import (
     random_layout, run_simulation, _print_summary,
 )
 
-WIN = "nine_grid sim  |  SPACE pause  S step  R restart  Q quit  D detect  +/- speed"
+# 窗口标题与 H 键帮助（ASCII：cv2 画不了中文；中文说明见 main() 启动时的提示）
+WIN = ("nine_grid sim  |  SPACE pause  S step  R restart  Q quit  D detect  "
+       "+/- speed")
 CAM_SCALE = 0.25
 MAP_SIZE = 400
 MAP_MARGIN = 16
@@ -60,8 +62,8 @@ STATUS_H = 52
 GAP = 12
 # 俯视图视野（cm）：略大于场地，让入口(50,-20)也可见
 VIEW_MIN, VIEW_MAX = -25.0, 110.0
-HELP = ("keys: SPACE pause/resume | S step | R restart | Q/ESC quit | "
-        "D toggle detection overlay | +/- speed | H help")
+HELP = ("keys: SPACE pause/resume | S step one frame | R restart | Q/ESC quit | "
+        "D detection boxes on/off | +/- slower/faster | H this help")
 
 
 class ViewerQuit(Exception):
@@ -297,7 +299,7 @@ class NineGridView:
         ok_n = sum(1 for _, ok in stats.get("results", []) if ok)
         banner = (f"done {ok_n}/{len(stats.get('results', []))}  "
                   f"captures={stats.get('captures', 0)}  "
-                  f"layout={'OK' if stats.get('layout_ok') else 'FAIL'}  "
+                  f"layout={'ok' if stats.get('layout_ok') else 'FAIL'}  "
                   f"R restart / Q quit")
         print(f"[view] {banner}")
         if self._last_frame is None:   # 极端情况：还没拍到任何帧
@@ -335,22 +337,22 @@ class NineGridView:
             raise ViewerQuit()
         if key == ord(" "):
             self.paused = not self.paused
-            print(f"[view] {'暂停' if self.paused else '继续'}")
+            print(f"[view] {'已暂停（SPACE 继续，S 单步）' if self.paused else '继续运行'}")
         elif key in (ord("s"), ord("S")):
             self.step_once = True
         elif key in (ord("r"), ord("R")):
             raise ViewerRestart()
         elif key in (ord("d"), ord("D")):
             self.show_detect = not self.show_detect
-            print(f"[view] 检出叠加: {'开' if self.show_detect else '关'}")
+            print(f"[view] 检出框叠加: {'开' if self.show_detect else '关'}")
         elif key in (ord("+"), ord("=")):
             self.delay_ms = min(500, self.delay_ms * 2)
-            print(f"[view] delay={self.delay_ms}ms")
+            print(f"[view] 每帧等待 {self.delay_ms}ms")
         elif key in (ord("-"), ord("_")):
             self.delay_ms = max(1, self.delay_ms // 2)
-            print(f"[view] delay={self.delay_ms}ms")
+            print(f"[view] 每帧等待 {self.delay_ms}ms")
         elif key in (ord("h"), ord("H")):
-            print(f"[view] {HELP}")
+            print(f"[view] 按键说明: {HELP}")
 
     def _detections(self, frame):
         """检出叠加：只在暂停/单步/--detect 时跑检测器（单帧 ~120ms）"""
@@ -418,9 +420,13 @@ def main(argv=None):
 
     headless = args.headless or not _gui_available()
     if headless and not args.headless:
-        print("[view] 未检测到图形界面（DISPLAY 不可用？）——退回无头模式")
-        print("[view] 提示：本命令在 PC 上开窗；SSH 场景请用 --headless，"
-              "或参考 tools/camera_preview.py --stream 的网页流方案")
+        print("[view] 未检测到图形界面（DISPLAY 不可用？）——改为无窗口运行")
+        print("[view] 说明：本命令用于在本机开窗查看；远程 SSH 场景请加 "
+              "--headless，或参考 tools/camera_preview.py --stream 的网页流方案")
+    if not headless:
+        # 窗口内文字只能是 ASCII，这里补一份中文按键说明（只打印一次）
+        print("[view] 按键：SPACE 暂停／继续｜S 单步放行一帧｜R 换 seed 重开"
+              "｜Q 或 ESC 退出｜D 检出框叠加开关｜+／- 调慢／调快｜H 本说明")
 
     seed = args.seed
     while True:
@@ -430,7 +436,7 @@ def main(argv=None):
             _print_summary(run.stats)
             return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
 
-        print(f"[view] {HELP}")
+        print(f"[view] 按键说明: {HELP}")
         viewer = NineGridView(delay_ms=args.delay, show_detect=args.detect)
         try:
             run = run_simulation(layout=layout, seed=seed, viewer=viewer,
@@ -438,11 +444,11 @@ def main(argv=None):
         except ViewerRestart:
             viewer.close()
             seed += 1
-            print(f"[view] 重开：seed={seed}")
+            print(f"[view] 重新开始，seed 改为 {seed}")
             continue
         except ViewerQuit:
             viewer.close()
-            print("[view] 用户退出")
+            print("[view] 用户已退出")
             return 0
         try:
             viewer.finish(run.stats)
@@ -451,10 +457,10 @@ def main(argv=None):
         except ViewerRestart:
             viewer.close()
             seed += 1
-            print(f"[view] 重开：seed={seed}")
+            print(f"[view] 重新开始，seed 改为 {seed}")
         except ViewerQuit:
             viewer.close()
-            print("[view] 用户退出")
+            print("[view] 用户已退出")
             return 0
 
 

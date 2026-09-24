@@ -93,9 +93,9 @@ def _active_palette():
                     pal[color] = (int(round(w["h_lo"])), int(round(w["h_hi"])),
                                   float(w["s_lo"]), float(w["v_lo"]))
                     n += 1
-            print(f"[调色板] 已加载现场复标 {PALETTE_JSON_PATH}（{n} 色覆盖）")
+            print(f"[调色板] 已载入现场重标定文件 {PALETTE_JSON_PATH}（覆盖 {n} 种颜色）")
     except (OSError, ValueError, KeyError) as e:
-        print(f"[调色板] {PALETTE_JSON_PATH} 读取失败({e})，用代码内缺省窗口")
+        print(f"[调色板] {PALETTE_JSON_PATH} 读取失败({e})，改用代码内置的缺省窗口")
     _PALETTE_OVERRIDE = pal
     return pal
 
@@ -510,13 +510,13 @@ class DigitArbiter:
                 # 实测 1.9.0 加载+预测正常，告警不阻断，保留记录
                 warnings.simplefilter("ignore", UserWarning)
                 self._clf = joblib.load(self.model_path)
-            print(f"[数字仲裁] SVM 模型已加载: {self.model_path}")
+            print(f"[数字复核] 数字模型已载入: {self.model_path}")
         except ImportError as e:
-            print(f"[数字仲裁] 依赖缺失({e})，仲裁停用（仅颜色主判）。"
+            print(f"[数字复核] 缺少依赖({e})，数字复核停用（仅按颜色判定）。"
                   "机器人端安装: pip install scikit-learn scikit-image joblib")
             self._load_failed = True
         except OSError as e:
-            print(f"[数字仲裁] 模型加载失败({e})，仲裁停用（仅颜色主判）。")
+            print(f"[数字复核] 数字模型载入失败({e})，数字复核停用（仅按颜色判定）。")
             self._load_failed = True
         return self._clf is not None
 
@@ -677,10 +677,10 @@ class NineGridDetector:
                             if k.startswith("d") and k[1:].isdigit()}
                     if tmpl:
                         self._shape_arb = DigitRecognizer(templates=tmpl)
-                        print(f"[形状仲裁] 数字模板已加载: {SHAPE_TEMPLATE_PATH}"
-                              f"（{len(tmpl)} 个数字）")
+                        print(f"[数字复核] 数字模板已载入: {SHAPE_TEMPLATE_PATH}"
+                              f"（{len(tmpl)} 个数字，用于颜色歧义时判定）")
             except (OSError, ValueError, KeyError) as e:
-                print(f"[形状仲裁] 模板加载失败({e})，形状仲裁停用")
+                print(f"[数字复核] 数字模板载入失败({e})，数字复核停用")
         return self._shape_arb
 
     # -----------------------------------------------------------------

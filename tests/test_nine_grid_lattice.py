@@ -201,8 +201,8 @@ def test_clipped_bias_downweighted():
     assert fit.cells == TRUTH, f"裁切偏差导致布局错误: {fit.cells}（{fit.info}）"
     assert 4 in fit.weights and fit.weights[4] < 1.0, \
         "仅裁切观测的数字应被降权"
-    assert any("裁切质心" in w for w in fit.warnings), \
-        f"应给出裁切观测告警：{fit.warnings}"
+    assert any("贴边观测" in w for w in fit.warnings), \
+        f"应给出贴边（裁切）观测告警：{fit.warnings}"
     print(f"  裁切偏差容忍：权重 {fit.weights[4]:.1f}，布局仍正确 ✓")
 
 

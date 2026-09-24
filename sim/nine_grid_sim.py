@@ -53,7 +53,7 @@ from core.camera_config import (
 )
 from core.ground_homography import grid_cell_center
 from core.robot_core import RobotState
-from levels.nine_grid import NineGridLevel, DISABLED_ACTIONS
+from levels.nine_grid import NineGridLevel, DISABLED_ACTIONS, _action_cn
 from vision.nine_grid_detector import COLOR_TO_ID
 
 # =====================================================================
@@ -360,20 +360,28 @@ def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
     return SimRun(robot, level, stats)
 
 
+def _action_counts_cn(counts):
+    """{动作名: 次数} → "左小转 12 次、前进一步 40 次"（按次数降序，日志用）"""
+    if not counts:
+        return "（无）"
+    items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return "、".join(_action_cn(a, n) for a, n in items)
+
+
 def _print_summary(stats):
     ok_n = sum(1 for _, ok in stats["results"] if ok)
-    print(f"[sim] 布局解算: {'OK' if stats['layout_ok'] else 'FAIL'}  "
-          f"数字→格: {stats['digit_cell']}")
-    print(f"[sim] 到达: {ok_n}/{len(stats['results'])}  "
-          f"拍照 {stats['captures']} 张 / 动作 {stats['actions']} 次")
-    print(f"[sim] 动作统计: {stats['action_counts']}")
-    print(f"[sim] 小转估计: {stats['small_turn_deg']:.1f}°/次 "
-          f"({'可用' if stats['small_turn_usable'] else '已弃用(大转兜底)'})")
+    print(f"[仿真] 布局识别: {'成功' if stats['layout_ok'] else '失败'}"
+          f"｜数字→格位: {stats['digit_cell']}")
+    print(f"[仿真] 到位: {ok_n}/{len(stats['results'])}"
+          f"｜拍照 {stats['captures']} 张｜动作 {stats['actions']} 次")
+    print(f"[仿真] 动作统计: {_action_counts_cn(stats['action_counts'])}")
+    print(f"[仿真] 单步小转角估计: {stats['small_turn_deg']:.1f}°/次"
+          f"（{'可用' if stats['small_turn_usable'] else '不可用，改用大角度转向'}）")
     if stats["banned_used"]:
-        print(f"[sim] ⚠ 使用了禁用动作: {stats['banned_used']}")
+        print(f"[仿真] 警告: 出现禁用动作 {stats['banned_used']}")
     if stats.get("deform_tilt_deg") or stats.get("deform_height_cm"):
-        print(f"[sim] 地板形变终值: 俯仰 {stats['deform_tilt_deg']:+.1f}° / "
-              f"高度 {stats['deform_height_cm']:+.1f}cm")
+        print(f"[仿真] 结束时的地板形变: 俯仰 {stats['deform_tilt_deg']:+.1f}°"
+              f"｜高度 {stats['deform_height_cm']:+.1f}cm")
 
 
 def main(argv=None):
@@ -390,17 +398,21 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     layout = random_layout(args.seed) if args.random_layout else SIM_LAYOUT
-    print(f"[sim] 布局: {layout}")
+    print(f"[仿真] 布局: {layout}")
     deform = None
     if args.deform:
         deform = {"sigma_tilt_deg": args.deform, "sigma_h_cm": 0.5,
                   "max_tilt_deg": 15.0, "max_h_cm": 2.0}
-        print(f"[sim] 地板形变注入: {deform}")
+        print(f"[仿真] 注入地板形变: 每次动作俯仰随机游走 "
+              f"{deform['sigma_tilt_deg']:.1f}°、高度随机游走 "
+              f"{deform['sigma_h_cm']:.1f}cm（俯仰上限 ±"
+              f"{deform['max_tilt_deg']:.0f}°、高度上限 ±"
+              f"{deform['max_h_cm']:.0f}cm）")
     try:
         run = run_simulation(layout=layout, seed=args.seed, quiet=args.quiet,
                              deform=deform)
     except Exception as e:  # 布局扫失败等：CLI 友好退出，便于脚本判断
-        print(f"[sim] 关卡异常: {type(e).__name__}: {e}")
+        print(f"[仿真] 关卡异常: {type(e).__name__}: {e}")
         return 1
     _print_summary(run.stats)
     return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
