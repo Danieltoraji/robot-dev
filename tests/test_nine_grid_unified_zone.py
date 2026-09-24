@@ -198,3 +198,64 @@ def test_perceive_counts_frames():
     lv._cell_frame_budget = 10 ** 9
     lv._perceive("red")
     assert lv._cell_frames == 1
+
+
+# =====================================================================
+# 5. 格的同一性核验（用户方案 ②-a）
+# =====================================================================
+
+def _lv_with_anchor(cell_pose):
+    """构造一个 level：digit_cell 给定，`_map_anchor` 返回固定实测位姿"""
+    lv = _level()
+    lv.digit_cell = {1: 3}
+    frame = np.zeros((10, 10, 3), np.uint8)
+    if cell_pose is None:
+        lv._map_anchor = lambda obs, fr, why="": None
+    else:
+        lv._map_anchor = lambda obs, fr, why="": {"pose": np.asarray(cell_pose,
+                                                                    float)}
+    return lv, frame
+
+
+def test_on_target_cell_accepts_measured_pose_on_the_cell():
+    """实测位姿落在目标格心附近 ⇒ "yes"（放行）"""
+    from core.ground_homography import grid_cell_center
+    g = grid_cell_center(3)
+    lv, frame = _lv_with_anchor((g[0] + 5.0, g[1], 0.0))     # 偏 5cm
+    v, why = lv._on_target_cell(frame, 1)
+    assert v == "yes", why
+
+
+def test_on_target_cell_vetoes_when_measured_pose_is_elsewhere():
+    """★ 实测位姿明显不在目标格 ⇒ "no"（这正是"站在别格"假到达）
+
+    这条是用户方案 ②-a 的核心：份额/形状类判据在"站在别的格子上、看到一块完整
+    且居中的同色面板"时**全部正常**（实测有一帧六量全合规、真值却离目标 100cm），
+    只有"这一帧几何能否被地图解释"能分辨。
+    """
+    from core.ground_homography import grid_cell_center
+    g = grid_cell_center(3)
+    lv, frame = _lv_with_anchor((g[0] + 66.0, g[1], 0.0))    # 偏 66cm ≈ 两格
+    v, why = lv._on_target_cell(frame, 1)
+    assert v == "no", why
+    assert "16.7" in why or "格心" in why
+
+
+def test_on_target_cell_abstains_honestly_without_anchor():
+    """锚不可用 ⇒ "unknown"（诚实弃权），绝不拿退化输入硬判"""
+    lv, frame = _lv_with_anchor(None)
+    v, why = lv._on_target_cell(frame, 1)
+    assert v == "unknown", why
+    assert "锚" in why
+
+
+def test_on_target_cell_disabled_switch():
+    """总开关关闭 ⇒ 一律 "unknown"（不影响老判据）"""
+    lv, frame = _lv_with_anchor((999.0, 999.0, 0.0))
+    old = NG.VIS_ARRIVE_ONCELL_ENABLED
+    try:
+        NG.VIS_ARRIVE_ONCELL_ENABLED = False
+        v, _why = lv._on_target_cell(frame, 1)
+        assert v == "unknown"
+    finally:
+        NG.VIS_ARRIVE_ONCELL_ENABLED = old

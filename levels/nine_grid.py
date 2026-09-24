@@ -435,6 +435,18 @@ VIS_ARRIVE_MAX_BW_OVER_BH = 2.15
 # （23/28、2464、8.4、10.5、0）；1060/1100 反而把到达率从 23 压到 16。
 # ⇒ **默认 0（关闭）**，常量保留供复现这次标定。
 VIS_ARRIVE_MIN_BOX_PX = 0.0
+# ---- ★ 格的同一性核验（用户方案 ②-a）----
+# 到达门那六个量都是**单帧整帧统计**，在"站在别的格子上、看到一块完整且居中的
+# 同色面板"时**全部正常**（实测有一帧六量全合规、真值却离目标 100cm）。
+# 只有"这一帧的几何能否被地图解释"能分辨 ⇒ 用 `_map_anchor` 解实测位姿后，
+# 要求它落在目标格附近。
+VIS_ARRIVE_ONCELL_ENABLED = True    # 总开关
+VIS_ARRIVE_ONCELL_TOL_CM = 16.7     # 距格心容差（= 半格；压感区半宽 5.5cm，
+#                                     但锚本身有位姿误差，取半格更稳）
+VIS_ARRIVE_ONCELL_REQUIRE = False   # 锚**不可用**时是否也拒绝
+#   False（默认）= 诚实弃权：锚解不出来就按老规矩放行。
+#   理由：锚的可用率实测只有 ~15.8%（整关），若设 True 会把大量正常到达一起误杀。
+#   设 True 只在"宁可不判到达也不要假到达"的场合用（需配 A/B 数据）。
 # 旧的"高/宽比下限"（0.46）：**方向不对，已废弃**（只挡掉 5 帧假到达里的 2 帧）。
 # 保留常量与说明仅为记录这次更正，默认 0 = 关闭。
 VIS_ARRIVE_MIN_ASPECT = 0.0
@@ -2475,11 +2487,29 @@ class NineGridLevel:
                     if _centered and _big and pur >= VIS_ARRIVE_PURPLE_MIN \
                             and org <= VIS_ARRIVE_ORANGE_MAX \
                             and abs(asym) <= VIS_ARRIVE_ASYM_MAX:
+                        # ★ 最后一道：**格的同一性核验**（用户方案 ②-a）。
+                        # 份额/形状类判据在"站在别格、看到完整同色面板"时全部正常，
+                        # 只有"这一帧几何能否被地图解释"能分辨 ⇒ 解一次实测位姿。
+                        _verdict, _why = self._on_target_cell(p["frame"], digit)
+                        # "no" 一律拒绝；"unknown"（锚弃权）按开关决定
+                        # ——默认放行，否则会把大量正常到达一起误杀（锚可用率仅 ~16%）。
+                        _ok_cell = (_verdict == "yes"
+                                    or (_verdict == "unknown"
+                                        and not VIS_ARRIVE_ONCELL_REQUIRE))
+                        if not _ok_cell:
+                            print(f"[行进] 面板{digit} 色块判据成立但**格的核验否决**"
+                                  f"（{_why}）→ 不判到达，继续逼近")
+                            prev_cov, prev_org = None, None
+                            continue
+                        if _verdict == "yes":
+                            print(f"[核验] 面板{digit} 格的同一性通过：{_why}")
                         self._arrive_evidence = (
                             f"脚下色块判据：紫区占比 {pur:.3f}（≥"
                             f"{VIS_ARRIVE_PURPLE_MIN}），橙区占比 {org:.3f}（≤"
                             f"{VIS_ARRIVE_ORANGE_MAX}），左右不对称 {asym:+.3f}"
-                            f"（≤{VIS_ARRIVE_ASYM_MAX}）")
+                            f"（≤{VIS_ARRIVE_ASYM_MAX}）"
+                            + (f"；格的核验: {_why}" if _verdict != "unknown"
+                               else f"；格的核验: 弃权（{_why}）"))
                         print(f"[行进] 面板{digit} 区域判据成立（紫 {pur:.3f}、"
                               f"橙 {org:.3f}、不对称 {asym:+.3f}）→ 判定到达")
                         return True
@@ -2662,6 +2692,46 @@ class NineGridLevel:
         self.pose[2] += np.radians(delta)
         print(f"[航向] 面板{digit} 视觉重解航向：修正 {delta:+.1f}°")
         return True
+
+    def _on_target_cell(self, frame, digit):
+        """★ 格的同一性核验（用户方案 ②-a）：实测位姿是否真的落在目标格上？
+
+        返回 (verdict, reason)：
+          "yes" = 锚解出的**实测位姿**距目标格心 ≤ `VIS_ARRIVE_ONCELL_TOL_CM` ⇒ 放行
+          "no"  = 解出来了、但明显不在目标格 ⇒ **拒绝**（这就是"站在别格"假到达）
+          "unknown" = 锚不可用（诚实弃权）⇒ 按 `VIS_ARRIVE_ONCELL_REQUIRE` 决定放不放
+
+        为什么必须靠它（而不是继续加份额/形状阈值）：到达门那六个量都是**单帧
+        整帧统计**，在"站在别的格子上、看到一块完整且居中的同色面板"这种视角下
+        **全部正常**（实测有一帧 whole 0.082 / 宽高比合规 / 紫橙不对称全合规，
+        而真值离目标 **100cm**）。**只有"这一帧的几何能不能被地图解释"才能分辨**
+        ——这正是用户方案第 2 条第一项要求的核验。
+
+        实现复用现成件：`_map_anchor`（v2 裁切角点版）解出实测位姿；
+        它自带 RANSAC 共识门与诚实弃权，所以"解出来了"本身就是可信的证据。
+        """
+        if not VIS_ARRIVE_ONCELL_ENABLED:
+            return "unknown", "核验开关关闭"
+        try:
+            full = self.detector.detect_panels(frame, drop_border=False)
+        except Exception:
+            return "unknown", "全色检测异常"
+        anc = self._map_anchor(full, frame, why=f"ONCELL{digit}")
+        if anc is None:
+            return "unknown", "锚不可用（共识不足/对应点不够）"
+        cell = self.digit_cell.get(digit)
+        if cell is None:
+            return "unknown", "无该数字的格位"
+        try:
+            pos = np.asarray(anc["pose"], float)[:2]
+            d = float(np.linalg.norm(pos - np.asarray(
+                grid_cell_center(cell), float)))
+        except Exception:
+            return "unknown", "锚结果无法解读"
+        if d <= VIS_ARRIVE_ONCELL_TOL_CM:
+            return "yes", f"实测位姿距目标格心 {d:.1f}cm"
+        return "no", (f"实测位姿距目标格心 {d:.1f}cm（>{VIS_ARRIVE_ONCELL_TOL_CM:.0f}cm）"
+                      f"——目标面板不在脚下，疑为邻格同色面板")
 
     def _bearing_to_target_deg(self, digit):
         """用**地图 + 当前位姿**估"目标在机体哪一侧"（度，右正）——只用于选转向方向
