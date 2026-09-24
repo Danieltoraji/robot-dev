@@ -143,8 +143,18 @@ def test_old_rule_still_reachable_for_ab():
 # =====================================================================
 
 def test_purple_and_arrival_thresholds_are_pinned():
-    """紫区高度**独立于**蓝区高度；三个到达阈值取实测量（见常量注释）"""
-    assert NG.VIS_ZONE_PURPLE_HEIGHT == pytest.approx(0.2445)
+    """紫区高度**独立于**蓝区高度；三个到达阈值取实测量（见常量注释）
+
+    ⚠️ `VIS_ZONE_PURPLE_HEIGHT` 于 2026-09-25（P1 重写）由 0.2445 改为 **0.62**，
+    依据是**仿真几何实测**而非示意图像素比例：
+      · 0.2445 只覆盖画幅底边上方约 **4cm** 地面 ⇒ 紫份额要到离格心 ≤4cm 才达 0.35
+        （15cm 处仅 0.323、12cm 0.332、8cm 0.365），而低头档单步 2.652cm
+        ⇒ 单格要走 ~14 次前进决策，撞穿 140 张/格上限；
+      · 抬到 0.62 后覆盖约 **16cm**（与旧到达判据的峰值距离同量级、在 ±半格 16.7cm 内）：
+        40cm→0.345★、30cm→0.505、20cm→0.546，判据在 ~40cm 起就满足紫门。
+    这条与"蓝区高度"**仍然独立**（见下一条测试）。
+    """
+    assert NG.VIS_ZONE_PURPLE_HEIGHT == pytest.approx(0.62)
     assert NG.VIS_ARRIVE_PURPLE_MIN == pytest.approx(0.35)
     assert NG.VIS_ARRIVE_ORANGE_MAX == pytest.approx(0.10)
     assert NG.VIS_ARRIVE_ASYM_MAX == pytest.approx(0.25)
