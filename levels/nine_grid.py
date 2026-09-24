@@ -738,6 +738,23 @@ VIS_REACQ_MAX_FRAMES = 110       # 单次重捕获拍照上限
 #   ⚠️ 与"单格 360° 转向预算"的关系：预算是防"在原地打转"，重捕获是**有目标方向**
 #   的搜索 ⇒ 二者分别记账，见 `_unified_reacquire` 对 `_cell_turn_deg` 的处理。
 VIS_REACQ_STRIDE = 2             # 每丢几帧转一步（取 2：比 4 快一倍，仍每步复测）
+# ---- 到达后的**视觉航向重解**（P1 实测卡点：`_reanchor_pose` 只锚位置、不修航向）----
+VIS_HEADFIX_MAX_OFFAXIS_DEG = 20.0   # 只用 |机体方位| ≤ 此值的面板参与解算
+#   依据：`CAMERA_FOV_H_DEG=60` 是伺服增益不是真实 FOV ⇒ 偏轴越远误差越大
+#   （实测 ±28° 处差 ~10°、±48° 处差 ~27°；近轴 ±0.3°）。
+VIS_HEADFIX_MAX_DELTA_DEG = 45.0     # 解出的修正量超过此值判为误检，拒绝采纳
+#   依据：正常逐格累积误差是数度级（实测一格 8°）；一次要修 45° 以上说明
+#   面板认错或位置本身就错，此时**保持原样**比乱修安全。
+VIS_HEADFIX_GAIN = 0.39          # 画面读数(°)/真实方位(°) —— **实测标定**，不是拍的
+#   为什么需要它：`_body_yaw_deg` 用的是 `CAMERA_FOV_H_DEG=60` 这条**伺服增益**，
+#   而画面真实横向标定是 ~154.8px/°（±33.7° 半视场 / 1296px）⇒ 60/154.8 = 0.388。
+#   实测（固定站位只改真航向，跟同一个面板）：真航向 −20/0/+20° 时
+#     几何方位 +20.00/0.00/−20.00，而 `_body_yaw_deg` 读 −7.36/+0.32/+7.99
+#     ⇒ 比值 −7.36/20 = 0.368、7.99/20 = 0.400 ⇒ 取 0.39。
+#   ⚠️ 偏差 0.03 就足以把"修 15°"变成"修 11°或 19°"⇒ 拿它当**修复量**用之前
+#   必须先按上面口径现场重标（真机 FOV 与这 154.8px/° 不同）。这也是本项目
+#   `test_nine_grid_yaw.py` 反复强调的那条：yaw 是**增益**，不是角度。
+#   用它修航向是**近轴小量**下的近似（|方位| ≤ VIS_HEADFIX_MAX_OFFAXIS_DEG）。
 # ---- 前进的快慢两档（**整帧色占比**分界，见 `_go_to_panel_unified` 的说明）----
 # 实测 `whole`↔距离：60cm→0.056｜50→0.072｜40→0.092｜35→0.103｜30→0.115
 #                    25→0.126｜20→0.137｜15→0.147（此后随裁切不再增）
@@ -2432,15 +2449,105 @@ class NineGridLevel:
             if pitch0 is not None:
                 self.state.set_pitch(pitch0)
 
+    def _visual_heading_delta_deg(self, frame, obs, head_pulse=None):
+        """用**同帧可见的已标注面板**重解航向误差（度，右正）；无解返回 None
+
+        为什么需要它（P1 实测卡点）：`_reanchor_pose` 只把**位置**锚到格心，
+        **航向保持死推值**（其 docstring 明说），一格走完航向误差实测 8° 并逐格
+        累积 ⇒ 到第 3 格时"地图方位"已指错，机器人按它转就是转错方向。
+
+        原理：位置已知（刚锚到格心）⇒ 每个可见面板的**应有方位**可算；把它与
+        **画面实测的机体方位**相减，差值就是 pose 航向的误差。取**中位**抗误检。
+
+        ⚠️ 只用 |方位| ≤ `VIS_HEADFIX_MAX_OFFAXIS_DEG` 的面板：`_body_yaw_deg` 的
+        `CAMERA_FOV_H_DEG=60` 是**伺服增益**不是真实 FOV（真实半视场 33.7° ⇒
+        增益 ≈0.73），偏轴越远画面读数与几何方位差得越多（实测 ±28° 处差 ~10°、
+        ±48° 处差 ~27°）⇒ 只用近轴面板才准。
+        实测（无 pose 误差、7 面板同帧）：近轴面板给 −0.29/−0.31°，误差 <0.4°。
+        """
+        if frame is None or not obs:
+            return None
+        try:
+            x, y, th = (float(v) for v in self.pose[:3])
+        except Exception:
+            return None
+        hp = (self.state.current_head_pulse if head_pulse is None
+              else head_pulse)
+        fwd = np.array([np.sin(th), np.cos(th)])
+        right = np.array([np.cos(th), -np.sin(th)])
+        # ⚠️ 原点必须与 `target_relative` **逐字一致**（相机前移补偿）：两者口径不同
+        # 会引入与位置相关的系统性偏差（实测漏掉它 ⇒ 修正量只剩应有的 ~2/3）。
+        base = np.array([x, y]) - fwd * CAMERA_TO_BODY_FORWARD_CM
+        deltas = []
+        for o in obs:
+            d = int(o.color_id)
+            if d not in self.digit_cell:
+                continue
+            p = o.hull_centroid_px if o.clipped else o.center_px
+            yaw_body = self._body_yaw_deg(float(p[0]), float(frame.shape[1]), hp)
+            if abs(yaw_body) > VIS_HEADFIX_MAX_OFFAXIS_DEG:
+                continue
+            vec = np.asarray(grid_cell_center(self.digit_cell[d]), float) - base
+            true_bearing = np.degrees(np.arctan2(float(vec @ right),
+                                                 float(vec @ fwd)))
+            # ⚠️ 先把**增益量**换算成真实角度再相减：`yaw_body` 的单位是
+            # `CAMERA_FOV_H_DEG` 那条增益（实测 0.39×真实方位），直接相减会让
+            # 修正量偏 2.5 倍（曾据此把 10° 的误差"修"成 15°）。
+            yaw_true = -yaw_body / VIS_HEADFIX_GAIN
+            deltas.append(yaw_true - true_bearing)
+        if len(deltas) < 2:
+            return None
+        return float(np.median(deltas))
+
+    def _fix_pose_heading(self, digit):
+        """到达后用视觉重解航向 → 是否成功
+
+        ⚠️ **当前不在任何路径上调用（未通过验证，保留作后续设计参考）**。
+        为什么不能用（2026-09-25 实测，两条独立证据）：
+          1. **标定口径**：`_body_yaw_deg` 的单位是 `CAMERA_FOV_H_DEG=60` 这条
+             **伺服增益**，而画面真实横向标定是 ~154.8px/°（±33.7° 半视场 / 1296px）
+             ⇒ 增益 ≈ **0.39**。实测（固定站位只改真航向、跟同一个面板）：
+             真航向 −20/0/+20° 对应几何方位 +20.00/0.00/−20.00，而读数
+             −7.36/+0.32/+7.99 ⇒ 比值 0.368~0.400。按 0.39 折算后修正仍然不准：
+             注入 ±4/±8/±15° 的残余中位 **11.1°**、p90 23.1°。
+          2. **几何上就没有近轴面板可用**：站在 33.3cm 格阵的一格上，可见邻格在
+             **~45°（斜角）与 ~90°（同排两侧）**，落在 ±20° 内的面板**结构性稀缺**
+             ⇒ 70 个测试位置里 **28 个"无解"**（凑不满 2 个可用面板）。
+             而偏轴读数恰恰是最不准的（实测 ±28° 处差 ~10°、±48° 处差 ~27°）。
+          3. **度量投影路线也走不通**：用 `project_ground_to_pixel` 做 1D 航向搜索，
+             42 个位置里 **35 个无解**——因为近距邻格落在相机可见带之外，
+             `project_ground_to_pixel` 直接返回 None（当初验证投影模型用的是**远**面板，
+             近距这一档从没验过）。
+        ⇒ 结论：**"到达后视觉修正航向"这条路在当前相机几何下不成立**。
+        航向必须在别处解决：要么让到达时的姿态本身足够准（不依赖航向），
+        要么把"找不到目标"的处理改成不依赖方位的确定性全扫（代价是帧数）。
+        """
+        frame = self._capture()
+        if frame is None:
+            return False
+        try:
+            obs = self.detector.detect_panels(frame, drop_border=False)
+        except Exception:
+            return False
+        delta = self._visual_heading_delta_deg(frame, obs)
+        if delta is None or abs(delta) > VIS_HEADFIX_MAX_DELTA_DEG:
+            print(f"[航向] 面板{digit} 视觉重解航向不可用"
+                  f"（{'观测不足' if delta is None else f'偏差 {delta:+.0f}° 过大，疑为误检'}）"
+                  f"——保持原航向")
+            return False
+        self.pose[2] += np.radians(delta)
+        print(f"[航向] 面板{digit} 视觉重解航向：修正 {delta:+.1f}°")
+        return True
+
     def _bearing_to_target_deg(self, digit):
-        """用**地图 + 当前位姿**估"目标在机体哪一侧"（度，左正）——只用于选转向方向
+        """用**地图 + 当前位姿**估"目标在机体哪一侧"（度，右正）——只用于选转向方向
 
         返回 None = 拿不到（无地图/无位姿）。
         ⚠️ 用途受严格限制（用户明确放弃死推做导航）：
           · **只决定往哪边转**，绝不产生"到位/到达"结论；
           · 转多少由视觉闭环决定（每步拍照复测）；
-          · 它用的 `self.pose` 来自布局扫的格阵拟合与到达后的格心锚定，
-            **不是**逐格累积的动作死推。
+          · 它读的 `self.pose` 必须在**到达后经 `_fix_pose_heading` 视觉校正过**，
+            否则航向误差会逐格累积（见该函数的说明）。
         """
         try:
             fwd, lat, bearing = self.target_relative(digit)
