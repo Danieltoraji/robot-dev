@@ -80,6 +80,75 @@ PANEL_BGR = {COLOR_TO_ID[c]: cv2.cvtColor(np.full((1, 1, 3), hsv, np.uint8),
 # 缺省仿真布局：位置6(左下)恒空，位置8空，其余 1..7（固定"随机"布局）
 SIM_LAYOUT = {0: 5, 1: 2, 2: 7, 3: 1, 4: 4, 5: 6, 6: None, 7: 3, 8: None}
 
+# =====================================================================
+# 面板数字：**画真字形**（2026-09-25）
+# =====================================================================
+# 旧行为是把数字画成一块**纯黑实心矩形**（`fillPoly(..., (0,0,0))`）。它让
+# **数字识别链在仿真里没有信号**：同一批仿真帧上 SVM 与颜色主判的一致率只有
+# 5.4%（≈随机），而"格 4 被判成数字 1"这类现场日志既复现不了也验证不了。
+#
+# 字形来源 = 现场照片（`tools/gen_ninegrid_glyph_assets.py` 从
+# `tests/fixtures/field_photos/` 提取），因此仿真画的数字与真机**同源**：
+# 数字判据在仿真里的结论才谈得上迁移到真机。
+#
+# 朝向（用户 2026-09-25 裁定）："现场字形朝向随机，不需要考虑这一点，并将
+# 仿真器的朝向也作为随机的" ⇒ 资产里**不存**朝向，渲染时按面板格位**确定性
+# 随机**转 90°×k（用固定 seed，保证同一局可复现）。
+GLYPH_ASSET_PATH = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "models", "nine_grid", "digit_glyphs.npz")
+GLYPH_ROTATE_SEED = 20260925     # 面板朝向的随机种子（固定 ⇒ 可复现）
+GLYPH_DIGIT_SIZE_CM = DIGIT_HALF_CM     # 数字块尺寸（与真值同源，8×12cm）
+_GLYPH_CACHE = None
+_GLYPH_FAIL_WARNED = False
+
+
+def glyph_table():
+    """载入渲染用字形表 {digit: 二值掩膜(白=墨迹)}；缺资产时**显式告警**并返回 {}
+
+    ⚠️ 不静默退化：缺资产会让面板上的数字消失（检测器依然能按颜色找到面板，
+    但"数字证据门 / 形状仲裁 / 数字判据"全部失去输入）——那正是本模块要修的
+    那类病。故只告警 + 返回空表，由 `_draw_panel` 退回黑块，并在 stdout 留痕。
+    """
+    global _GLYPH_CACHE, _GLYPH_FAIL_WARNED
+    if _GLYPH_CACHE is not None:
+        return _GLYPH_CACHE
+    table = {}
+    data = None
+    try:
+        data = np.load(GLYPH_ASSET_PATH, allow_pickle=False)
+        for k in data.files:
+            if len(k) == 2 and k[0] == "d" and k[1].isdigit():
+                table[int(k[1])] = (data[k] > 0).astype(np.uint8)
+    except (OSError, ValueError, KeyError) as e:
+        if not _GLYPH_FAIL_WARNED:
+            _GLYPH_FAIL_WARNED = True
+            print(f"[仿真] ⚠ 数字字形资产不可用({e})：面板数字将退回黑块，"
+                  f"数字识别链在仿真里**没有信号**。生成："
+                  f"python tools/gen_ninegrid_glyph_assets.py --write")
+        table = {}
+    missing = [d for d in range(1, 8) if d not in table]
+    if table and missing:
+        print(f"[仿真] ⚠ 字形资产缺数字 {missing}：这些面板会画黑块")
+    if table and data is not None:
+        thin = [d for d in range(1, 8)
+                if int(data.get(f"{d}_n_clean", np.array([1]))[0]) == 0]
+        if thin:
+            print(f"[仿真] ⚠ 字形资产里数字 {thin} 只有裁切样本（现场帧没拍到完整"
+                  f"面板），字形质量存疑——建议现场补拍后重跑 gen_ninegrid_glyph_assets")
+    _GLYPH_CACHE = table
+    return table
+
+
+def glyph_rotate_k(cell):
+    """面板数字的朝向：按格位确定性随机 90°×k（k=0..3）
+
+    为什么随机而不是固定正立：现场字形朝向随机（用户裁定）。用**格位**而不是
+    全局 RNG 决定，是为了不动动作噪声的随机流（改朝向不该改变打滑序列，否则
+    仿真对照实验就不可比了）。
+    """
+    rng = np.random.RandomState(GLYPH_ROTATE_SEED + int(cell) * 7919)
+    return int(rng.randint(0, 4))
+
 
 def camera_rotation(bearing_deg, pitch_pulse,
                     pitch_offset_deg=CAM_PITCH_MOUNT_OFFSET_DEG):
@@ -101,6 +170,210 @@ def camera_rotation(bearing_deg, pitch_pulse,
     d = np.array([-sa * sf, -sa * cf, -ca])
     v = np.array([ca * sf, ca * cf, -sa])
     return np.vstack([r, d, v])
+
+
+def _project_quad_raw(R, C, cx, cy, hx, hy):
+    """地面矩形（中心 (cx,cy)、半尺寸 (hx,hy)）→ 画幅内的可见多边形 | None
+
+    ⚠️ 返回的是**裁到画幅**的多边形（真实相机只看到交集）。三个守卫都是踩过坑的：
+      · 任一角点跑到相机平面附近（z ≤ 0.05）⇒ 投影溢出为 ±inf，`astype(int32)`
+        得 INT_MIN，`cv2.fillPoly` 会扫描 ~2^31 行（实测 26s/帧，整轮仿真 800s+）；
+      · `isfinite` 检查兜住上一条漏网的 inf/nan；
+      · `clip(±1e6)` 再进 `intersectConvexConvex`。
+    """
+    corners = []
+    for dx, dy in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)):
+        p = np.array([cx + dx, cy + dy, 0.0])
+        pc = R @ (p - C)
+        if pc[2] <= 0.05:
+            return None
+        corners.append(pc)
+    norm = np.array([c[:2] / c[2] for c in corners])
+    pix, _ = cv2.projectPoints(
+        np.column_stack([norm, np.ones(4)]).reshape(-1, 1, 3).astype(np.float32),
+        np.zeros(3), np.zeros(3), CAMERA_INTRINSIC, CAMERA_DISTORTION)
+    pix = pix[:, 0, :]
+    if not np.all(np.isfinite(pix)):
+        return None
+    pix = np.clip(pix, -1e6, 1e6)
+    # ⚠️ 返回顺序是 (面积:float, 交点:ndarray(N,1,2))——不是 (points, area)
+    area, inter = cv2.intersectConvexConvex(pix.astype(np.float32), _IMAGE_RECT)
+    if inter is None or area <= 1e-9:
+        return None
+    pts = np.asarray(inter, dtype=np.float32).reshape(-1, 2)
+    if len(pts) < 3:
+        return None
+    return pts
+
+
+def _project_quad(R, C, cx, cy, hx, hy):
+    """同 `_project_quad_raw`，但返回**取整后的 int32** 多边形（供 fillPoly）"""
+    poly = _project_quad_raw(R, C, cx, cy, hx, hy)
+    return None if poly is None else np.round(poly).astype(np.int32)
+
+
+def _glyph_quad(R, C, cx, cy, digit):
+    """数字块的**四角点**（原生 px，顺序 TL,TR,BR,BL）→ (4,2) float32 或 None
+
+    与 `_project_quad` 同一套投影/守卫，但返回的是**未裁剪的四角点**（裁剪后的
+    多边形不能用来做透视变换——那会把字形拉伸到错误的位置）。
+    任一角点不合法（跑到相机平面附近/画幅外很远）就返回 None：该面板只画色块。
+    """
+    hx, hy = GLYPH_DIGIT_SIZE_CM
+    pts = []
+    for dx, dy in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)):
+        pc = R @ (np.array([cx + dx, cy + dy, 0.0]) - C)
+        if pc[2] <= 0.05:
+            return None
+        pts.append(pc[:2] / pc[2])
+    pix, _ = cv2.projectPoints(
+        np.column_stack([pts, np.ones(4)]).reshape(-1, 1, 3).astype(np.float32),
+        np.zeros(3), np.zeros(3), CAMERA_INTRINSIC, CAMERA_DISTORTION)
+    pix = pix[:, 0, :]
+    if not np.all(np.isfinite(pix)):
+        return None
+    if np.max(np.abs(pix)) > 1e6:
+        return None
+    # 面板/数字块**完全在画幅外**时不必画（省一次 warp；裁切仍由 warp 的
+    # 目标画幅自然处理）
+    if (pix[:, 0].max() < 0 or pix[:, 0].min() > FRAME_W
+            or pix[:, 1].max() < 0 or pix[:, 1].min() > FRAME_H):
+        return None
+    return pix.astype(np.float32)
+
+
+def _draw_glyph(frame, R, C, cell, digit, cx, cy):
+    """在 already-drawn 的色块上画**真字形**（黑字）
+
+    实现 = 把字形掩膜透视变换到数字块四角点，再把"掩膜为真"的像素涂黑。
+    **没有逐像素 Python 循环**（那是 26s/帧那条退化路径的同类写法）。
+    """
+    table = glyph_table()
+    g = table.get(int(digit))
+    if g is None:
+        return False
+    quad = _glyph_quad(R, C, cx, cy, digit)
+    if quad is None:
+        return False
+    k = glyph_rotate_k(cell)
+    if k:
+        g = np.ascontiguousarray(np.rot90(g, k))
+    src = np.array([[0.0, 0.0], [g.shape[1] - 1.0, 0.0],
+                    [g.shape[1] - 1.0, g.shape[0] - 1.0],
+                    [0.0, g.shape[0] - 1.0]], dtype=np.float32)
+    # ⚠️ warp 的目标必须**裁到数字块的外接框**，不能整幅 2592×1944：
+    # 整幅 warp 实测 0.090s/帧（渲染守卫线是 0.1s/帧），只差 10% 就踩线。
+    x0 = int(np.floor(quad[:, 0].min())) - 2
+    y0 = int(np.floor(quad[:, 1].min())) - 2
+    x1 = int(np.ceil(quad[:, 0].max())) + 2
+    y1 = int(np.ceil(quad[:, 1].max())) + 2
+    x0c, y0c = max(0, x0), max(0, y0)
+    x1c, y1c = min(FRAME_W, x1), min(FRAME_H, y1)
+    if x1c <= x0c or y1c <= y0c:
+        return False                       # 数字块完全在画幅外
+    Hm = cv2.getPerspectiveTransform(src, quad - np.array([x0c, y0c],
+                                                          dtype=np.float32))
+    warped = cv2.warpPerspective(g * 255, Hm, (x1c - x0c, y1c - y0c),
+                                 flags=cv2.INTER_LINEAR,
+                                 borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    view = frame[y0c:y1c, x0c:x1c]
+    view[warped > 127] = (0, 0, 0)
+    return True
+
+
+def _project_quad_full(R, C, cx, cy, hx, hy):
+    """地面矩形 → 投影后的**四角点**（未裁到画幅）+ 多边形面积
+
+    与 `_glyph_quad` 同一套守卫。返回 (4,2) float32 或 None。
+    用途：`_frame_truth` 要算"可见面积 **占该面板本帧总投影面积** 的比例"——
+    分母必须是**同一投影下的未裁切面积**，不能拿物理 cm² 去比（踩过：264.6）。
+    """
+    pts = []
+    for dx, dy in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)):
+        pc = R @ (np.array([cx + dx, cy + dy, 0.0]) - C)
+        if pc[2] <= 0.05:
+            return None
+        pts.append(pc[:2] / pc[2])
+    pix, _ = cv2.projectPoints(
+        np.column_stack([pts, np.ones(4)]).reshape(-1, 1, 3).astype(np.float32),
+        np.zeros(3), np.zeros(3), CAMERA_INTRINSIC, CAMERA_DISTORTION)
+    pix = pix[:, 0, :]
+    if not np.all(np.isfinite(pix)) or np.max(np.abs(pix)) > 1e6:
+        return None
+    return pix.astype(np.float32)
+
+
+def _frame_truth(R, C, layout):
+    """本帧的**面板真值**（供"数字判据在仿真里准不准"这类评测用）
+
+    每项：{digit, cell, cx, cy, bbox(x,y,w,h 原生 px), visible_frac, clipped}
+      · cx,cy   = **色块中心**的投影（未裁切时等于对角线交点；裁切时会被裁边拉偏，
+                  所以同时给 `clipped` 与 `bbox` 让调用方自行取舍）
+      · visible_frac = 可见面积 / 未裁切面积 ⇒ 用来判"是不是被别的东西挡住了"，
+                  也用来排除"只露一条边"的观测
+      · occluded_by  = 盖在它上面的数字（`面板6` 在部分种子下被别格面板压住）
+
+    ⚠️ 这是**真值**，不是检测结果：它由渲染时同一套 `_project_quad_raw` 算出，
+    因此与画出来的像素逐点对应（错也错得一致，不会自证）。
+    """
+    out = []
+    polys = {}
+    for cell, digit in layout.items():
+        if digit is None:
+            continue
+        cx, cy = grid_cell_center(cell)
+        quads = {}
+        for name, (hx, hy) in (("full", (PANEL_HALF_CM, PANEL_HALF_CM)),
+                               ("digit", GLYPH_DIGIT_SIZE_CM)):
+            poly = _project_quad_raw(R, C, cx, cy, hx, hy)
+            if poly is None:
+                continue
+            xs, ys = poly[:, 0], poly[:, 1]
+            # 分母 = **同一投影下的未裁切面积**（不是物理 cm²！）
+            full = _project_quad_full(R, C, cx, cy, hx, hy)
+            total = (float(cv2.contourArea(full)) if full is not None else 0.0)
+            quads[name] = {
+                "poly": poly,
+                "bbox": (int(xs.min()), int(ys.min()),
+                         int(xs.max() - xs.min()), int(ys.max() - ys.min())),
+                "area": float(cv2.contourArea(poly)),
+                "total_area": total,
+            }
+        if "full" not in quads:
+            continue
+        polys[int(cell)] = quads
+    for cell, quads in polys.items():
+        digit = int(layout[cell])
+        q = quads["full"]
+        cx, cy = grid_cell_center(cell)
+        # 被同帧其它面板（更近的那些）盖住的比例：投影后色块多边形的交叠
+        occl = 0.0
+        occluders = []
+        for other, qo in polys.items():
+            if other == cell:
+                continue
+            # ⚠️ (面积, 交点)，见 _project_quad_raw 的注释
+            ia, ipts = cv2.intersectConvexConvex(
+                q["poly"], qo["full"]["poly"])
+            if ipts is not None and ia > 0.02 * max(q["area"], 1.0):
+                occl += float(ia)
+                occluders.append(int(layout[other]))
+        cx_px, cy_px = (q["bbox"][0] + q["bbox"][2] / 2.0,
+                        q["bbox"][1] + q["bbox"][3] / 2.0)
+        out.append({
+            "digit": digit, "cell": int(cell),
+            "cx": float(cx_px), "cy": float(cy_px),
+            "bbox": q["bbox"],
+            "visible_frac": (q["area"] / q["total_area"]
+                             if q["total_area"] > 0 else 0.0),
+            "occluded_frac": min(1.0, occl / max(q["area"], 1.0)),
+            "occluded_by": sorted(occluders),
+            "clipped": bool(q["area"] < 0.999 * max(q["total_area"], 1e-9)),
+            "digit_bbox": (quads["digit"]["bbox"] if "digit" in quads else None),
+            # 世界系真值（诊断用；真机没有）
+            "world_xy": (float(cx), float(cy)),
+        })
+    return sorted(out, key=lambda e: e["digit"])
 
 
 class SimNineGridRobot(RobotState):
@@ -250,48 +523,25 @@ class SimNineGridRobot(RobotState):
             if digit is None:
                 continue
             self._draw_panel(frame, R, C, cell, digit)
+        # 本帧真值（面板级）——挂在 state 上，供评测工具/测试读取。
+        # 关卡侧**不消费**它（真机没有这个属性），故不影响任何决策路径。
+        self._last_frame_truth = _frame_truth(R, C, self.layout)
         if self.viewer is not None:
             self.viewer.on_frame(self, frame)
         return frame
 
     def _draw_panel(self, frame, R, C, cell, digit):
         cx, cy = grid_cell_center(cell)
-
-        def proj(dx, dy):
-            p = np.array([cx + dx, cy + dy, 0.0])
-            pc = R @ (p - C)
-            return pc
-
-        def quad(hx, hy):
-            corners = [proj(-hx, -hy), proj(hx, -hy), proj(hx, hy), proj(-hx, hy)]
-            if any(c[2] <= 0.05 for c in corners):
-                return None
-            norm = np.array([c[:2] / c[2] for c in corners])
-            pix, _ = cv2.projectPoints(
-                np.column_stack([norm, np.ones(4)]).reshape(-1, 1, 3)
-                .astype(np.float32),
-                np.zeros(3), np.zeros(3), CAMERA_INTRINSIC, CAMERA_DISTORTION)
-            pix = pix[:, 0, :]
-            # 角点贴近相机平面（z 略大于 0.05）时投影会溢出为 ±inf，
-            # astype(int32) 得 INT_MIN 后 cv2.fillPoly 会扫描 ~2^31 行
-            # （实测 26s/次，整轮仿真被拖到 800s+）。
-            # 正确处理 = 裁到画幅：真实相机只看到交集，直接丢弃会让"贴边
-            # 仍可见的细条"在仿真里消失（比现实更难，掩盖定位缺陷）。
-            if not np.all(np.isfinite(pix)):
-                return None
-            pix = np.clip(pix, -1e6, 1e6)
-            area, inter = cv2.intersectConvexConvex(
-                pix.astype(np.float32), _IMAGE_RECT)
-            if inter is None or len(inter) < 3 or area <= 1e-9:
-                return None
-            return np.round(inter).astype(np.int32)
-
-        panel = quad(PANEL_HALF_CM, PANEL_HALF_CM)
+        panel = _project_quad(R, C, cx, cy, PANEL_HALF_CM, PANEL_HALF_CM)
         if panel is not None:
-            cv2.fillPoly(frame, [panel], PANEL_BGR[digit])
-        digit_quad = quad(DIGIT_HALF_CM[0], DIGIT_HALF_CM[1])
-        if digit_quad is not None:
-            cv2.fillPoly(frame, [digit_quad], (0, 0, 0))
+            cv2.fillPoly(frame, [np.round(panel).astype(np.int32)],
+                         PANEL_BGR[digit])
+        # 数字：**真字形**（现场照片同源）；资产不可用时退回黑块，并由
+        # `glyph_table()` 在 stdout 显式告警（不静默降级）。
+        if not _draw_glyph(frame, R, C, cell, digit, cx, cy):
+            block = _project_quad(R, C, cx, cy, *GLYPH_DIGIT_SIZE_CM)
+            if block is not None:
+                cv2.fillPoly(frame, [np.round(block).astype(np.int32)], (0, 0, 0))
 
 
 # =====================================================================
