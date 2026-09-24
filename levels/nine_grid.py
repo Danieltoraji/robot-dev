@@ -784,6 +784,17 @@ VIS_REACQ_MAX_FRAMES = 90        # 单次重捕获拍照上限
 #   ⚠️ 与"单格 360° 转向预算"的关系：预算是防"在原地打转"，重捕获是**有目标方向**
 #   的搜索 ⇒ 二者分别记账（见 `_unified_reacquire`）。
 VIS_REACQ_STRIDE = 1             # 每丢几帧转一步
+# ★ 单向扫描上限 + 反向（2026-09-25 实测新增）
+#   实测（seed7 digit3 逐帧真值轨迹）：重捕获**单向转了 83 帧**目标才进视野
+#   （转过 ~240°），而一旦看到目标，逼近只用了 **12 帧**就收敛到 3.7cm
+#   —— 即整格的时间几乎全花在"朝错方向盲扫"上。
+#   机理：`_bearing_to_target_deg` 读的是 pose 航向，而航向不修（第三轮已否证
+#   "到达后视觉修航向"）⇒ 方位可能把机器人带向反方向；单向 720° 的额度太大，
+#   错方向也要转满一大圈才回来。
+#   对策：**单向最多扫 VIS_REACQ_SWEEP_CAP_DEG，没看到就反向**。
+#   实测**否证**：加反向之后到达 24→23、拍照 2386→2512（更差）⇒ 反向没有救回
+#   那几格、反而多花帧。**故默认关闭**（=720 即"不反向"）；常量保留供复现该否证。
+VIS_REACQ_SWEEP_CAP_DEG = 720.0
 # ★★ 取 1（每帧都转），这是本轮**最大的单点收益**，实测（3 种子 21 格）：
 #     stride=2（旧）→ 到达 10/21、落点 [7.0,8.4,65.6,32.8,14.1,64.9,53.3]、拍照 1709
 #     stride=1（新）→ 到达 **20/21**、落点 [7.0,8.4,6.1,7.4,6.9,10.1,8.8]、拍照 1407
@@ -2388,6 +2399,7 @@ class NineGridLevel:
         self._reacq_deg = 0.0          # 本轮重捕获已累计转过的角度
         self._reacq_frames = 0
         self._reacq_dir = None         # 本轮重捕获的转向方向（一次定死）
+        self._reacq_flipped = False    # 是否已"单向扫够后反向"过一次
         prev_zone = None
         prev_cov = None
         prev_org = None
@@ -2474,6 +2486,7 @@ class NineGridLevel:
                 self._reacq_deg = 0.0
                 self._reacq_frames = 0
                 self._reacq_dir = None
+                self._reacq_flipped = False
                 # ---- 三档分区（判档只吃像素）----
                 head_pulse = getattr(self.state, "current_head_pulse",
                                      HEAD_CENTER)
@@ -2689,6 +2702,15 @@ class NineGridLevel:
             else:
                 self._reacq_dir = (1.0 if float(getattr(
                     self, "_last_seen_side", 1.0)) >= 0.0 else -1.0)
+        if self._reacq_deg >= VIS_REACQ_SWEEP_CAP_DEG \
+                and not self._reacq_flipped:
+            # 单向扫够额度还没看到 ⇒ 反向再扫（错方向的代价从"转满一圈"降到
+            # "转一个上限"）。只允许反一次，避免左右来回摆（那正是第二轮踩过的坑）。
+            self._reacq_dir = -(self._reacq_dir or 1.0)
+            self._reacq_deg = 0.0
+            self._reacq_flipped = True
+            print(f"[重捕获] 面板{digit} 单向已扫 "
+                  f"{VIS_REACQ_SWEEP_CAP_DEG:.0f}° 未见 → 反向再扫")
         want_left = self._reacq_dir > 0.0
         step = TURN_LEFT_SMALL_DEG if want_left else -TURN_RIGHT_SMALL_DEG
         act = "turn_left_small_step" if want_left else "turn_right_small_step"
