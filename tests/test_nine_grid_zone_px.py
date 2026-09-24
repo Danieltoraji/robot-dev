@@ -157,7 +157,12 @@ def test_purple_and_arrival_thresholds_are_pinned():
     assert NG.VIS_ZONE_PURPLE_HEIGHT == pytest.approx(0.62)
     assert NG.VIS_ARRIVE_PURPLE_MIN == pytest.approx(0.35)
     assert NG.VIS_ARRIVE_ORANGE_MAX == pytest.approx(0.10)
-    assert NG.VIS_ARRIVE_ASYM_MAX == pytest.approx(0.25)
+    # 2026-09-25 由 0.25 改为 0.55：该量是**角度量**（同横偏 @4cm/@10cm/@20cm 读数
+    # 差 2~3 倍），且面板 28cm 宽于绿走廊（±7cm）⇒ 永远到不了 0.5 以上多少，
+    # 0.25 实际只容许 ±1.7cm 横偏而蓝档稳定在 ±5cm。扫门实测 0.25→10/21、
+    # 0.55→20/21；落地精度复核（3 种子）为 6.1~10.1cm，未因放门而压偏。
+    assert NG.VIS_ARRIVE_ASYM_MAX == pytest.approx(0.55)
+    assert NG.VIS_ARRIVE_CENTER_MAX == pytest.approx(0.12)
     assert NG.VIS_ARRIVE_REGION_ENABLED is True
 
 
