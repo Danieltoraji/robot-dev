@@ -40,11 +40,11 @@ IMAGE_CENTER_X = FRAME_SIZE[0] // 2
 
 # 红色 HSV 双区间
 RED_H_LOW1 = 0
-RED_H_HIGH1 = 10
-RED_H_LOW2 = 160
+RED_H_HIGH1 = 17
+RED_H_LOW2 = 149
 RED_H_HIGH2 = 180
-RED_S_LOW = 80
-RED_V_LOW = 80
+RED_S_LOW = 0
+RED_V_LOW = 50
 
 # 视觉区域和轮廓
 VISION_TOP_Y = 170
@@ -67,20 +67,28 @@ SAMPLE_BANDS = (
 # 正常巡线阈值
 CENTER_DEADBAND = 42              # 近处红线离画面中心超过此值才横移
 HEADING_TURN_THRESHOLD = 5        # 极缓弯也立即转向
+HEADING_MAX = 50.0                # heading 绝对值上限；超过视为路口/噪声，置 0 忽略朝向
 HEADING_HINT_THRESHOLD = 25       # 丢线时用最后朝向猜搜索方向的阈值
 VERTICAL_HEADING_TOLERANCE = 5    # 与转向阈值衔接，避免决策死区
 FILTER_ALPHA = 0.5                # 位置和方向的一阶滤波系数
 FILTER_RESET_JUMP = 140           # 位置突变过大时直接重置滤波
 
 # 路口检测：赛道固定为直角弯，只需判断"是否到路口"，不再靠视觉猜方向
-HORIZONTAL_MIN_WIDTH = 70         # 实测偏保守偏大导致漏检，调小以更容易触发
+HORIZONTAL_MIN_WIDTH = 90         # 普通线宽 52-75，直角弯横条 94-160，90 只对真实横向岔路触发
+CORNER_DIRECTION_DEADBAND = 15    # 横条中点相对主线中心偏移超过此值才判向（否则歧义=0）
 CORNER_TURN_TRIGGER_Y = 380       # 路口特征接近画面底部后才开始转身，调小以更早触发
 CORNER_LATCH_SECONDS = 2.0        # 路口特征短暂漏检时继续保持"已到路口"状态
 CORNER_DEBUG_INTERVAL = 0.5       # 调试打印节流：每隔多久打印一次检测到的最大宽度/行
 
+# 转弯后确认期：转弯刚结束时画面里可能仍残留横条（corner_ready 持续 True），
+# 直接响应会把残留横条误判成下一个路口导致连续转弯。确认期内屏蔽 corner_ready，
+# 横条残留说明转弯没转够、朝原方向小步微调；横条消失（面对直道）连续数帧后恢复。
+POST_TURN_CLEAR_FRAMES = 5        # 连续 horizontal_seen=False 多少帧才认定已面对直道
+POST_TURN_MAX_EXTRA_TURNS = 12    # 横条残留时最多额外小步微调次数（防卡死）
+
 # 赛道固定，转弯顺序提前写死（从起点开始，依次对应每个路口的转向）
-CORNER_TURN_SEQUENCE = ['left', 'left', 'right', 'right', 'left', 'right']
-CORNER_TURN_REPEATS = 3           # 单次90°整弯需要的 turn_left/turn_right 执行次数
+CORNER_TURN_SEQUENCE = ['left', 'right', 'right', 'left']
+CORNER_TURN_REPEATS = 6           # 单次90°整弯需要的 turn_left/turn_right 执行次数
                                   # 需用 action_test.py 实测单次转向角度后校准（90 / 单次角度）
 
 # 动作与安全限制
@@ -129,6 +137,8 @@ line_center_x = -1
 line_lost_time = 0
 turn_started = False
 approach_active = False
+corner_ready = False
+last_turn_completed_at = 0.0  # 最近一次路口转弯完成时间（monotonic），终点判定冷却期用
 
 _state_lock = threading.Lock()
 _vision_state = None
@@ -139,6 +149,8 @@ _corner_pending = False
 _corner_pending_y = 0
 _corner_pending_last_seen = 0
 _corner_index = 0          # 下一个待完成的路口在 CORNER_TURN_SEQUENCE 中的下标
+_corner_direction = 0       # 最近一次横条判出的转向：+1右 -1左 0歧义/无
+_corner_offset_x = 0.0      # 判向时的横条中点相对主线中心偏移（像素）
 _last_corner_debug_time = 0
 
 
@@ -175,6 +187,8 @@ def empty_vision_state(frame_id=0):
         'corner_pending': False,
         'corner_y': 0,
         'corner_ready': False,
+        'corner_direction': 0,
+        'corner_offset_x': 0.0,
         'sample_count': 0,
         'confidence': 0.0,
     }
@@ -197,7 +211,9 @@ def reset():
     global _vision_state, _frame_id, _filtered_near_x, _filtered_heading
     global _corner_pending, _corner_pending_y, _corner_pending_last_seen
     global _corner_index
-    global line_center_x, line_lost_time, turn_started, approach_active
+    global _corner_direction, _corner_offset_x
+    global line_center_x, line_lost_time, turn_started, approach_active, corner_ready
+    global last_turn_completed_at
 
     with _state_lock:
         _frame_id = 0
@@ -208,10 +224,14 @@ def reset():
         _corner_pending_y = 0
         _corner_pending_last_seen = 0
         _corner_index = 0
+        _corner_direction = 0
+        _corner_offset_x = 0.0
         line_center_x = -1
         line_lost_time = 0
         turn_started = False
         approach_active = False
+        corner_ready = False
+        last_turn_completed_at = 0.0
 
 
 def init():
@@ -313,8 +333,9 @@ def sample_path(path_mask):
 
 
 def analyze_path_samples(samples):
-    """把采样点转换成近处位置、方向误差和路口提示。
-    路口方向不再由视觉判断——赛道固定，方向来自 CORNER_TURN_SEQUENCE 查表。"""
+    """把采样点转换成近处位置、方向误差、路口提示和路口方向。
+    路口方向由最宽横条中点相对主线近处中心的横向偏移判断，供 move() 与
+    查表结果做一致性校验；方向本身仍来自 CORNER_TURN_SEQUENCE。"""
     if not samples:
         return None
 
@@ -333,22 +354,46 @@ def analyze_path_samples(samples):
         vertical_span = 0.0
         heading = 0.0
 
+    # heading 是「远端 - 近端」横向像素差经斜率放大后的值，正常直线循迹在
+    # ±20px 内。路口附近 direction_samples 只剩远端窄带、vertical_span 贴近
+    # 40px 下限时会被放大到 ±数百（实机见 heading=-461.4），远超可信范围。
+    # 超过上限说明是路口/噪声，置 0 忽略朝向修正，让 corner_pending/
+    # corner_ready 逻辑接管，避免在接近路口时乱转方向。
+    if abs(heading) > HEADING_MAX:
+        heading = 0.0
+
     # 路口特征：某条采样带的红色区域宽度远超正常直线段宽度，说明这里出现了
     # 岔路（横向的红线段）。只需要知道"到没到"，不需要判断岔路方向。
     horizontal_seen = False
     corner_y = 0
     max_width = 0
     max_width_y = 0
+    max_width_left_x = 0
+    max_width_right_x = 0
     for sample_y, _, left_x, right_x, _ in samples:
         width = right_x - left_x
         if width > max_width:
             max_width = width
             max_width_y = sample_y
+            max_width_left_x = left_x
+            max_width_right_x = right_x
         if width >= HORIZONTAL_MIN_WIDTH:
             horizontal_seen = True
             corner_y = max(corner_y, sample_y)
 
     corner_ready = horizontal_seen and corner_y >= CORNER_TURN_TRIGGER_Y
+
+    # 判向：最宽横条（直角弯的横向红线段）只向转弯方向延伸，其中点相对
+    # 主线近处中心的横向偏移方向即转弯方向。偏移过小视为歧义，返回 0。
+    corner_direction = 0
+    corner_offset_x = 0.0
+    if horizontal_seen and max_width_right_x > max_width_left_x:
+        corner_center_x = (max_width_left_x + max_width_right_x) / 2.0
+        corner_offset_x = corner_center_x - near[1]
+        if corner_offset_x >= CORNER_DIRECTION_DEADBAND:
+            corner_direction = 1
+        elif corner_offset_x <= -CORNER_DIRECTION_DEADBAND:
+            corner_direction = -1
 
     return {
         'near_x': near[1],
@@ -358,6 +403,8 @@ def analyze_path_samples(samples):
         'horizontal_corner': horizontal_seen,
         'corner_y': corner_y,
         'corner_ready': corner_ready,
+        'corner_direction': corner_direction,
+        'corner_offset_x': corner_offset_x,
         'sample_count': len(samples),
         'max_width': max_width,
         'max_width_y': max_width_y,
@@ -391,14 +438,19 @@ def get_vision_state():
 def clear_pending_corner():
     global _vision_state, _corner_pending
     global _corner_pending_y, _corner_pending_last_seen
+    global _corner_direction, _corner_offset_x
 
     with _state_lock:
         _corner_pending = False
         _corner_pending_y = 0
         _corner_pending_last_seen = 0
+        _corner_direction = 0
+        _corner_offset_x = 0.0
         _vision_state = dict(_vision_state)
         _vision_state['corner_pending'] = False
         _vision_state['corner_ready'] = False
+        _vision_state['corner_direction'] = 0
+        _vision_state['corner_offset_x'] = 0.0
 
 
 def advance_corner_index():
@@ -468,7 +520,7 @@ def observe_for_line(timeout):
 
 
 def move():
-    global turn_started
+    global turn_started, last_turn_completed_at
     last_handled_frame = -1
     last_visible_state = empty_vision_state()
     search = LostLineSearch()
@@ -480,6 +532,10 @@ def move():
     turn_hold_reported = False
     no_line_since = 0
     ever_seen_line = False
+    post_turn_active = False
+    post_turn_direction = 0
+    post_turn_clear_frames = 0
+    post_turn_extra_turns = 0
 
     while True:
         if not (enter and running):
@@ -492,6 +548,10 @@ def move():
             turn_hold_reported = False
             no_line_since = 0
             ever_seen_line = False
+            post_turn_active = False
+            post_turn_direction = 0
+            post_turn_clear_frames = 0
+            post_turn_extra_turns = 0
             last_visible_state = empty_vision_state()
             turn_started = False
             time.sleep(0.1)
@@ -523,10 +583,47 @@ def move():
             turn_direction = 0
             turn_error = 0
 
-            if state['corner_ready']:
+            # 转弯后确认期：转弯刚结束画面里可能仍残留横条（corner_ready 持续
+            # True），直接响应会把残留横条误判成下一个路口导致连续转弯。确认期
+            # 内屏蔽 corner_ready：横条残留说明转弯没转够、朝原方向小步微调；
+            # 横条消失（面对直道）连续数帧后才恢复前进与路口检测。
+            corner_ready_flag = state['corner_ready']
+            if post_turn_active:
+                corner_ready_flag = False
+                if state['horizontal_corner']:
+                    post_turn_clear_frames = 0
+                    if post_turn_extra_turns >= POST_TURN_MAX_EXTRA_TURNS:
+                        post_turn_active = False
+                        print('V3 巡线：转弯后确认超次，恢复正常循迹')
+                    else:
+                        post_turn_extra_turns += 1
+                        action = small_turn_action_for(post_turn_direction)
+                        action_label = '转弯确认微调向{}（{}/{}）'.format(
+                            direction_name(post_turn_direction),
+                            post_turn_extra_turns, POST_TURN_MAX_EXTRA_TURNS)
+                        if action_label != last_action_label:
+                            print('V3 巡线：{}'.format(action_label))
+                            last_action_label = action_label
+                        AGC.runActionGroup(action, times=TURN_ACTION_TIMES,
+                                           with_stand=TURN_WITH_STAND)
+                        time.sleep(NORMAL_ACTION_SETTLE)
+                        continue
+                else:
+                    post_turn_clear_frames += 1
+                    if post_turn_clear_frames >= POST_TURN_CLEAR_FRAMES:
+                        post_turn_active = False
+                        clear_pending_corner()
+                        print('V3 巡线：转弯后确认完成，恢复正常循迹')
+
+            if corner_ready_flag:
                 corner_index = get_corner_index()
                 corner_turn = expected_corner_direction(corner_index)
                 if corner_turn != 0:
+                    visual_dir = state.get('corner_direction', 0)
+                    if visual_dir != 0 and visual_dir != corner_turn:
+                        print('V3 方向校验：视觉判向{} 与赛道顺序{} 不一致（offset={:.0f}）'.format(
+                            direction_name(visual_dir), direction_name(corner_turn),
+                            state.get('corner_offset_x', 0.0)))
                     action_label = '路口{}按顺序执行向{}转 corner_y={:.0f}'.format(
                         corner_index + 1, direction_name(corner_turn), state['corner_y'])
                     if action_label != last_action_label:
@@ -537,6 +634,11 @@ def move():
                         turn_action_for(corner_turn), times=CORNER_TURN_REPEATS,
                         with_stand=TURN_WITH_STAND)
                     turn_started = False
+                    last_turn_completed_at = time.monotonic()
+                    post_turn_active = True
+                    post_turn_direction = corner_turn
+                    post_turn_clear_frames = 0
+                    post_turn_extra_turns = 0
                     advance_corner_index()
                     clear_pending_corner()
                     last_turn_direction = 0
@@ -647,8 +749,9 @@ motion_thread.start()
 def run(img):
     global _vision_state, _frame_id
     global _corner_pending, _corner_pending_y, _corner_pending_last_seen
+    global _corner_direction, _corner_offset_x
     global _last_corner_debug_time
-    global line_center_x, line_lost_time, approach_active
+    global line_center_x, line_lost_time, approach_active, corner_ready
 
     if not enter:
         return img
@@ -676,9 +779,10 @@ def run(img):
     global _last_corner_debug_time
     if analysis is not None and now - _last_corner_debug_time >= CORNER_DEBUG_INTERVAL:
         _last_corner_debug_time = now
-        print('V3 路口调试：max_width={:.0f}@y={:.0f} horizontal_seen={} corner_y={:.0f}'.format(
+        print('V3 路口调试：max_width={:.0f}@y={:.0f} horizontal_seen={} corner_y={:.0f} dir={} offset={:.0f}'.format(
             analysis['max_width'], analysis['max_width_y'],
-            analysis['horizontal_corner'], analysis['corner_y']))
+            analysis['horizontal_corner'], analysis['corner_y'],
+            analysis['corner_direction'], analysis['corner_offset_x']))
 
     with _state_lock:
         _frame_id += 1
@@ -691,11 +795,16 @@ def run(img):
                 _corner_pending = True
                 _corner_pending_y = max(_corner_pending_y, analysis['corner_y'])
                 _corner_pending_last_seen = now
+                if analysis['corner_direction'] != 0:
+                    _corner_direction = analysis['corner_direction']
+                    _corner_offset_x = analysis['corner_offset_x']
             elif (_corner_pending and
                   now - _corner_pending_last_seen > CORNER_LATCH_SECONDS):
                 _corner_pending = False
                 _corner_pending_y = 0
                 _corner_pending_last_seen = 0
+                _corner_direction = 0
+                _corner_offset_x = 0.0
 
             corner_ready = analysis['corner_ready'] or (
                 _corner_pending and _corner_pending_y >= CORNER_TURN_TRIGGER_Y)
@@ -718,6 +827,8 @@ def run(img):
                 'corner_y': (_corner_pending_y if _corner_pending
                              else analysis['corner_y']),
                 'corner_ready': corner_ready,
+                'corner_direction': _corner_direction,
+                'corner_offset_x': _corner_offset_x,
                 'sample_count': analysis['sample_count'],
                 'confidence': confidence,
             }
@@ -726,6 +837,7 @@ def run(img):
                 line_lost_time = now
             line_center_x = -1
             approach_active = bool(_corner_pending)
+            corner_ready = False
             _vision_state = dict(_vision_state)
             _vision_state.update({
                 'frame_id': _frame_id,

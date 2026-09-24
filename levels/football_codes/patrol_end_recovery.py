@@ -43,6 +43,7 @@ class PatrolEndRecoveryController:
         max_back_steps=8,
         back_step_interval_s=0.8,
         turn_recovery_timeout_s=25.0,
+        turn_recovery_no_turn_timeout_s=4.0,
         detector_factory=None,
     ):
         self.redline = redline
@@ -55,6 +56,9 @@ class PatrolEndRecoveryController:
         self.max_back_steps = max(1, int(max_back_steps))
         self.back_step_interval_s = max(0.1, float(back_step_interval_s))
         self.turn_recovery_timeout_s = max(1.0, float(turn_recovery_timeout_s))
+        self.turn_recovery_no_turn_timeout_s = max(
+            0.5, float(turn_recovery_no_turn_timeout_s)
+        )
         self.detector_factory = detector_factory
         self.detector = None
 
@@ -160,9 +164,8 @@ class PatrolEndRecoveryController:
                 "无法启动巡线终点 Tag 复核，已安全停止：{}".format(exc),
             )
 
-    def _begin_backtrack(self, now):
-        self._restore_patrol_head()
-        # 清除候选终点造成的丢线记忆；身体仍保持暂停，由本控制器逐步后退。
+    def _reset_patrol_line_state(self):
+        """清除候选终点与恢复过程留下的巡线状态，身体保持暂停。"""
         self.redline.running = False
         if hasattr(self.redline, "line_center_x"):
             self.redline.line_center_x = -1
@@ -170,8 +173,15 @@ class PatrolEndRecoveryController:
             self.redline.line_lost_time = 0
         if hasattr(self.redline, "approach_active"):
             self.redline.approach_active = False
+        if hasattr(self.redline, "corner_ready"):
+            self.redline.corner_ready = False
         if hasattr(self.redline, "turn_started"):
             self.redline.turn_started = False
+
+    def _begin_backtrack(self, now):
+        self._restore_patrol_head()
+        # 清除候选终点造成的丢线记忆；身体仍保持暂停，由本控制器逐步后退。
+        self._reset_patrol_line_state()
 
         self.state = self.BACKTRACK
         self.back_steps_done = 0
@@ -267,9 +277,10 @@ class PatrolEndRecoveryController:
             )
 
         # running=False 时 redline.run() 只做视觉分析，不会由巡线线程前进；
-        # 一旦它原有的直角弯检测将 approach_active 置真，就停止后退。
+        # 一旦它原有的直角弯检测将 corner_ready 置真（宽度达标且 corner_y
+        # 足够靠下，与 move() 真正转弯的判据一致），就停止后退。
         display_frame = self.redline.run(corrected_frame)
-        if getattr(self.redline, "approach_active", False):
+        if getattr(self.redline, "corner_ready", False):
             self.redline.AGC.runActionGroup("stand")
             self.redline.running = True
             self.state = self.TURN_RECOVERY
@@ -326,6 +337,26 @@ class PatrolEndRecoveryController:
             return self._event(
                 self.RECOVERED,
                 "漏识别直角弯的原有转弯闭环已完成；继续第一阶段巡线",
+                display_frame=display_frame,
+            )
+
+        # 假找回兜底：corner_ready 短暂满足却始终未真正触发转弯（turn_started
+        # 从未置真），说明后退时误把普通红线宽度当成了直角弯。回到后退阶段
+        # 继续寻找，避免干等 turn_recovery_timeout_s 后才 FAILED。
+        if not self.turn_started_seen and (
+            now - self.turn_recovery_started_at
+            >= self.turn_recovery_no_turn_timeout_s
+        ):
+            self._restore_patrol_head()
+            self._reset_patrol_line_state()
+            self.state = self.BACKTRACK
+            self.back_steps_done = 0
+            self.turn_started_seen = False
+            self.backtrack_ready_at = time.monotonic() + self.head_settle_s
+            self.next_back_step_at = self.backtrack_ready_at
+            return self._event(
+                "BACKTRACK_RETRY",
+                "找回信号未真正触发转弯，回到后退阶段继续寻找直角弯",
                 display_frame=display_frame,
             )
 

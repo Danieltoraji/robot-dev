@@ -62,6 +62,10 @@ class PatrolEndDetector:
     同时仍会避开直角弯处理期间的短暂丢线。RedLinePatrolV3.py 本身保持不变。
     """
 
+    # 转弯完成后脚下无红线的冷却期（秒）。转弯刚结束红线仍停在转弯后的前方、
+    # 尚未压到脚下，这段时间禁止判定候选终点，避免转弯一结束就被误判。
+    TURN_END_COOLDOWN_S = 2.5
+
     def __init__(self, end_confirm_s=0.8):
         self.end_confirm_s = max(0.0, float(end_confirm_s))
         self.seen_line = False
@@ -142,11 +146,22 @@ class PatrolEndDetector:
             self.foot_absent_since = None
             return False
 
+        # 转弯刚结束的空窗期：红线仍停在转弯后的前方、尚未压到脚下，
+        # 这段时间禁止判定候选终点，避免转弯一结束就被误判。
+        if now - getattr(redline, "last_turn_completed_at", 0.0) < self.TURN_END_COOLDOWN_S:
+            self.absent_since = None
+            self.foot_absent_since = None
+            return False
+
 
         # 脚下 ROI 是主要终点证据：远处仍有红线不影响切换。
         # 只有检测不可用时，才回退到整体 line_center_x 的丢线状态。
         if foot_line_present is not None:
             if foot_line_present is True or self.foot_absent_since is None:
+                return False
+            # 整体仍能看到红线：红线还在前方，是转弯后空窗而非真正终点。
+            if line_seen:
+                self.foot_absent_since = None
                 return False
             return now - self.foot_absent_since >= self.end_confirm_s
 
