@@ -450,6 +450,16 @@ VIS_ARRIVE_ONCELL_ENABLED = True    # 总开关
 #   ⇒ 它只能拦住"横向离谱"的少数情形，**不是主判据**；默认 **0（关闭）**，
 #   常量保留以便需要时显式开启（会拦住极端的横向错位）。
 VIS_ARRIVE_LATERAL_MAX_CM = 0.0
+# 头部扫（凑对应点用）：中位解不出锚时依次试这些头部档。
+# 依据：对应点数强烈依赖头部档（实测站在格心低头档：cell0 中位2/右6；
+#       cell3 中位5/右9；cell8 中位7/左10）⇒ 换个头部档常能凑够 ≥5 对。
+# **只动头部、不动身体** ⇒ 位姿与几何不变，锚解出的位姿与到达时刻可比。
+# ⚠️ **默认置空 = 关闭**：实测（8 种子）开启后拍照 613→**632/局（+19）**，
+#    而到达/中位/最大/超半格**逐位不变**（46/56、8.5、10.8、0）⇒ 花了帧没换来收益。
+#    机理：核验路径上"色块判据成立"的帧本来就少（整局 6 次量级），
+#    且这些帧的**真值都在半格内**（不是假到达），所以多解出几次锚也无从否决。
+#    ⇒ 保留实现与常量以便复现/A-B，但**不进默认**。
+VIS_ARRIVE_ONCELL_HEAD_SWEEP = ()
 VIS_ARRIVE_ONCELL_TOL_CM = 16.7     # 距格心容差（= 半格；压感区半宽 5.5cm，
 #                                     但锚本身有位姿误差，取半格更稳）
 VIS_ARRIVE_ONCELL_REQUIRE = False   # 锚**不可用**时是否也拒绝
@@ -2772,6 +2782,42 @@ class NineGridLevel:
                 return "no", (f"横向偏离 {lat:.0f}cm > {VIS_ARRIVE_LATERAL_MAX_CM:.0f}cm"
                               f"——目标面板不在正下方，疑为邻格同色面板"
                               f"（单面板判据，无需锚）")
+        # ★ 锚解算：**头部扫**以凑足对应点（身体不动 ⇒ 位姿不变）。
+        #   动机（实测）：核验帧"对应点饥饿"—— 31 次里 20 次只有 2 对，解不出位姿。
+        #   而对应点数**强烈依赖头部档**（站在格心、低头档，逐格实测）：
+        #       cell0  中位2 左2 右**6** 宽左2 宽右8
+        #       cell3  中位5 左3 右**9** 宽左2 宽右9
+        #       cell4  中位**7** 左6 右6 宽左4 宽右4
+        #       cell8  中位7 左**10** 右3 宽左8 宽右0
+        #   ⇒ 中位解不出时依次试其它头部档；**只动头部**，所以位姿/几何不变。
+        #   代价：只在"色块判据已成立"的帧上多拍 1~4 帧（每局约 +7 帧）。
+        anc = None
+        tried = []
+        for hp in ((None,) + VIS_ARRIVE_ONCELL_HEAD_SWEEP
+                   if VIS_ARRIVE_ONCELL_HEAD_SWEEP else (None,)):
+            if hp is None:
+                fr = frame                      # 复用已经拍好的那一帧
+            else:
+                if self._cell_expired():
+                    break
+                self.state.set_head(hp)
+                fr = self._capture()
+                if fr is None:
+                    continue
+            try:
+                full = self.detector.detect_panels(fr, drop_border=False)
+            except Exception:
+                continue
+            anc = self._map_anchor(full, fr, why=f"ONCELL{digit}")
+            tried.append(("中位" if hp is None else str(hp), anc is not None))
+            if anc is not None:
+                break
+        if VIS_ARRIVE_ONCELL_HEAD_SWEEP:
+            self.state.set_head(HEAD_CENTER)     # 无论成败都复位居中
+        if anc is None:
+            return "unknown", ("锚不可用（共识不足/对应点不够；已试 %s）"
+                               % "、".join("%s%s" % (n, "✓" if ok else "✗")
+                                           for n, ok in tried))
         try:
             full = self.detector.detect_panels(frame, drop_border=False)
         except Exception:
