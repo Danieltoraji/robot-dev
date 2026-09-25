@@ -100,8 +100,41 @@ def test_sim_full_run():
           f"({'可用' if s['small_turn_usable'] else '已弃用(大转兜底)'})")
 
 
+def test_unified_full_run():
+    """端到端（**默认办法**）：统一决策也必须 7/7、布局正确、不越护栏
+
+    为什么单列一条：默认办法此前没有端到端门（只有形变场景下的安全门），
+    而它是 `python main.py nine_grid` 真正跑的那条。2026-09-25 取消"耗时太长
+    就放弃这一格"之后，它从 6/7（面板 4 拍照撞上限被记未确认）变成 7/7——
+    这一条就是那次策略改动的端到端证据。
+
+    护栏 900 张：实测 652 张（三段式 189），留 ~38% 余量；它拦的是"定位风暴"，
+    不是"磨了几次"（磨本身是策略允许的）。仿真保险丝另在 3000 张兜底。
+    """
+    run = run_simulation(three_stage=False)
+    s = run.stats
+
+    assert s["layout_ok"], \
+        f"统一决策布局解算错误: {s['digit_cell']} != 真值 {s['truth']}"
+    failed = [k for k, ok in s["results"] if not ok]
+    assert s["ok_all"] and not failed, \
+        f"未确认到达的面板: {failed}，结果 {s['results']}"
+    assert not s["banned_used"], \
+        f"使用了本场地禁用的大步幅动作: {s['banned_used']}"
+    assert not s["fuse_tripped"], f"不该走到仿真保险丝：{s['fuse_tripped']}"
+    assert s["captures"] < 900, \
+        f"拍照次数 {s['captures']} 超护栏 900，检查是否出现定位风暴"
+    # ★ 顺序计分：确认的格必须是 1..7 全连续（绝不跳格）
+    seq = [d for d, ok in s["results"] if ok]
+    assert seq == list(range(1, 8)), f"顺序断了：确认了 {seq}"
+
+    print(f"\n[仿真·统一决策] 全部 7 格到达确认 ✓  拍照 {s['captures']} 张，"
+          f"动作 {s['actions']} 次；逐格尝试次数 {s['attempt_log']}")
+
+
 if __name__ == "__main__":
     test_banned_actions_rejected()
     test_render_guard_fast()
     test_sim_full_run()
+    test_unified_full_run()
     print("数字宫格仿真集成测试通过 ✓")

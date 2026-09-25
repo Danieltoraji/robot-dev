@@ -5,7 +5,7 @@
   · 布局扫描：宽扫 → 格阵拟合 → 自标定相机常数 → 由面板反推初始位姿；
   · 投影与裁切预测：格心 ↔ 像素（定位、自标定、位置核对共用）；
   · 位置核对：把"地图说数字 d 在格 c"与本帧看到的东西配对，解出实测位姿；
-  · 动作白名单、位姿推算、单格时间/拍照/动作三重预算与熔断、场地边界护栏；
+  · 动作白名单、位姿推算、单格**进度**（只提醒）与离场护栏（唯一硬停）；
   · 逐格主流程 run_level（子类只实现 _drive_to_panel）。
 
 只属于某一种办法的判据、阈值、决策循环一律留在各自模块，不要往这里加。
@@ -46,8 +46,9 @@ core.ground_homography.from_pose 的 head_in_pose）转为机器人系地面坐�
 go_forward / go_forward_fast（5cm 步幅在小面板+打滑地板上易摔倒，`_act` 硬门
 拒绝）。
 
-容错：卡滞检测、目标丢失处理、分格时间预算 + **单格硬熔断**（CELL_LIMIT_*：
-时间/拍照/动作三重护栏，任一触发即"本格记未确认、立即返回"）+ 全局看门狗。
+容错：卡滞检测、目标丢失处理、**顺序计分下的"绝不跳格"**（一格没确认就一直
+磨这一格，只换办法重试；时间/拍照数/动作数只提醒、不停止），唯一会自己停下来
+的是离场护栏。
 
 现场依赖：
   1) 无标定依赖（布局扫 v2 已去除；archive/result/ninegrid_homography.json
@@ -185,12 +186,13 @@ PANEL_WIDTH_CM = 28.0           # 色块宽（像素↔厘米换算基准；与 
 # 旧实现只在时间/拍照数/动作数上设了上限，而**转向是最便宜的动作**（不拍照、
 # 不耗帧）：没有"转够了就停"的概念，它可以在死区里空转很久。
 # 对策：单格累计**命令**转角（含搜索/对准/大转/纠横的所有 turn_*）超预算即
-# 熔断本格，并**拒绝执行**那最后一次转向（见 _act）——宁可本格记未确认。
+# **拒绝执行**那最后一次转向（见 _act），并让本次尝试收手、外层换办法重试
+# 本格（2026-09-25 改：不再『熔断本格、接着做下一格』）。
 # 360° 依据（180° → 360°，2026-09-13 形变随机游走实测修正）：一格里**正常**
 # 的转向总量 = 对准 ≤60°（几个 10° 小步）+ 搜索换视角最多两轮大转
 # （每轮 ≤129°）≈ 320°；取"整圈" 360° 只拦"已经在原地打转"的情形，
 # 正常最坏路径不误伤（仿真单格实测最大 180°）。早期取 180° 会在"目标在身后、
-# 一轮搜索没扫到"时误熔断——deform 随机游走场景面板 4 就是这样丢的。
+# 一轮搜索没扫到"时误触发——deform 随机游走场景面板 4 就是这样丢的。
 TURN_BUDGET_DEG = 360.0     # 单格累计命令转角上限（一整圈）
 # ---- 离场护栏（同上，安全项） ----
 # 场地是 1m×1m 台面（格心 16.7~83.3cm），起点在台面南侧 (50,-20)（见 __init__）。
@@ -198,67 +200,42 @@ TURN_BUDGET_DEG = 360.0     # 单格累计命令转角上限（一整圈）
 # 不是防跌落预案。为什么不收得更紧：死推位姿本身在形变下实测能偏 30cm+
 # （到达判据"颜色峰值回落"在俯仰 ±15° 时会误判，_reanchor_pose 又把位姿锚到
 # "以为"的格心——deform 随机游走实测落点残差最大 36.6cm）。真按 ±18cm 收，
-# 会拿一个已经不可信的位姿把好局误熔断（该场景实测：面板4 之后整局被误中止）。
-# **真正管住"继续动"的是上面三条**：转向预算 360°、停转/来回摆判据、前压封顶。
+# 会拿一个已经不可信的位姿把好局误停（该场景实测：面板4 之后整局被误中止）。
+# **真正管住"继续动"的是上面三条**：转向预算 360°、停转/来回摆判据、前压封顶；
+# 2026-09-25 起它们是"换办法重试"的触发条件，不是"这格不要了"的理由。
 # 越界即站立并**中止整局**（不再搜索下一格）——走下台面的代价远大于丢分。
 ARENA_X_CM = (-33.0, 133.0)
 ARENA_Y_CM = (-48.0, 133.0)
 
 # =====================================================================
-# 容错预算
+# 时间：只作参考，不作停手依据
 # =====================================================================
-TARGET_TIME_BUDGET_S = 110.0   # 单格软预算（15min/7格 ≈ 128s，留裕量）
-TOTAL_TIME_BUDGET_S = 780.0    # 全局看门狗 13min（给上下场留 2min）
-# ---- 单格硬熔断（2026-09-11 真机"终点不停"后新增，安全项） ----
-# 现场现象：走到第 7 块面板后机器人仍在继续行动；日志显示它并没有"越界"，
-# 而是第 7 格一直没确认到位，于是"搜索→对准→接近→低头→蹭步"整条链在单格内
-# 反复重试，直到格预算耗尽——人看着就是"到了终点不停"。
-# 旧实现的问题：超时只在**子循环入口**判（`while time.time() < t_end`），而真机
-# 拍照 ~0.7s/张（2026-09-13 实测，见 CAPTURE_COST_S），一次 `_find_any_panel`
-# （头部五档）也有 ~4s，嵌套后单格实际能跑到 150s+，且过冲量随嵌套层数叠加。
-# 对策（三重护栏，任一触发即"本格记未确认、立刻返回"）：
-#   1) 时间：CELL_LIMIT_TIMEOUT_S，且在**每次拍照前**判（最细粒度，过冲
-#      最多 1 张照片 ~0.7s，而不是一个子循环 4s+）；
-#   2) 拍照数 CELL_LIMIT_FRAMES /   3) 动作数 CELL_LIMIT_ACTIONS：
-#      与时钟无关的确定性护栏——即使某环节出现"不拍照也不动作"的空转或
-#      "疯狂动作"的失控，也一定在有限步内退出（防新增死循环的保险丝）。
-# 取值依据（时间 70s）：
-#   - 总预算：全局 780s，布局扫真机实测 60~90s，剩 ~690s / 7 格 ≈ 98s/格；
-#     70s 给"搜索/对准/接近/低头"四段各留失败重试余量，同时保证**最坏情况**
-#     （7 格全熔断）90 + 7×70 = 580s < 780s，绝不拖过看门狗；
-#   - **实测余量充足**（2026-09-13 订正）：整局 206 张 × 0.70s ≈ 2.4 分钟，
-#     即使全部 7 格都跑到 70s 上限也只有 490s+90s < 780s。历史上"真机 2~4s/张"
-#     的估计**偏高约 4 倍**（疑似把网络 RTT 当成了拍照耗时），曾据此误判"整局会
-#     撞看门狗、单格只够 21 张"——按实测这个担心不成立。70s 仍是硬上限，
-#     它管的是"某个环节卡死"，不是"正常流程不够用"。
-#   - 仿真（sim，7 格全程只花 ~13s，单格最长 ≈3s；见 test_nine_grid_sim 的
-#     [进度] 行）：70s 在仿真里永不触发。
-CELL_LIMIT_TIMEOUT_S = 70.0
-# 全局剩余时间按剩余格数分摊的比例（自适应收缩）：硬熔断 = min(70s,
-# 剩余时间/剩余格数 × 0.9)。这样即使每格都被熔断，累计也不会超过全局看门狗
-# （分摊是望远镜求和：Σ 剩余/剩余格数 = 剩余时间），0.9 再留 10% 余量。
-# 下限 45s：避免最后一格因前面拖时而只剩几秒、连一次搜索都跑不完。
-CELL_LIMIT_BUDGET_FRAC = 0.9
-CELL_LIMIT_TIMEOUT_MIN_S = 45.0
-CELL_LIMIT_FRAMES = 140     # 单格拍照硬上限（基线整局 206 张、单格最多 ~38 张）
-CELL_LIMIT_ACTIONS = 300    # 单格动作硬上限（基线整局 176 次、单格最多 ~55 次）
-# ---- 单格"拍照数"预算（与时间预算绑定，让真机不会把时间耗在拍照上） ----
-# 为什么需要它：旧护栏 CELL_LIMIT_FRAMES=140 是死判据（单格最多 ~38 张，永不
-# 触发），拦不住"某环节反复拍照把单格时间耗光"。做法是把"本格还剩多少时间"
-# 换算成"还允许拍几张"：frame_budget = 本格硬预算秒数 ÷ 单张耗时估计。
-# 单张耗时估计由 state.capture_cost_s 提供（真机默认见 CAPTURE_COST_S；
-# 仿真里 SimNineGridRobot 声明一个极小值 ⇒ 该闸不会先于时间闸触发，回归可比）。
+# ★ 2026-09-25 改：**取消"耗时太长就放弃这一格"**。
 #
+# 为什么改：本关是**顺序计分**（1→7 依次到位，顺序断了一格，后面全都不算）。
+# 原来单格超时（70s／按剩余时间分摊／按单张耗时折算的拍照数）触发后，
+# run_level 会把这格记为未确认、**接着去做下一格**——在顺序计分下这等于把
+# 后面所有格的分一起丢掉，是净亏的。正式比赛也已放宽时间要求：没有硬性
+# 熔断，时间只作为判分参考。所以现在的规矩是：
+#   · 一格没确认就**一直磨这一格**，绝不跳到下一格（见 run_level）；
+#   · 时间/拍照数/动作数**不再**终止本格，只在超过参考值时打印提醒；
+#   · 唯一还能让机器人停下来的自动保护是**离场护栏**（见 _arena_guard）。
+#
+# 参考值沿用了 2026-09-11 现场标定的那两档（真机单张 0.62~0.70s，见
+# CAPTURE_COST_S），只用于"你比参考慢了多少"的提醒，不再做任何拦截。
+CELL_TIME_REFERENCE_S = 70.0     # 单格参考用时（提醒线，不是上限）
+TOTAL_TIME_REFERENCE_S = 780.0   # 整局参考用时（提醒线，不是上限）
+# 单格进度的提醒间隔：每拍这么多张就报一次"本格已用多久、转了多少度"，
+# 免得长时间卡在一格时日志里什么都没有（现场排查全靠这几行）。
+CELL_PROGRESS_EVERY_FRAMES = 30
+# ---- 单张拍照耗时（只用于把"拍了多少张"换算成时间估计） ----
 # **实测（2026-09-13 现场直接量，不要再用猜的）**：
 #     fswebcam 2592x1944 -S 3 × 6 次 = 0.74/0.61/0.66/0.61/0.63/0.61s（均值 0.62s）
 #     走代码路径 RobotState.capture_frame()（fswebcam + cv2.imread）= **0.70s**
 # 历史文档里"真机 2~4s/张"的估计**偏高约 4 倍**（很可能是把 RTT/弱链路读数当成
-# 了拍照耗时）。这个高估会把拍照预算压到 70/3×0.9 ≈ 21 张/格，而实测单格需求
-# 最多 61 张 ⇒ **预算会先把本来能跑完的好格砍掉**。故按实测取 0.9s（留 ~30%
-# 裕量覆盖进程/内存竞争），得到 ≈70 张/格，与 70s 时间闸等价而不更严。
+# 了拍照耗时）。取 0.9s 留 ~30% 裕量覆盖进程/内存竞争。
 # 换机器人/换相机请重测（tools/field_probe_ninegrid.py 可复用其锁相机链路）。
 CAPTURE_COST_S = 0.9       # 机器人单张耗时（秒；2026-09-13 实测 0.70s + 裕量）
-CAPTURE_COST_SAFETY = 0.9  # 再留 10% 裕量（动作/转头也吃时间）
 
 
 # =====================================================================
@@ -804,7 +781,8 @@ def wrap_angle_deg(a):
 class NineGridShared:
     """数字宫格两种办法共用的部分：逐格主流程、护栏、布局扫、投影、位置核对
 
-    子类只需实现 `_drive_to_panel(digit)`：
+    子类只需实现 `_drive_to_panel(digit, attempt)`（一次尝试 = 一种走法；
+    `attempt` 从 1 开始，重试时递增，子类可以用它换策略）：
       · `levels/nine_grid.py`          统一决策（三档分区，一个循环走完）；
       · `levels/nine_grid_three_stage.py` 三段式（对准 → 接近 → 到达）。
     """
@@ -816,7 +794,7 @@ class NineGridShared:
         self.start_bearing_deg = float(start_bearing_deg)
         self.digit_cell = {}        # 数字(1..7) -> 位置编号(0..8)
         self.cell_conflict = set()  # 布局扫时仲裁冲突的格（近距复核）
-        self.deadline = None
+        self.layout_t0 = None       # 整局开始时刻（只用于"整局已用多久"的提醒）
         # 位姿 (x, y, θrad)：相机光心地面投影 + 机体航向（右正弧度）
         self.pose = np.array([self.start_cam_xy[0], self.start_cam_xy[1],
                               np.radians(self.start_bearing_deg)])
@@ -834,13 +812,13 @@ class NineGridShared:
         self._cam_height_cm = CAM_HEIGHT_CM
         # 到达确认状态（每格重置）
         self._target_seen = False   # 接近/进入段是否检出过目标数字面板
-        self._loc_count = 0         # 本格定位次数（时间预算诊断）
+        self._loc_count = 0         # 本格定位次数（诊断用）
         # 转向/离场护栏状态（见 TURN_BUDGET_DEG / ARENA_X_CM / ARENA_Y_CM；每格重置）
         self._cell_turn_cmd_deg = 0.0   # 本格累计**命令**转角（含搜索/对准/大转）
         self._align_stall = 0       # 连续"转向后 |yaw| 没改善"次数（打转判据）
         self._align_worsen = 0      # 连续"同号误差被转得更大"次数（方向自检）
         self._align_flips = 0       # 死区外左右来回摆的次数（打转判据）
-        self._align_ladder = 0      # 打转升级阶梯档位（1 换大转 / 2 放弃对准 / 3 熔断）
+        self._align_ladder = 0      # 打转升级阶梯档位（1 换大转 / 2 弃对准 / 3 换办法重试）
         self._align_sign = 1.0      # 对准转向符号；方向自检判反了取 -1（整局保持）
         self._zone_last = None      # 上一次分区判定（迟滞用；每格重置）
         self._tail_rot_blocked = 0  # 收尾禁转拦下的转向次数（遥测，见 A/B 工具）
@@ -862,59 +840,51 @@ class NineGridShared:
         # 几何到达判据证据（WS4；整局累计）
         self._anchor_arrive_hits = 0    # 几何判据成立次数（执行计数）
         self._anchor_arrive_d = []      # 每次锚可用时"实测离格心"的距离（cm）
-        # 单格硬熔断状态（每格重置；见 CELL_LIMIT_* 常量）
-        self._cell_deadline = None  # 本格硬熔断时刻（None = 未开预算，不拦）
+        # 单格进度状态（每格/每次尝试重置；只用于日志与提醒，不拦任何动作）
         self._cell_t0 = None        # 本格开始时刻（日志用）
         self._cell_frames = 0       # 本格拍照数
         self._cell_actions = 0      # 本格动作数
-        self._cell_tripped = None   # 熔断原因（None = 未熔断）
-        self.cell_trips = {}        # {数字: 熔断原因}——未确认格的可观测记录
+        self._cell_attempts = 0     # 本格已尝试次数（每次尝试 = 一次完整走法）
+        self._attempt_stuck = False  # 本次尝试"策略已用尽、该换招了"（不是放弃本格）
+        self._last_progress_note = 0  # 上一次进度提醒时的拍照数
+        self._cell_tripped = None   # 安全项终止原因（只有离场护栏会写它）
+        self.cell_trips = {}        # {数字: 安全项终止原因}
         # FSM 阶段标签（纯诊断：日志/仿真可视化用，不参与任何决策）
         self.phase = "INIT"
-        # 逐阶段拍照计数（真机时间预算诊断：拍照 ~0.7s/张，7 格总预算 780s）
+        # 逐阶段拍照计数（诊断用：真机拍照 ~0.7s/张，据此估算各段耗时）
         self.phase_frames = {}
         # 逐格**落点真值**留档：{digit: (离格心 cm, 来源)}。来源 "真值"（仿真有
         # state.pos）或 "死推"（真机只有位姿估计）。用于回归时直接抓"假到达"
         # ——视觉判 ✓ 但真值不在格上（2026-09-13 面板3 就是 89.5cm 判 ✓）。
         self.panel_landing = {}
+        # 逐格**尝试次数**留档：{digit: 尝试了几次才确认}。顺序计分下"磨了几次"
+        # 是复盘时最关心的数字之一（跳格已取消，改成一直磨）。
+        self.attempt_log = {}
 
     # =================================================================
-    # 单格硬熔断（安全项：宁可早停记未确认，也不要失控）
+    # 单格进度（只记录与提醒；唯一会"停手"的是离场护栏）
     # =================================================================
 
-    def _begin_cell_budget(self, digit):
-        """开本格预算：返回**软预算** t_end（旧语义），并装好硬熔断闸
+    def _begin_cell_attempt(self, digit, attempt=1):
+        """开始本格的第 `attempt` 次尝试：重置本次尝试的计数器，打一行进度
 
-        软预算（TARGET_TIME_BUDGET_S）= 各子循环入口的既有超时判据，保持
-        不变以最小化行为改动；硬熔断（CELL_LIMIT_*）= 新增的、在**每次
-        拍照前**都判的细粒度闸，先于软预算生效（70s < 110s），保证任何环节
-        卡住都在有限时间内退出。两者都取 min(self.deadline)，绝不越过全局
-        看门狗。
+        这里**不再**算任何"最长能跑多久"的闸：顺序计分下放弃一格等于把后面
+        全部丢掉（见文件头"时间：只作参考"）。所以本函数只做三件事：
+          ① 重置本格计数器（拍照/动作/转角/打转阶梯/迟滞状态）；
+          ② 记下开始时刻，供提醒与遥测；
+          ③ 打印一行"本格第几次尝试、已经花了多久"，让现场能看出它在磨哪一格。
+        返回 None（旧接口返回的"软预算时刻"已取消）。
         """
         now = time.time()
-        if self.deadline is None:       # 直接调用 go_to_panel（测试/工具）时的兜底
-            self.deadline = now + TOTAL_TIME_BUDGET_S
-        t_soft = min(now + TARGET_TIME_BUDGET_S, self.deadline)
-        cells_left = max(1, 8 - int(digit))          # 含本格
-        share = (self.deadline - now) / cells_left * CELL_LIMIT_BUDGET_FRAC
-        hard = float(np.clip(share, CELL_LIMIT_TIMEOUT_MIN_S,
-                             CELL_LIMIT_TIMEOUT_S))
-        self._cell_deadline = min(now + hard, t_soft)
-        self._cell_t0 = now
-        self._cell_frames = 0
-        # 单格拍照预算：本格时间预算 ÷ 单张耗时估计（见 CAPTURE_COST_S）。
-        # 真机上它 ≈ 70/3×0.9 = 21 张——与"70s 里真能拍几张"一致，所以它才是
-        # 真机真正生效的那道闸；仿真里 state 声明单张≈0 → 该闸不会先于时间闸
-        # 触发，于是回归结果不受影响，而"真机跑不完"这件事在仿真里也能被看见。
-        self._cell_frame_budget = int(np.clip(
-            (self._cell_deadline - now)
-            / max(float(getattr(self.state, "capture_cost_s",
-                                CAPTURE_COST_S)), 1e-3)
-            * CAPTURE_COST_SAFETY,
-            1.0, float(CELL_LIMIT_FRAMES)))
-        self._cell_actions = 0
+        if self._cell_t0 is None or attempt <= 1:
+            self._cell_t0 = now
+            self._cell_frames = 0
+            self._cell_actions = 0
+            self._cell_attempts = 0
+        self._cell_attempts += 1
         self._cell_tripped = None
-        # 转向护栏 + 诚实遥测（每格重置；_align_sign 是整局标定，刻意不重置）
+        self._attempt_stuck = False
+        # 转向护栏 + 诚实遥测（每次尝试重置；_align_sign 是整局标定，刻意不重置）
         self._cell_turn_cmd_deg = 0.0
         self._align_stall = 0
         self._align_worsen = 0
@@ -924,51 +894,55 @@ class NineGridShared:
         self._arrive_evidence = None
         self._cell_handoff_yaw = None
         self._cell_arrive_resid_cm = None
-        print(f"[护栏] 面板{digit} 本格限额：最长 {hard:.0f}s"
-              f"（提示阈值 {(t_soft - now):.0f}s，全局剩余 "
-              f"{self.deadline - now:.0f}s／{cells_left} 格）"
-              f"｜拍照上限 {self._cell_frame_budget} 张"
-              f"（按单张 {float(getattr(self.state, 'capture_cost_s', CAPTURE_COST_S)):.1f}s 折算）")
-        return t_soft
+        elapsed = now - (self.layout_t0 or now)
+        per_frame = float(getattr(self.state, "capture_cost_s", CAPTURE_COST_S))
+        print(f"[进度] 面板{digit} 第 {attempt} 次尝试开始"
+              f"｜本格已用 {now - self._cell_t0:.0f}s"
+              f"（参考 {CELL_TIME_REFERENCE_S:.0f}s）"
+              f"｜本格拍照 {self._cell_frames} 张、动作 {self._cell_actions} 次"
+              f"｜整局已用 {elapsed:.0f}s（参考 {TOTAL_TIME_REFERENCE_S:.0f}s）"
+              f"｜单张按 {per_frame:.1f}s 估")
+        return None
 
-    def _cell_expired(self):
-        """单格硬熔断判据（**每次拍照/动作前**调用；True = 本格立即收手）
+    def _cell_progress(self):
+        """本次尝试的进度提醒（每拍 `CELL_PROGRESS_EVERY_FRAMES` 张报一次）
 
-        三重护栏（时间 / 拍照数 / 动作数）任一超限即 True，并把原因记在
-        self._cell_tripped（供 run_level 汇总打印与 self.cell_trips 留档）。
-        设计上只"允许收手"，不改变任何既有判据的语义——所以它能在不引入
-        新死循环的前提下，兜住搜索/对准/接近/低头补步任一环节。
+        替代原来的"三重硬熔断"：不再返回"该不该收手"，只负责在长时间磨一格
+        时把关键数字打进日志（现场排查就靠这几行）。返回 True 表示这一帧刚好
+        到了提醒点，调用方一般忽略它。
         """
-        if self._cell_tripped is not None:      # 已熔断：保持熔断（不反复打印）
-            return True
-        reason = None
-        if self._cell_actions > CELL_LIMIT_ACTIONS:
-            reason = f"动作次数 {self._cell_actions} 次 > 上限 {CELL_LIMIT_ACTIONS} 次"
-        elif self._cell_frames > CELL_LIMIT_FRAMES:
-            reason = f"拍照 {self._cell_frames} 张 > 上限 {CELL_LIMIT_FRAMES} 张"
-        elif self._cell_frames > self._cell_frame_budget:
-            # 与时间预算等价的拍照闸（见 CAPTURE_COST_S）：真机上"拍满了"
-            # 就等于"时间快用完了"，但它在**拍照前**就能判，不必等时间闸响。
-            reason = (f"拍照 {self._cell_frames} 张 > 本格上限 "
-                      f"{self._cell_frame_budget} 张（按单张 "
-                      f"{float(getattr(self.state, 'capture_cost_s', CAPTURE_COST_S)):.1f}s"
-                      " 折算的时间限额）")
-        elif self._cell_deadline is not None \
-                and time.time() > self._cell_deadline:
-            reason = (f"本格已用时 {time.time() - self._cell_t0:.0f}s，"
-                      f"超过最长 {CELL_LIMIT_TIMEOUT_S:.0f}s")
-        if reason is None:
+        if self._cell_frames - self._last_progress_note \
+                < CELL_PROGRESS_EVERY_FRAMES:
             return False
-        self._cell_tripped = reason
+        self._last_progress_note = self._cell_frames
+        now = time.time()
+        print(f"[进度] 面板{self._current_digit} 第 {self._cell_attempts} 次尝试进行中"
+              f"｜本格已用 {now - self._cell_t0:.0f}s"
+              f"、拍照 {self._cell_frames} 张、动作 {self._cell_actions} 次、"
+              f"已转 {self._cell_turn_cmd_deg:.0f}°"
+              f"｜整局已用 {now - (self.layout_t0 or now):.0f}s")
         return True
 
-    def _abort_cell(self, reason, abort_level=False):
-        """立即熔断本格（安全项统一出口）；abort_level=True 时整局一起收手
+    def _give_up_attempt(self, reason):
+        """本次尝试到此为止：让子循环尽快退出，**外层会换个办法重试本格**
 
-        与 _cell_expired 的三重护栏同源：置 _cell_tripped 后，所有子循环在
-        下一次 _cell_expired() 处退出，go_to_panel 返回 False，run_level 记
-        "未确认"。**绝不"再试一次"**——现场教训：为了"再试一次"继续留在场上
-        动，代价是机器人转出场地。
+        ⚠️ 与旧的 `_cell_expired`/`_abort_cell` 不是一回事：那个是"这格不要了"
+        （接着去做下一格），在顺序计分下等于把后面的分全丢掉。这里只是"这一招
+        不管用"，本格继续留着磨。
+        """
+        if self._attempt_stuck:
+            return False
+        self._attempt_stuck = True
+        print(f"[尝试] {reason} → 本次尝试收手，稍后换办法重试本格")
+        return False
+
+    def _abort_cell(self, reason, abort_level=False):
+        """安全项统一出口：**只有离场护栏**走这里
+
+        现场教训：为了"再试一次"继续留在场上动，代价是机器人转出场地。所以
+        一旦死推位姿越出场地外框，就置 `_cell_tripped` 并中止整局（不再去找
+        下一格）。除此之外没有任何自动理由会终止本格——时间、拍照数、动作数
+        都只是参考（见文件头"时间：只作参考"）。
         """
         if self._cell_tripped is None:
             self._cell_tripped = reason
@@ -979,15 +953,15 @@ class NineGridShared:
         return True
 
     def _arena_guard(self):
-        """离场护栏：死推位姿越出场地外框（台面 ±1 格）→ 熔断本格 + 中止整局
+        """离场护栏：死推位姿越出场地外框（台面 ±1 格）→ 中止整局（**唯一**硬停）
 
         定位是"拦彻底失控"的兜底，不是防跌落预案：死推位姿在形变场景下实测
         能偏 30cm+（到达判据本身有误差，_reanchor_pose 又把它锚到"以为"的
-        格心），所以外框放到台面 ±1 格。真正管住"继续动"的是转向预算 360°、
-        停转/来回摆判据、前压封顶 45cm 这三条。
+        格心），所以外框放到台面 ±1 格。它是 2026-09-25 之后**唯一**还能让
+        机器人自己停下来的判据（时间/拍照数/动作数都改成只提醒了）。
         """
         if self._abort_level is not None:
-            # 已判定整局收手：保持熔断（新格开预算会清 _cell_tripped，这里补回）
+            # 已判定整局收手：保持（新的尝试开始时会清 _cell_tripped，这里补回）
             if self._cell_tripped is None:
                 self._cell_tripped = self._abort_level
             return True
@@ -1001,8 +975,9 @@ class NineGridShared:
             f"y{ARENA_Y_CM}", abort_level=True)
 
     def _capture(self):
-        """统一拍照入口：单格拍照计数（硬熔断用）+ 转发 state.capture_frame"""
+        """统一拍照入口：单格拍照计数（遥测）+ 进度提醒 + 转发 state.capture_frame"""
         self._cell_frames += 1
+        self._cell_progress()
         self._count_frame()
         return self.state.capture_frame()
 
@@ -1013,10 +988,19 @@ class NineGridShared:
     def run_level(self):
         """布局扫描 → 按 1..7 顺序逐格导航。返回 bool（全部确认到位）
 
+        **顺序计分 ⇒ 绝不跳格**（2026-09-25 改）：一格没确认就**一直磨这一格**，
+        每一次尝试失败只换办法重试（见 `_give_up_attempt`），绝不"记未确认、
+        接着做下一格"——顺序断了，后面所有格的分都不算，那是净亏。
+        整局只有三种结束方式：
+          ① 7 格全部确认；
+          ② 离场护栏触发（`_abort_level`，安全项）；
+          ③ 人工中断（Ctrl-C / 仿真里按 Q）。
+        时间、拍照数、动作数都只是参考值，超了只打印提醒，不停止。
+
         每格结果同时写入 self.results（[(数字, 是否确认), ...]），供仿真/
         真机日志与诊断使用。
         """
-        self.deadline = time.time() + TOTAL_TIME_BUDGET_S
+        self.layout_t0 = time.time()
         # 锁定相机白平衡/对焦（可选曝光）：一局开始钉一次，消除 fswebcam 每次
         # 重新测光/白平衡造成的跨帧漂移（现场实测白点 R/B 差 16% → 粉 7 漏检）。
         # 锁不上不影响继续：归一化仍能兜（见 core.robot_core.lock_camera_controls）。
@@ -1030,41 +1014,55 @@ class NineGridShared:
               f"存在数字复核冲突的格: {sorted(self.cell_conflict)}")
         done = []
         for k in range(1, 8):
-            ok = self.go_to_panel(k)
+            attempt = 0
+            while True:
+                attempt += 1
+                ok = self.go_to_panel(k, attempt)
+                self.state.act("stand")
+                elapsed_all = time.time() - self.layout_t0
+                # 本格用时：`_begin_cell_attempt` 会记开始时刻；子类若没走到那一步
+                # （自定义 `_drive_to_panel`）就显示 0，不因为日志把整局搞崩。
+                cell_s = (0.0 if self._cell_t0 is None
+                          else time.time() - self._cell_t0)
+                hy = self._cell_handoff_yaw
+                rs = self._cell_arrive_resid_cm
+                print(f"[遥测] 面板{k} 第 {attempt} 次尝试"
+                      f"{'已到位' if ok else '未确认（以微动开关实际触发为准）'}"
+                      f"｜本格用时 {cell_s:.0f}s"
+                      f"｜拍照 {self._cell_frames} 张｜动作 {self._cell_actions} 次"
+                      f"｜命令转角 {self._cell_turn_cmd_deg:.0f}°"
+                      f"｜交接偏角 {'无' if hy is None else f'{hy:+.1f}°'}"
+                      f"｜离格心 {'无数据' if rs is None else f'{rs:.1f}cm'}")
+                if ok:
+                    print(f"[遥测] 面板{k} 判定依据: {self._arrive_evidence or '无'}")
+                    break
+                print(f"[遥测] 面板{k} 判定依据: （未到达）")
+                if self._abort_level:
+                    # 离场护栏：已经越界，绝不再去"找下一格"——站立收手，保已得分
+                    print(f"[护栏] 整局终止：{self._abort_level}"
+                          "（机器人保持站立，不再执行动作）")
+                    break
+                # ★ 顺序计分：本格不确认就**不往下走**。这里只提醒，不停止。
+                over = elapsed_all - TOTAL_TIME_REFERENCE_S
+                print(f"[重试] 面板{k} 第 {attempt} 次尝试未确认 → **继续磨这一格**"
+                      f"（顺序计分，跳格=后面全丢）"
+                      f"｜本格已用 {time.time() - self._cell_t0:.0f}s"
+                      f"（参考 {CELL_TIME_REFERENCE_S:.0f}s）"
+                      f"｜整局已用 {elapsed_all:.0f}s"
+                      + (f"，已超参考 {over:.0f}s" if over > 0 else ""))
+                self._act("back_one_step", 1)
+            self.attempt_log[k] = attempt
             done.append((k, ok))
-            self.state.act("stand")
-            elapsed = TOTAL_TIME_BUDGET_S - (self.deadline - time.time())
-            note = ""
-            if not ok and self._cell_tripped:
-                # 熔断收尾（安全项）：本格记为未确认，继续下一格/收尾，
-                # 绝不为了"再试一次"把机器人继续留在场上动。
-                note = f"（本格终止原因：{self._cell_tripped}）"
-                self.cell_trips[k] = self._cell_tripped
-                print(f"[终止] 面板{k} 未确认到位：{self._cell_tripped}"
-                      "——记为未确认，不再继续尝试")
-            print(f"[进度] 面板{k} {'已到位' if ok else '未确认（以微动开关实际触发为准）'}"
-                  f"{note}，已用时 {elapsed:.0f}s")
-            # 单格诚实遥测：一行给出现场复盘需要的全部数字（事后不用翻半个日志）
-            hy = self._cell_handoff_yaw
-            rs = self._cell_arrive_resid_cm
-            print(f"[遥测] 面板{k} 用时 {elapsed:.0f}s｜拍照 {self._cell_frames} 张"
-                  f"｜动作 {self._cell_actions} 次｜命令转角 {self._cell_turn_cmd_deg:.0f}°"
-                  f"｜交接偏角 {'无' if hy is None else f'{hy:+.1f}°'}"
-                  f"｜离格心 {'无数据' if rs is None else f'{rs:.1f}cm'}")
-            print(f"[遥测] 面板{k} 判定依据: {self._arrive_evidence or '（未到达）'}")
             if self._abort_level:
-                # 离场护栏：已经越界，绝不再去"找下一格"——站立收手，保已得分
-                print(f"[护栏] 整局终止：{self._abort_level}"
-                      "（机器人保持站立，不再执行动作）")
-                break
-            if time.time() > self.deadline:
-                print("[看门狗] 全局时间已耗尽，停止（保住已得分，不再继续）")
                 break
         self.results = done
         if self.cell_trips:
-            print(f"[诊断] 中途终止的面板: {self.cell_trips}")
+            print(f"[诊断] 被安全项终止的面板: {self.cell_trips}")
         frames = sorted(self.phase_frames.items(), key=lambda kv: -kv[1])
         print(f"[诊断] 各阶段拍照张数: {frames}  合计 {sum(self.phase_frames.values())}")
+        print(f"[诊断] 整局用时 {time.time() - self.layout_t0:.0f}s"
+              f"（参考 {TOTAL_TIME_REFERENCE_S:.0f}s，超了也不停手）"
+              f"｜逐格尝试次数 {self.attempt_log}")
         return all(ok for _, ok in done)
 
     # =================================================================
@@ -1800,8 +1798,9 @@ class NineGridShared:
 
         **转向护栏（2026-09-13 真机"一直转 → 转出场地"）**：转向是最便宜的
         动作（不拍照、不耗帧），旧实现没有任何"转够了就停"的概念，对准与搜索
-        可以互相接管、在死区里无限转下去。这里累计单格**命令**转角，超预算就
-        **拒绝执行**这次转向并熔断本格（安全项，宁可本格记未确认）。
+        可以互相接管、在死区里无限转下去。这里累计单格**命令**转角，超了参考
+        上限就**拒绝执行**这次转向并让本次尝试收手（外层换办法重试本格）——
+        2026-09-25 改：不再"熔断本格"，因为顺序计分下放弃一格等于丢掉后面的分。
         **离场护栏**：动作执行后统一检查死推位姿是否越出场地外框。
         """
         if action in DISABLED_ACTIONS:
@@ -1817,14 +1816,16 @@ class NineGridShared:
         req = abs(float(delta)) * int(times)
         if kind == "turn" \
                 and self._cell_turn_cmd_deg + req > TURN_BUDGET_DEG:
-            self._abort_cell(
+            # 本格已经转满一圈：**这一招别再用**（拒绝执行这次转向），但
+            # **不放弃本格** —— 交给外层换办法重试（见 _give_up_attempt）。
+            # 旧行为是"熔断本格、接着做下一格"，顺序计分下那是净亏。
+            self._give_up_attempt(
                 f"单格累计命令转角 {self._cell_turn_cmd_deg:.0f}°+{req:.0f}° "
-                f"超上限 {TURN_BUDGET_DEG:.0f}°（防原地打转/转出场地）")
+                f"超参考上限 {TURN_BUDGET_DEG:.0f}°（防原地打转/转出场地）")
             return
         self.state.act(action, times=times)
-        # 单格动作计数（硬熔断第三重 + 遥测）：按**实际执行的原语数**记
-        # （times 批量算 times 次）——2026-09-13 发现这个计数从来没被累加过，
-        # 也就是说 CELL_LIMIT_ACTIONS（300）此前是死判据，遥测里恒显示 0。
+        # 单格动作计数（纯遥测；2026-09-13 发现这个计数从来没被累加过，
+        # 遥测里恒显示 0）。它不再参与任何"停手"判断。
         self._cell_actions += max(1, int(times))
         self.predict_pose(action, times)
         if kind == "turn":

@@ -13,7 +13,7 @@
   3. 一次性阶跃：**第 3 格开始时** +15° 俯仰（模拟"踩上/离开板"）；
   4. 同上但落在第 5 格（确认不是只对某一格调过参）。
 计分场景都要求：布局正确 + 1..7 全部确认到达 + **落点真值**不超半格 +
-拍照数 < 护栏 + 无单格熔断。
+拍照数 < 护栏 + 没有被安全项终止的格（`cell_trips` 为空）。
 
 **为什么阶梯场景改用 `step_at_digit` 而不是 `step_after_actions`（2026-09-13）**
 `step_after_actions=60` 与**动作流强耦合**：任何改变动作数的代码改动都会把阶跃
@@ -93,7 +93,7 @@ def _check(tag, run):
         + " —— 疑似'假到达'（视觉判 ✓ 但真值不在格上）")
     # 安全护栏不得被触发：形变场景本就该靠视觉伺服扛过去
     assert not stats.get("cell_trips"), \
-        f"[{tag}] 出现单格熔断: {stats['cell_trips']}"
+        f"[{tag}] 出现被安全项终止的格: {stats['cell_trips']}"
     print(f"  [{tag}] 布局 ✓ 7/7 ✓ 落点真值 max {max(errs.values()):.1f}cm"
           f"（半格 {ARRIVE_TRUTH_TOL_CM:.1f}cm）；拍照 {stats['captures']} 张 / "
           f"动作 {stats['actions']} 次；形变终值 俯仰 "
@@ -183,28 +183,44 @@ def test_legacy_coupled_step_diagnostic():
 
 
 def test_unified_safety_only():
-    """【只诊断、不计分】统一决策办法（默认办法）的形变安全门
+    """【只诊断、不计分】统一决策办法（默认办法）在"不可达场景"下的安全门
 
-    统一决策尚未达标（8 种子约 87%），所以这里**不设 7/7 门**，只钉安全不变量：
-    布局必须解对、不许用禁用动作、不许出现"跨格级"假到达、拍照不许爆掉。
-    达标后把这里升级成与三段式同样的 7/7 + 落点 ≤半格 门。
+    这个场景（第 3 格开始时阶跃低头 15°）已由本文件上面那条诊断证明：面板 3
+    在该几何下**任何合法到达判据都到不了**。2026-09-25 改了策略——顺序计分下
+    **绝不放弃一格**（跳格 = 后面全丢），所以这里观察到的行为变成：
+
+        "它会一直磨面板 3，直到仿真侧的保险丝把这次实验停掉。"
+
+    因此本测试钉的是**性质**而不是成绩：
+      · 布局必须解对、不许用禁用动作、不许出现"跨格级"假到达；
+      · 拍照数受仿真保险丝约束（这里主动调小到 500，好让测试跑得快）；
+      · **已经确认的格必须是 1..n 的前缀**——这一条正是"绝不跳格"的直接证据
+        （旧策略会出现"3 未确认、4/5 已确认"那种断链结果）。
     """
     deform = {"sigma_tilt_deg": 0.0, "sigma_h_cm": 0.0,
               "step_at_digit": 3, "step_tilt_deg": 15.0,
               "step_h_cm": -2.0, "max_tilt_deg": 15.0, "max_h_cm": 2.0}
-    run = run_simulation(seed=3, quiet=True, deform=deform)
+    run = run_simulation(seed=3, quiet=True, deform=deform,
+                         fuse_captures=500)
     stats = run.stats
     errs = _landing_errors(run)
     n_ok = sum(1 for _, ok in stats["results"] if ok)
     print(f"  [统一决策·诊断] {n_ok}/7 确认（**不计入判定**）；"
-          f"拍照 {stats['captures']}；落点真值 "
+          f"拍照 {stats['captures']}；保险丝 {stats['fuse_tripped']}；落点真值 "
           + ", ".join(f"{d}:{e:.0f}cm" for d, e in sorted(errs.items())))
     assert stats["layout_ok"], f"统一决策布局解算错误: {stats['digit_cell']}"
     assert not stats["banned_used"], "使用了禁用动作"
     fake = [d for d, ok in stats["results"]
             if ok and errs.get(d, 0.0) > GRID_CELL_CM]
     assert not fake, f"统一决策出现跨格级假到达: {fake}"
-    assert stats["captures"] < 700, "统一决策拍照数异常"
+    assert stats["captures"] <= 505, \
+        f"拍照数没被保险丝拦住：{stats['captures']}"
+    # ★ 绝不跳格：确认的格必须是 1..n 的连续前缀
+    seq = [d for d, ok in stats["results"] if ok]
+    assert seq == list(range(1, len(seq) + 1)), \
+        f"顺序断了（确认了 {seq}）——顺序计分下这是净亏，策略不允许"
+    assert stats["fuse_tripped"], \
+        "这个场景本该磨不下来、由保险丝收尾；若它跑完了，说明场景变了，请复核本测试"
 
 
 if __name__ == "__main__":
@@ -213,5 +229,5 @@ if __name__ == "__main__":
     test_step_deform_at_digit()
     test_step_deform_multi_digit()
     test_legacy_coupled_step_diagnostic()
-    test_unified_route_safety_only()
+    test_unified_safety_only()
     print("地板形变鲁棒性测试通过 ✓")

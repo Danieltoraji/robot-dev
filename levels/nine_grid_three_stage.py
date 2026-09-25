@@ -19,9 +19,13 @@
 "视觉全盲时的最后手段"：命中事件与命中时的真值落点都进遥测
 （`_note_dead_reckoning_hit`），供现场复核。
 
-本模块只写自己这条办法；共用机制（布局扫描、投影、地图像核验、单格预算与
-熔断、运动原语）与现场背景见 levels/nine_grid_shared.py 的文件头。
+本模块只写自己这条办法；共用机制（布局扫描、投影、地图像核验、单格进度与
+离场护栏、运动原语）与现场背景见 levels/nine_grid_shared.py 的文件头。
 新办法（三档分区＋一个循环）见 levels/nine_grid.py。
+
+★ 顺序计分 ⇒ 绝不跳格（2026-09-25）：一格没确认就**一直磨这一格**（本模块
+一次尝试内部还有 RETRY_LIMIT 轮；收手后由 run_level 换办法重试本格）。
+时间/拍照数/动作数只打印提醒、不停止，唯一会自己停下来的是离场护栏。
 
 入口：python main.py nine_grid_three_stage
 """
@@ -177,7 +181,7 @@ ARRIVE_TAIL_ACCEPT_FRAC = 0.80   # 0 = 关闭（旧行为，结果完全一致�
 ARRIVE_TAIL_PRESS_FRAC = 0.9     # 前压达到 PRESS_MAX_CM 的此比例后才允许兜底
 # 实测（sim 红1/紫6 等）：占比曲线 0.06 → 峰值 0.13 → 平稳回落；取 0.55 是
 # "跌掉 45%" 的保守证据，同时避免机器人刚好停在峰值附近时判不出来。
-ARRIVE_MAX_STEPS = 30       # 低头段迭代上限（时间预算护栏）
+ARRIVE_MAX_STEPS = 30       # 低头段迭代上限（**一次尝试**的上限，走满就换办法重试）
 # 迭代上限与"分段前压"对齐：前压封顶 45cm、精压段 2cm/帧 → 最多 23 帧，
 # 再加 SIDE_MAX_CORRECTIONS(4) 次纠横帧 + 首帧 = 28 ≤ 30，够用不空转。
 # ---- 分段前压（2026-09-11 真机"踩不到微动开关"根因，重设计） ----
@@ -270,7 +274,7 @@ ARRIVE_STOP_FORWARD_CM = 2.0
 # =====================================================================
 # 本模块是『搜索 → 对准 → 接近 → 到达』四段各带各的切换判据那套老办法，
 # 一路发到现场、跑通过的就是它。两种办法共用 levels/nine_grid_shared.py
-# 里的机制（布局扫描、投影、位置核对、单格预算与熔断、运动原语）。
+# 里的机制（布局扫描、投影、位置核对、单格进度与离场护栏、运动原语）。
 
 # 连续多少次"检不出目标面板"才认输去重搜。
 TARGET_LOST_TOLERATE = 4
@@ -301,7 +305,7 @@ FIND_BLIND_MAX_STEPS = 10  # 单轮盲走上限（10×2cm=20cm）
 # 位姿越离谱、下一格的提示越不可用：宁可本格记未确认，也不要在场上瞎走。
 # 60cm ≈ 2 格——目标在 2 格内都没进过视野，就不是"再走走"能解决的。
 FIND_BLIND_TOTAL_CM = 60.0
-FIND_MAX_FRAMES = 26      # 单格搜索拍照硬上限（时间预算护栏）
+FIND_MAX_FRAMES = 26      # 一次尝试的搜索拍照上限（走满就换办法重试本格）
 NO_PROGRESS_TURNS = 4        # 连续 N 次转向后 |yaw| 都没变小 → 打转判据
 ALIGN_MAX_FLIPS = 3         # 死区外左右来回摆 N 次 → 判定打转（直接收手）
 ALIGN_WORSEN_DEG = 5.0      # 单次转向把 |yaw| 转大超过此值 = "变差"
@@ -347,17 +351,20 @@ class NineGridThreeStageLevel(NineGridShared):
     `--three-stage --no-ui --seed 3` 的 7/7、拍照 191、动作 167。
     共用机制见 levels/nine_grid_shared.py。
     """
-    def go_to_panel(self, digit):
+    def go_to_panel(self, digit, attempt=1):
         """前往第 digit 块面板（三段式）：返回是否确认到位
+
+        `attempt` = 本格第几次尝试（外层在一格没确认时**继续磨这一格**，顺序
+        计分下跳格等于丢掉后面的分）。
 
         逐格落点在返回前留档（诊断与回归用，不参与控制）。
         """
         try:
-            return self._drive_to_panel(digit)
+            return self._drive_to_panel(digit, attempt)
         finally:
             self._record_landing(digit)
-    def _drive_to_panel(self, digit):
-        t_end = self._begin_cell_budget(digit)
+    def _drive_to_panel(self, digit, attempt=1):
+        self._begin_cell_attempt(digit, attempt)
         self._target_seen = False
         self._loc_count = 0
         self._current_digit = digit
@@ -367,47 +374,44 @@ class NineGridThreeStageLevel(NineGridShared):
         setter = getattr(self.state, "set_deform_digit", None)
         if setter is not None:
             setter(digit)
-        for attempt in range(RETRY_LIMIT + 1):
-            # 双重判据：软预算（旧语义）+ 硬熔断（新增，先到先算）
-            if self._cell_expired():
-                print(f"[面板{digit}] 本格终止：{self._cell_tripped}")
+        for _try in range(RETRY_LIMIT + 1):
+            # 唯一的自动停手是离场护栏（_abort_level）；时间不再是停手依据。
+            if self._abort_level:
+                print(f"[面板{digit}] 整局收手：{self._abort_level}")
                 return False
-            if time.time() > t_end:
-                print(f"[面板{digit}] 时间预算已耗尽")
-                return False
-            if self._seek_align_approach(digit, t_end):
-                if self._walk_until_underfoot(digit, t_end) \
+            if self._attempt_stuck:
+                break
+            if self._seek_align_approach(digit):
+                if self._walk_until_underfoot(digit) \
                         and self._press_switch(digit):
                     self._reanchor_pose(digit)
                     return True
-            if self._cell_expired():
-                print(f"[面板{digit}] 本格终止：{self._cell_tripped}")
-                return False
-            print(f"[面板{digit}] 第 {attempt + 1} 轮未到位")
-            if attempt < RETRY_LIMIT:
+            print(f"[面板{digit}] 第 {_try + 1} 轮未到位")
+            if _try < RETRY_LIMIT:
                 self._act("back_one_step", 1)
         return False
-    def _seek_align_approach(self, digit, t_end):
+    def _seek_align_approach(self, digit):
         """搜索 → 对准 → 接近（框宽达标即返回 True）
 
         对准期目标短暂丢失（转过冲/近距窄视野）不算失败：重搜一次再试。
-        任一子环节熔断 → 直接返回 False（不在这里再重试，交 go_to_panel 收手）。
+        任一子环节判定"这次尝试不行" → 直接返回 False（不在这里再重试，
+        交回外层：同一格换办法再来）。
         """
-        if self._search_target(digit, t_end) is None:
+        if self._search_target(digit) is None:
             print(f"[搜索] 未找到面板{digit}（可能被遮挡或光照不足）")
             return False
         self._target_seen = True
         for _try in range(2):
-            if self._cell_expired():
+            if self._attempt_stuck:
                 return False
-            if self._turn_to_face_target(digit, t_end) is not None:
-                return self._walk_closer(digit, t_end)
+            if self._turn_to_face_target(digit) is not None:
+                return self._walk_closer(digit)
             print(f"[对准] 目标{digit}丢失 → 重新搜索一次")
-            if self._search_target(digit, t_end) is None:
+            if self._search_target(digit) is None:
                 break
         # 目标始终不入视野，但死推说到位了：交给低头颜色判据裁决（抗形变、
         # 不需要看见目标数字本身——色块压过与否是机器人与色块的相对关系）。
-        if self._cell_expired():
+        if self._attempt_stuck:
             return False
         if digit in self.digit_cell:
             fwd, lat, _b = self.target_relative(digit)
@@ -416,7 +420,7 @@ class NineGridThreeStageLevel(NineGridShared):
                       f"（纵向 {fwd:+.1f}cm、横向 {lat:+.1f}cm）→ 交由低头档颜色判据裁决")
                 self._target_seen = True
                 return True
-        print(f"[对准] 目标{digit}反复丢失，放弃本轮对准")
+        print(f"[对准] 目标{digit}反复丢失，本轮对准收手（稍后换办法重试本格）")
         return False
     def _find_target_panel(self, digit, pitch=PITCH_NAV, head=None):
         """拍一帧找目标色块 → (obs, frame, yaw_deg, box_px)；没看到返回 None
@@ -469,16 +473,16 @@ class NineGridThreeStageLevel(NineGridShared):
         self.state.set_head(HEAD_CENTER)
         return None
     def _align_step(self, why):
-        """打转升级阶梯（打转判据的统一出口）：换策略在先，熔断在最后
+        """打转升级阶梯（打转判据的统一出口）：换策略在先，收手在后
 
         1) 弃用小转、改用大转（小转被地面吞掉是已知现场情形）；
         2) 放弃本次对准（返回 None，让调用方走"死推到位→低头到达"或重搜）；
-        3) 仍打转 → 熔断本格。
+        3) 仍打转 → **本次尝试**收手（外层换办法重试本格，绝不放弃这一格）。
         返回值：True = 调用方可以继续（已换策略）；False = 调用方应 return None。
 
-        为什么不直接熔断（2026-09-13 仿真复核）：标称场景里一次摆动就熔断会白丢
+        为什么不直接收手（2026-09-13 仿真复核）：标称场景里一次摆动就收手会白丢
         整格；打转真正要的结果是"别再原地转"，不是"这格不要了"。而"别再原地转"
-        另有 TURN_BUDGET_DEG(360°) 硬预算兜底，所以这条阶梯不会无限升。
+        另有 TURN_BUDGET_DEG(360°) 兜底（转满就换办法重试），所以这条阶梯不会无限升。
         """
         self._align_stall = 0
         self._align_worsen = 0
@@ -492,10 +496,12 @@ class NineGridThreeStageLevel(NineGridShared):
             print(f"[对准] 原地打转（{why}）→ 措施二：放弃本次对准"
                   "（交由按动作推算／低头档路径，不再原地转向）")
             return False
-        self._abort_cell(f"打转判据连续触发 3 次（{why}，本格已转 "
-                        f"{self._cell_turn_cmd_deg:.0f}°）——判定无法收敛")
+        # 措施三：本次尝试收手（**不是**放弃本格！外层会换办法重试同一格）。
+        # 旧行为是熔断本格、接着做下一格——顺序计分下那是净亏。
+        self._give_up_attempt(f"打转判据连续触发 3 次（{why}，本次尝试已转 "
+                              f"{self._cell_turn_cmd_deg:.0f}°）——换办法重试本格")
         return False
-    def _search_target(self, digit, t_end):
+    def _search_target(self, digit):
         """搜索目标：当前朝向头部五档 → 按死推提示转一步 → 后段前进探测
 
         地图只用来定"往哪转"（±30° 容差足够，死推位姿每格到达后由
@@ -505,13 +511,11 @@ class NineGridThreeStageLevel(NineGridShared):
         frames = 0
         blind_cm = 0.0
         for rnd in range(FIND_MAX_ROUNDS):
-            if time.time() > t_end or frames >= FIND_MAX_FRAMES \
-                    or self._cell_expired():
+            if frames >= FIND_MAX_FRAMES or self._attempt_stuck:
                 break
             for head in (HEAD_CENTER, HEAD_LEFT, HEAD_RIGHT,
                          HEAD_WIDE_LEFT, HEAD_WIDE_RIGHT):
-                if time.time() > t_end or frames >= FIND_MAX_FRAMES \
-                        or self._cell_expired():
+                if frames >= FIND_MAX_FRAMES or self._attempt_stuck:
                     break
                 seen = self._find_target_panel(digit, PITCH_NAV, head)
                 frames += 1
@@ -565,7 +569,7 @@ class NineGridThreeStageLevel(NineGridShared):
                     blind_cm += n * FORWARD_ONE_STEP_CM
         print(f"[搜索] 面板{digit} 搜索次数用尽（共 {frames} 帧）")
         return None
-    def _turn_to_face_target(self, digit, t_end, max_iters=6, first_seen=None):
+    def _turn_to_face_target(self, digit, max_iters=6, first_seen=None):
         """闭环对准（误差源 = 像素 yaw）→ (obs, frame, box) 或 None
 
         误差来自画面偏移而不是地图方位——形变不影响它。
@@ -586,7 +590,7 @@ class NineGridThreeStageLevel(NineGridShared):
         prev_yaw, prev_n = None, 0
         last_act, last_n = None, 0
         for _ in range(max_iters):
-            if time.time() > t_end or self._cell_expired():
+            if self._attempt_stuck:
                 return None
             if first_seen is not None:
                 seen, first_seen = first_seen, None
@@ -632,7 +636,7 @@ class NineGridThreeStageLevel(NineGridShared):
                 # 转过一次之后 |yaw| 反而没变小 → 记一次；连续 NO_PROGRESS_TURNS
                 # 次都没变小 = 这套闭环在这一格收敛不了（机械步长吃掉误差/打滑/
                 # 目标不稳）：先试**一次**大转兜底（小转被地面吞掉是已知现场情形），
-                # 再不动就熔断本格——绝不再"再转一次试试"。
+                # 再不动就让本次尝试收手——绝不再"再转一次试试"。
                 if abs(yaw) < abs(prev_yaw) - 0.5:
                     self._align_stall = 0
                     self._align_worsen = 0
@@ -701,7 +705,7 @@ class NineGridThreeStageLevel(NineGridShared):
                   f"{self._small_turn_deg:.1f}°/次）")
             prev_yaw, prev_n = yaw, n
         return None
-    def _walk_closer(self, digit, t_end, max_iters=60):
+    def _walk_closer(self, digit, max_iters=60):
         """接近：目标框宽达 ARRIVE_BOX_PX 即交棒低头段
 
         距离只用框宽（相对量，抗形变）；卡滞判据用"框宽是否还在涨"
@@ -712,12 +716,12 @@ class NineGridThreeStageLevel(NineGridShared):
         prev_box = None
         stall = 0
         for _ in range(max_iters):
-            if time.time() > t_end or self._cell_expired():
+            if self._attempt_stuck:
                 return False
             seen = self._find_target_panel(digit)
             # ---- 是否已对准：偏角在一个真实小转步长以内 ----
             if seen is None:
-                got = self._turn_to_face_target(digit, t_end, first_seen=seen)
+                got = self._turn_to_face_target(digit, first_seen=seen)
                 if got is None:
                     print(f"[接近] 目标{digit}丢失，交回搜索段")
                     return False
@@ -728,7 +732,7 @@ class NineGridThreeStageLevel(NineGridShared):
                     # 时用什么手段修正，不改变"已对准就前进"这条语义）
                     box = seen[3]
                 else:
-                    got = self._turn_to_face_target(digit, t_end, first_seen=seen)
+                    got = self._turn_to_face_target(digit, first_seen=seen)
                     if got is None:
                         print(f"[接近] 目标{digit}丢失，交回搜索段")
                         return False
@@ -763,7 +767,7 @@ class NineGridThreeStageLevel(NineGridShared):
             self._act("go_forward_one_step", n)
         print("[接近] 循环次数已达上限")
         return False
-    def _walk_until_underfoot(self, digit, t_end):
+    def _walk_until_underfoot(self, digit):
         """低头到达：颜色占比"出现 → 消失"判定压过目标格（尺度无关版）
 
         判据 = 记录本次接近的占比峰值，峰值过绝对下限后占比跌破峰值的
@@ -797,15 +801,13 @@ class NineGridThreeStageLevel(NineGridShared):
         ev_aspect_best = 0.0    # 上述那帧的 h/w（仅遥测）
         ev_reject = 0           # 因证据不足被拒的"回落"次数（诚实遥测）
         ev_reasons = []         # 去重后的拒因
-        # 时间预算自适应：剩余时间不足时收缩迭代上限（真机拍照 ~0.7s/张，见
-        # CAPTURE_COST_S；仿真里动作/拍照是瞬时的，因此这条只影响真机行为）
+        # 迭代上限只限制**一次尝试**：走满就收手，外层换办法重试本格。
+        # （旧代码在这里按『剩余时间不足』把上限砍到 60%——2026-09-25 取消：
+        #   时间不再是停手依据，见 nine_grid_shared 的文件头。）
         iters_max = ARRIVE_MAX_STEPS
-        cells_left = max(1, 8 - digit)
-        if (self.deadline - time.time()) / cells_left < 90.0:
-            iters_max = max(12, int(iters_max * 0.6))
         try:
             for _ in range(iters_max):
-                if time.time() > t_end:
+                if self._attempt_stuck:
                     return False
                 self._count_frame()
                 self._cell_frames += 1      # 低头段不走 _capture()，这里补记

@@ -162,7 +162,9 @@ def main(argv=None):
         print(f"  {n:>9d} {combos:>8d} {used:>8d} {mn:>10.4f} {av:>10.4f}")
 
     # ---------------- 折算 ----------------
-    budget = NG.CELL_LIMIT_TIMEOUT_S
+    # 单格取样时长：关卡 2026-09-25 起**取消了一切时间闸**（顺序计分下
+    # 放弃一格等于把后面的分全丢），所以这个数只属于本测量脚本自己的折算。
+    budget = 70.0
     print("\n" + "=" * 72)
     print("折算")
     print("=" * 72)

@@ -31,6 +31,10 @@
 仿真里本办法 6/7、老办法 7/7，差距同源。**上现场先用
 `python main.py nine_grid_three_stage`。**
 
+★ 顺序计分 ⇒ 绝不跳格（2026-09-25）：本关按 1→7 依次到位计分，顺序断一格
+后面全不算。所以 run_level 在一格没确认时**一直磨这一格**（每次尝试换搜索方向），
+时间/拍照数/动作数只打印提醒、不停止；唯一会自己停下来的是离场护栏。
+
 入口：python main.py nine_grid
 """
 
@@ -213,9 +217,11 @@ REANCHOR_MAX_POSE_JUMP_CM = 40.0
 # 取太大（>半步长）会让窄区实际变宽、把 6° 门悄悄改成 9°。2° 是"能吸收
 # 单帧噪声、又不改变门的名义值"的最小可用量。
 ZONE_HYSTERESIS_DEG = 2.0
-# 统一决策把它们合成一个循环 ⇒ 上限必须 ≥ 这个量级，否则会在"还没走到"时就用尽，
-# 外层 RETRY 只能拿 back_one_step 兜（第一版 60 时就踩了这个坑）。
-UNIFIED_MAX_STEPS = 150
+# 一次**尝试**走满多少步就收手换招（2026-09-25：从 150 提到 400）。
+# 它不再是"这格不要了"的依据——走满只表示"这一招没磨下来"，外层会换搜索方向
+# 重试**同一格**（顺序计分，绝不跳格）。提到 400 是因为"磨一格"本来就该允许
+# 比"一次干净利落的走法"长得多：常规单格实测 20~90 步。
+UNIFIED_MAX_STEPS = 400
 # ★ 重捕获（P1）：目标不见了怎么办 —— 纯视觉、逐步转、有上限
 #   为什么需要它：统一决策**不用死推提示**（用户明确放弃），而"上一格跑完时目标
 #   经常在 180° 身后、距离可达 2 格"（实测面板3 距上一格 79cm）。若只做几小步
@@ -241,7 +247,8 @@ FIND_STRIDE = 1             # 每丢几帧转一步
 #       拍照 1407。
 #     为什么：转 180° 要 21~35 步，"隔一帧再转"就吃掉 42~70 帧、正好卡在 90 帧的
 #     重捕获上限附近 ⇒ **扫不完就被判失败**（实测失败格恰好停在 117≈110+头部 5 帧，
-#     而单格 140 帧的硬熔断从未触发 ⇒ 不是预算不够，是这个节流把它卡死了）。
+#     而当时那道 140 帧的硬上限从未触发 ⇒ 不是预算不够，是这个节流把它卡死了；
+#     2026-09-25 起这类上限已整族取消，见 levels/nine_grid_shared.py 文件头）。
 #     每步都复测本来就是这套循环要的语义；"隔几帧再转"省下的是动作，赔上的是整格。
 #   为什么需要它：`_body_angle_deg` 用的是 `CAMERA_FOV_H_DEG=60` 这条**伺服增益**，
 #   而画面真实横向标定是 ~154.8px/°（±33.7° 半视场 / 1296px）⇒ 60/154.8 = 0.388。
@@ -275,17 +282,21 @@ class NineGridLevel(NineGridShared):
     每帧一次拍照、一次判档、一个动作；不看历史峰值、不用推算位姿做提示、
     不用 yaw 的数值做规划。共用机制见 levels/nine_grid_shared.py。
     """
-    def go_to_panel(self, digit):
+    def go_to_panel(self, digit, attempt=1):
         """前往第 digit 块面板（统一决策）：返回是否确认到位
 
+        `attempt` = 本格第几次尝试。外层在不确认时**继续磨这一格**（顺序计分，
+        跳格等于丢掉后面的分），每次把 attempt +1 传进来；本办法用它**换搜索
+        方向**（奇偶次反向），这是重试时唯一能换的东西。
+
         逐格落点在返回前留档（诊断与回归用，不参与控制）——必须在返回前记，
-        因为调用方随后就会走向下一格。
+        因为调用方随后就会走向下一格（或重试本格）。
         """
         try:
-            return self._drive_to_panel(digit)
+            return self._drive_to_panel(digit, attempt)
         finally:
             self._record_landing(digit)
-    def _drive_to_panel(self, digit):
+    def _drive_to_panel(self, digit, attempt=1):
         """★ 统一决策（P1，唯一路径）：三档分区 ＋ 一个循环走完全程
 
         与旧三段式（`_seek_align_approach` + `_walk_until_underfoot`）的对照：
@@ -301,8 +312,10 @@ class NineGridLevel(NineGridShared):
 
         到达判据沿用"只看当前帧"的四量（紫/橙/左右不对称/几何锚），
         不含任何历史 ⇒ 原地转身、偏头、遮挡都不会让它误成立。
+
+        `attempt > 1` = 上一次尝试没磨下来，这次**换搜索方向**再试（不放弃本格）。
         """
-        t_end = self._begin_cell_budget(digit)
+        self._begin_cell_attempt(digit, attempt)
         self._target_seen = False
         self._loc_count = 0
         self._current_digit = digit
@@ -319,13 +332,20 @@ class NineGridLevel(NineGridShared):
         self._reacq_deg = 0.0          # 本轮重捕获已累计转过的角度
         self._reacq_frames = 0
         self._reacq_dir = None         # 本轮重捕获的转向方向（一次定死）
+        if attempt > 1:
+            # ★ 重试时唯一能换的东西：**搜索方向**。单格失败最常见的原因就是
+            #   "目标在身后、而这一侧扫不到"，奇偶次反向能直接换个半圆去找。
+            self._last_seen_side = 1.0 if attempt % 2 == 0 else -1.0
+            print(f"[重试] 面板{digit} 第 {attempt} 次尝试：换搜索方向"
+                  f"（{'左' if attempt % 2 == 0 else '右'}转起扫）")
         prev_zone = None
         prev_cov = None
         prev_org = None
         stall = 0
         try:
             for _ in range(UNIFIED_MAX_STEPS):
-                if time.time() > t_end or self._cell_expired():
+                if self._attempt_stuck:
+                    # 本次尝试的招数用尽（转角转满一圈等）→ 收手，外层换办法重试
                     return False
                 p = self._capture_and_measure(color)
                 if p is None:
@@ -426,8 +446,11 @@ class NineGridLevel(NineGridShared):
                     self._reacq_deg += abs(stepped)
                     if stepped and (self._reacq_deg > FIND_MAX_TURN_DEG
                                     or self._reacq_frames > FIND_MAX_FRAMES):
-                        print(f"[重捕获] 面板{digit} 已转 {self._reacq_deg:.0f}°"
-                              f"／{self._reacq_frames} 帧仍未见到目标 → 放弃本格")
+                        # 本次尝试的搜索招数用尽（转完参考额度仍没见到目标）：
+                        # 收手，外层会**换搜索方向重试本格**，绝不放弃这一格。
+                        self._give_up_attempt(
+                            f"重捕获已转 {self._reacq_deg:.0f}°／"
+                            f"{self._reacq_frames} 帧仍未见到目标")
                         return False
                     continue
                 lost = 0
@@ -500,7 +523,9 @@ class NineGridLevel(NineGridShared):
                       + f" → {action_name_cn(act, n)}")
                 self._act(act, n)          # ★ 一次决策只下发一个原语（前进可带步数）
                 prev_zone = zone
-            print(f"[行进] 面板{digit} 统一循环迭代次数已达上限")
+            # 一次尝试的步数用完 = 这一招没磨下来 → 收手，外层换办法重试本格
+            self._give_up_attempt(
+                f"本次尝试走满 {UNIFIED_MAX_STEPS} 步仍未确认到位")
             return False
         finally:
             if pitch0 is not None:
@@ -543,20 +568,20 @@ class NineGridLevel(NineGridShared):
                       f"（>{ARRIVE_ON_CELL_TOL_CM:.0f}cm）"
                       f"——目标面板不在脚下，疑为邻格同色面板")
     def _find_target_again(self, digit, lost, turns, p):
-        """目标丢失后的**重捕获** → 返回 (turns, deg_turned)；返回 <0 表示放弃本格
+        """目标丢失后的**重捕获** → 返回 (turns, deg_turned)；返回 <0 表示本次尝试收手
 
-        纯视觉、逐步转、有上限：
+        纯视觉、逐步转、一次尝试内仍有上限：
           ① 丢的第 1 帧先只动**头部**扫四档（零身体位移、不烧转向预算、无翻车风险）；
-          ② 之后每丢 `TARGET_LOST_TOLERATE` 帧 ⇒ 朝地图方位转**一小步**（一次一个
-             原语），每一步都拍照复测，转过冲由下一步反向吸收；
+          ② 之后每丢 `TARGET_LOST_TOLERATE` 帧 ⇒ 朝上次看到它的一侧转**一小步**
+             （一次一个原语），每一步都拍照复测，转过冲由下一步反向吸收；
           ③ 累计转过 `FIND_MAX_TURN_DEG` 或拍够 `FIND_MAX_FRAMES` 仍不见
-             ⇒ 放弃本格（交上层记未确认），**绝不无限转**（转向是最便宜的动作，
-             没有上限就会"在原地转出场"）。
+             ⇒ **本次尝试收手**（不是放弃本格！外层会换搜索方向重试同一格，
+             顺序计分下"这格不要了"等于把后面全丢掉）。
         """
         if lost == 1:
             for h in (HEAD_WIDE_LEFT, HEAD_LEFT, HEAD_RIGHT, HEAD_WIDE_RIGHT,
                       HEAD_CENTER):
-                if self._cell_expired():
+                if self._attempt_stuck:
                     return -1, turns
                 self.state.set_head(h)
                 q = self._capture_and_measure(self._target_color(digit))
@@ -681,10 +706,11 @@ class NineGridLevel(NineGridShared):
         为什么"一次拍照取三个量"：判档要**目标位置**，到达要**整帧色占比**——
         分开拍两次不仅慢一倍，而且两个量来自不同时刻，判档与判据会打架。
         """
-        if self._cell_expired():
+        if self._attempt_stuck:
             return None
         self._count_frame()
         self._cell_frames += 1
+        self._cell_progress()
         frame = self.state.capture_frame()
         if frame is None:
             return None

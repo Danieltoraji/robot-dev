@@ -132,7 +132,7 @@ def report(tag, run, rows):
           f"形变 俯仰{stats['deform_tilt_deg']:+.1f}°/高度"
           f"{stats['deform_height_cm']:+.1f}cm")
     if stats.get("cell_trips"):
-        print(f"  ⚠ 单格熔断: {stats['cell_trips']}")
+        print(f"  ⚠ 被安全项终止的格: {stats['cell_trips']}")
     print(f"  {'面板':<4}{'格':<4}{'结果':<6}{'落点真值':>9}{'来源':>6}"
           f"{'峰值证据':>9}  到达依据")
     fake = []

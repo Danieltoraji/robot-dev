@@ -176,8 +176,10 @@ def main(argv=None):
     cur = cap + ratio + one
     ws4 = cap + ratio + one + (all7 + anchor) / 3.0
     uni = cap + ratio + all7 + anchor
-    budget = NG.CELL_LIMIT_TIMEOUT_S
-    print(f"  单格硬预算 CELL_LIMIT_TIMEOUT_S = {budget:.0f}s")
+    # 单格取样时长：关卡已取消时间闸（见 levels/nine_grid_shared.py 文件头），
+    # 这里的 70s 只是测量脚本自己折算用的参考值。
+    budget = 70.0
+    print(f"  单格参考时长（脚本自定） = {budget:.0f}s")
     for name, per in (("现状（色占比 + 单色检测）", cur),
                       ("+ WS4（每 3 帧一次全色+锚）", ws4),
                       ("统一决策（每帧全色+锚）", uni)):

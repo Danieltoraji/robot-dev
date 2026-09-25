@@ -29,6 +29,15 @@
     python sim/nine_grid_sim.py            # 任意目录也可
 退出码：0 = 7/7 且布局正确；1 = 否则（便于脚本/CI）。
 
+仿真侧的保险丝（SIM_FUSE_*）
+--------------------------
+2026-09-25 起，**关卡不再因为"耗时太长"放弃任何一格**（顺序计分：跳一格等于
+后面全丢；改成一格没确认就一直磨这一格）。这在真机上由人来叫停，在仿真里由
+本模块的两条保险丝叫停：拍照数或动作数超过 `SIM_FUSE_CAPTURES/ACTIONS` 就抛
+`SimFuseTripped`，`run_simulation` 捕获后照常返回 stats（`fuse_tripped` 写明
+原因）。**这是仿真器的实验保护，不是关卡策略**——关卡自己的停手理由只剩离场
+护栏一条。
+
 集成测试：python tests/test_nine_grid_sim.py
 """
 
@@ -38,7 +47,6 @@ import io
 import os
 import sys
 from collections import Counter, namedtuple
-
 # 允许直接 `python sim/nine_grid_sim.py` 运行（与 sim/goodluck_sim.py 一致）
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -64,6 +72,18 @@ from vision.nine_grid_detector import COLOR_TO_ID
 FRAME_W, FRAME_H = 2592, 1944
 PANEL_HALF_CM = 14.0        # 面板半边 14cm（33cm 格减缝）
 DIGIT_HALF_CM = (4.0, 6.0)  # 黑色数字块半尺寸
+# ---- 仿真侧保险丝（见模块头说明；关卡不再自己放弃任何一格） ----
+# 取值：常规整局 ~200~600 张；留 5 倍余量，只拦"真的停不下来"的实验。
+SIM_FUSE_CAPTURES = 3000
+SIM_FUSE_ACTIONS = 3000
+
+
+class SimFuseTripped(BaseException):
+    """仿真保险丝跳闸（继承 BaseException：不被任何 `except Exception` 吞掉）
+
+    语义上等同"操作员按下停止"：关卡策略本身没有这个停手理由（顺序计分下
+    绝不放弃一格），是仿真这边为了不让一次实验无限跑下去而叫停。
+    """
 _IMAGE_RECT = np.array([[0.0, 0.0], [FRAME_W, 0.0],
                         [FRAME_W, FRAME_H], [0.0, FRAME_H]],
                        dtype=np.float32)
@@ -384,7 +404,8 @@ class SimNineGridRobot(RobotState):
     CAM_HEIGHT = CAM_HEIGHT_STANDING_CM   # 与 camera_config 同源（站立相机高度）
     CAM_BODY_OFFSET = 0.0  # 仿真中相机即机体中心（关卡常量另算，端到端容差内）
 
-    def __init__(self, layout=SIM_LAYOUT, seed=3, viewer=None, deform=None):
+    def __init__(self, layout=SIM_LAYOUT, seed=3, viewer=None, deform=None,
+                 fuse_captures=None, fuse_actions=None):
         super().__init__(tag_poses={})
         self.pos = np.array([50.0, -20.0])   # 入口外居中
         self.heading = 0.0                   # 场地系 bearing（度，右正）
@@ -393,10 +414,16 @@ class SimNineGridRobot(RobotState):
         self.layout = layout                 # cell -> digit
         self.rng = np.random.RandomState(seed)
         self.n_captures = 0
-        # 单张拍照耗时（秒）：告诉关卡"这个环境下拍照有多贵"，用于把单格时间
-        # 预算折算成拍照数预算（见 levels/nine_grid_shared.py 的 CAPTURE_COST_S）。
-        # 真机 ≈0.7s/张（2026-09-13 实测）；仿真里帧是瞬时的，取极小值 → 仿真下
-        # **不会**被拍照预算先熔断（回归数字保持可比），而真机上那道闸才真正生效。
+        # 仿真侧保险丝（见模块头）：调用方可调小，好在测试里快速跑完"磨不下来"的
+        # 场景；None = 用默认值。
+        self.fuse_captures = (SIM_FUSE_CAPTURES if fuse_captures is None
+                              else int(fuse_captures))
+        self.fuse_actions = (SIM_FUSE_ACTIONS if fuse_actions is None
+                             else int(fuse_actions))
+        # 单张拍照耗时（秒）：告诉关卡"这个环境下拍照有多贵"，供它把"拍了多少张"
+        # 折算成时间估计（见 levels/nine_grid_shared.py 的 CAPTURE_COST_S）。
+        # 真机 ≈0.7s/张（2026-09-13 实测）；仿真里帧是瞬时的，取极小值 ⇒ 仿真
+        # 打出来的"按单张折算"看着很小，这是符合事实的（回归数字也因此可比）。
         self.capture_cost_s = 0.001
         self.action_log = []
         # 可选图形化 viewer（sim/nine_grid_view.NineGridView）；None = 纯无头
@@ -433,8 +460,20 @@ class SimNineGridRobot(RobotState):
             self._apply_action(name)
             self._update_deform()
         self.action_log.append((name, times))
+        self._check_fuse()
         if self.viewer is not None:
             self.viewer.on_action(self, name, times)
+
+    def _check_fuse(self):
+        """仿真侧的保险丝（**不是**关卡策略，见模块头 `SIM_FUSE_*` 说明）"""
+        if self.n_captures > self.fuse_captures:
+            raise SimFuseTripped(
+                f"仿真保险丝：拍照 {self.n_captures} 张 > {self.fuse_captures}"
+                "（关卡本身不再放弃任何一格，是仿真这边停的实验）")
+        if len(self.action_log) > self.fuse_actions:
+            raise SimFuseTripped(
+                f"仿真保险丝：动作 {len(self.action_log)} 次 > {self.fuse_actions}"
+                "（关卡本身不再放弃任何一格，是仿真这边停的实验）")
 
     def _update_deform(self):
         """地板形变模型：每动作一次随机游走 + 可选一次性阶跃
@@ -512,6 +551,7 @@ class SimNineGridRobot(RobotState):
 
     def capture_frame(self):
         self.n_captures += 1
+        self._check_fuse()
         # 头部左转(脉宽>1500)为正 → 相机方位角减小（与真机一致）
         bearing = self.heading - (self.head - HEAD_CENTER) * SERVO_DEG_PER_US
         # 形变只加到"世界侧"：相机安装偏移 + 地板形变倾角、站立高度 + 形变高度差
@@ -566,7 +606,8 @@ def random_layout(seed):
 
 
 def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
-                   deform=None, three_stage=False):
+                   deform=None, three_stage=False,
+                   fuse_captures=None, fuse_actions=None):
     """跑一遍完整关卡（布局扫→1..7），不做断言；返回 SimRun(robot, level, stats)
 
     两种决策办法各是一个模块，这里按 `three_stage` 选：
@@ -575,31 +616,42 @@ def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
 
     stats 键：decision / ok_all / results / layout_ok / digit_cell / truth /
               captures / actions / action_counts / small_turn_deg /
-              small_turn_usable / banned_used / cell_trips / panel_landing /
-              deform_tilt_deg / deform_height_cm
+              small_turn_usable / banned_used / cell_trips / attempt_log /
+              fuse_tripped / panel_landing / deform_tilt_deg / deform_height_cm
     quiet=True 时吞掉关卡逐行日志（只留返回值供调用方打印摘要）。
     viewer：可选图形化 viewer（需有 attach(robot, level) 与 on_action/on_frame）；
             传入后由 viewer 决定节奏（暂停/单步），None = 纯无头。
     deform：地板形变注入（见 SimNineGridRobot._update_deform）；None = 无形变。
+    保险丝：拍照/动作超过 SIM_FUSE_*（可用 fuse_captures/fuse_actions 调小）时抛
+            SimFuseTripped（仿真侧保护，不是关卡策略）；这里捕获并把原因写进
+            stats["fuse_tripped"]，照常返回结果。
     """
     robot = SimNineGridRobot(layout=layout, seed=seed, viewer=viewer,
-                             deform=deform)
+                             deform=deform, fuse_captures=fuse_captures,
+                             fuse_actions=fuse_actions)
     level_cls = NineGridThreeStageLevel if three_stage else NineGridLevel
     level = level_cls(robot)
     if viewer is not None:
         viewer.attach(robot, level)
-    if quiet:
-        with contextlib.redirect_stdout(io.StringIO()):
+    fuse = None
+    try:
+        if quiet:
+            with contextlib.redirect_stdout(io.StringIO()):
+                ok_all = level.run_level()
+        else:
             ok_all = level.run_level()
-    else:
-        ok_all = level.run_level()
+    except SimFuseTripped as e:
+        # 关卡"绝不放弃一格"⇒ 可能一直磨下去；这里是仿真自己的刹车。
+        fuse = str(e)
+        ok_all = False
+        print(f"[仿真] {fuse}")
 
     truth = {d: c for c, d in layout.items() if d is not None}
     used = {a for a, _ in robot.action_log}
     stats = {
         "decision": "三段式" if three_stage else "统一决策",
         "ok_all": bool(ok_all),
-        "results": list(level.results),
+        "results": list(getattr(level, "results", [])),
         "layout_ok": level.digit_cell == truth,
         "digit_cell": dict(level.digit_cell),
         "truth": truth,
@@ -610,6 +662,8 @@ def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
         "small_turn_usable": level._small_turn_usable,
         "banned_used": sorted(used & set(DISABLED_ACTIONS)),
         "cell_trips": dict(level.cell_trips),
+        "attempt_log": dict(getattr(level, "attempt_log", {})),
+        "fuse_tripped": fuse,
         # 逐格落点：{digit: [离格心 cm, 来源]}；来源应为 "真值"（仿真有 state.pos）
         "panel_landing": {d: (None if v is None else [round(v[0], 2), v[1]])
                           for d, v in level.panel_landing.items()},
@@ -639,6 +693,11 @@ def _print_summary(stats):
           f"（{'可用' if stats['small_turn_usable'] else '不可用，改用大角度转向'}）")
     if stats["banned_used"]:
         print(f"[仿真] 警告: 出现禁用动作 {stats['banned_used']}")
+    if stats.get("fuse_tripped"):
+        print(f"[仿真] ⚠ 保险丝跳闸：{stats['fuse_tripped']}")
+    if stats.get("attempt_log"):
+        print(f"[仿真] 逐格尝试次数: {stats['attempt_log']}"
+              "（>1 = 那一格磨了不止一次；顺序计分下这是正常代价）")
     if stats.get("deform_tilt_deg") or stats.get("deform_height_cm"):
         print(f"[仿真] 结束时的地板形变: 俯仰 {stats['deform_tilt_deg']:+.1f}°"
               f"｜高度 {stats['deform_height_cm']:+.1f}cm")

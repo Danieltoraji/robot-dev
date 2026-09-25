@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(_HERE))
 from core.robot_core import (RobotState, lock_camera_controls,
                                 auto_calibrate_exposure,
                                 CAM_AUTO_EXPOSURE_ENABLED)
-from levels.nine_grid_shared import NineGridShared, PITCH_NAV, TOTAL_TIME_BUDGET_S
+from levels.nine_grid_shared import NineGridShared, PITCH_NAV
 
 
 def main(argv=None):
@@ -127,8 +127,8 @@ def main(argv=None):
         print(f"仲裁冲突格: {out['cell_conflict']}")
     else:
         print(f"失败（rc={rc}）: {err}")
-    print(f"拍照 {out['photos']} 张，耗时 {dt:.0f}s（预算 {args.budget:.0f}s / 全局 "
-          f"{TOTAL_TIME_BUDGET_S:.0f}s）")
+    print(f"拍照 {out['photos']} 张，耗时 {dt:.0f}s"
+          f"（本工具自定的预算 {args.budget:.0f}s；关卡侧已无时间闸）")
     if norms:
         wps = [n["white_bgr"] for n in norms if n.get("white_bgr")]
         clips = [n.get("clip_frac", 0.0) for n in norms]

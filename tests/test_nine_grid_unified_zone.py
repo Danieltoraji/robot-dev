@@ -180,7 +180,6 @@ def test_capture_and_measure_returns_shares_on_blank_frame():
     """纯灰帧：观测为空，但 shares 仍要给出（到达判据不能因为"没看到面板"就失踪）"""
     lv = _level()
     lv._cell_frames = 0
-    lv._cell_frame_budget = 10 ** 9
     p = lv._capture_and_measure("red")
     assert p is not None
     assert p["obs"] is None and p["px"] is None and p["box"] == 0.0
@@ -193,10 +192,9 @@ def test_capture_and_measure_returns_shares_on_blank_frame():
 
 
 def test_capture_and_measure_counts_frames():
-    """`_capture_and_measure` 必须记拍照数（三重护栏靠它）"""
+    """`_capture_and_measure` 必须记拍照数（遥测与进度提醒靠它）"""
     lv = _level()
     lv._cell_frames = 0
-    lv._cell_frame_budget = 10 ** 9
     lv._capture_and_measure("red")
     assert lv._cell_frames == 1
 
