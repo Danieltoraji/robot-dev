@@ -182,8 +182,8 @@ def test_legacy_coupled_step_diagnostic():
     assert stats["captures"] < 500, "拍照数异常（定位风暴）"
 
 
-def test_unified_route_safety_only():
-    """【只诊断、不计分】统一决策路线（默认路线）的形变安全门
+def test_unified_safety_only():
+    """【只诊断、不计分】统一决策办法（默认办法）的形变安全门
 
     统一决策尚未达标（8 种子约 87%），所以这里**不设 7/7 门**，只钉安全不变量：
     布局必须解对、不许用禁用动作、不许出现"跨格级"假到达、拍照不许爆掉。

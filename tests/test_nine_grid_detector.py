@@ -79,7 +79,7 @@ def test_digit_evidence_gate():
     """数字证据（C1）：低证据只降级不误杀，极端深色块才丢
 
     硬门只拦"大面积深色块"（阴影/深色物件）；低证据保留但 `has_digit_evidence()`
-    为假，供导航在同色择优时避开木框/地垫（见 levels/nine_grid._see_target）。
+    为假，供导航在同色择优时避开木框/地垫（见 levels/nine_grid._find_target_panel）。
     """
     det = NineGridDetector()
     # 1) 无数字的色块（= 木框/地垫这类"颜色接近但没有印刷数字"的杂物）：

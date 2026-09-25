@@ -152,9 +152,9 @@ def main(argv=None):
     lv = NG.NineGridShared(st)
     lv.digit_cell = {d: d - 1 for d in range(1, 8)}
     obs = det.detect_panels(frame, arbitrate=False, drop_border=False)
-    corr, _keep = lv._anchor_corr(obs, frame)
-    mn, av, _ = bench(lambda: lv._map_anchor(obs, frame, why="bench"), args.reps)
-    rows.append((f"⑤ 锚解算 _map_anchor（本帧对应点 {len(corr)} 个）", mn, av))
+    corr, _keep = lv._map_pose_correction(obs, frame)
+    mn, av, _ = bench(lambda: lv._map_pose(obs, frame, why="bench"), args.reps)
+    rows.append((f"⑤ 锚解算 _map_pose（本帧对应点 {len(corr)} 个）", mn, av))
 
     print(f"  {'环节':44s} {'最小':>9s} {'均值':>9s}")
     for name, mn, av in rows:
@@ -176,8 +176,8 @@ def main(argv=None):
     cur = cap + ratio + one
     ws4 = cap + ratio + one + (all7 + anchor) / 3.0
     uni = cap + ratio + all7 + anchor
-    budget = NG.VIS_CELL_HARD_TIMEOUT_S
-    print(f"  单格硬预算 VIS_CELL_HARD_TIMEOUT_S = {budget:.0f}s")
+    budget = NG.CELL_LIMIT_TIMEOUT_S
+    print(f"  单格硬预算 CELL_LIMIT_TIMEOUT_S = {budget:.0f}s")
     for name, per in (("现状（色占比 + 单色检测）", cur),
                       ("+ WS4（每 3 帧一次全色+锚）", ws4),
                       ("统一决策（每帧全色+锚）", uni)):

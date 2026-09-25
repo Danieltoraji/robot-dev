@@ -54,7 +54,7 @@ from core.camera_config import (
 from core.ground_homography import grid_cell_center
 from core.robot_core import RobotState
 from levels.nine_grid import NineGridLevel
-from levels.nine_grid_shared import DISABLED_ACTIONS, _action_cn
+from levels.nine_grid_shared import DISABLED_ACTIONS, action_name_cn
 from levels.nine_grid_three_stage import NineGridThreeStageLevel
 from vision.nine_grid_detector import COLOR_TO_ID
 
@@ -108,7 +108,7 @@ def glyph_table():
     """载入渲染用字形表 {digit: 二值掩膜(白=墨迹)}；缺资产时**显式告警**并返回 {}
 
     ⚠️ 不静默退化：缺资产会让面板上的数字消失（检测器依然能按颜色找到面板，
-    但"数字证据门 / 形状仲裁 / 数字判据"全部失去输入）——那正是本模块要修的
+    但"数字到达判断条件 / 形状仲裁 / 数字判据"全部失去输入）——那正是本模块要修的
     那类病。故只告警 + 返回空表，由 `_draw_panel` 退回黑块，并在 stdout 留痕。
     """
     global _GLYPH_CACHE, _GLYPH_FAIL_WARNED
@@ -157,7 +157,7 @@ def camera_rotation(bearing_deg, pitch_pulse,
     """世界->相机旋转矩阵（与 tests/test_ground_homography 同一构造，已验证）
 
     刻意保留本模块的独立副本：仿真是"世界的替身"，与生产投影实现
-    （levels/nine_grid._camera_rotation）互为交叉验证，不共享代码。
+    （levels/nine_grid.camera_rotation）互为交叉验证，不共享代码。
     **但相机安装下俯偏移与高度必须与 camera_config 同源**（2026-09-11）：
     历史上 sim 用名义舵机角、关卡用名义角+安装偏移，渲染与投影不一致，
     端到端仿真必然失败（实测 pitch1200：27.0° vs 45.5°）。
@@ -394,7 +394,7 @@ class SimNineGridRobot(RobotState):
         self.rng = np.random.RandomState(seed)
         self.n_captures = 0
         # 单张拍照耗时（秒）：告诉关卡"这个环境下拍照有多贵"，用于把单格时间
-        # 预算折算成拍照数预算（见 levels/nine_grid.py 的 VIS_CAPTURE_COST_*）。
+        # 预算折算成拍照数预算（见 levels/nine_grid_shared.py 的 CAPTURE_COST_S）。
         # 真机 ≈0.7s/张（2026-09-13 实测）；仿真里帧是瞬时的，取极小值 → 仿真下
         # **不会**被拍照预算先熔断（回归数字保持可比），而真机上那道闸才真正生效。
         self.capture_cost_s = 0.001
@@ -569,7 +569,7 @@ def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
                    deform=None, three_stage=False):
     """跑一遍完整关卡（布局扫→1..7），不做断言；返回 SimRun(robot, level, stats)
 
-    两条决策路线各是一个模块，这里按 `three_stage` 选：
+    两种决策办法各是一个模块，这里按 `three_stage` 选：
       · False（默认）= levels/nine_grid.py 统一决策（三档分区 + 一个循环）；
       · True         = levels/nine_grid_three_stage.py 三段式（现场发货的稳定版）。
 
@@ -624,7 +624,7 @@ def _action_counts_cn(counts):
     if not counts:
         return "（无）"
     items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    return "、".join(_action_cn(a, n) for a, n in items)
+    return "、".join(action_name_cn(a, n) for a, n in items)
 
 
 def _print_summary(stats):

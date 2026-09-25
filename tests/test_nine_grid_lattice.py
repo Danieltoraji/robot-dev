@@ -2,12 +2,12 @@
 """格阵拟合与布局扫自标定单元测试（tests/test_nine_grid_lattice.py）
 
 背景（2026-09-11 接手勘察，三个 P0 缺陷之二、之三）：
-- `lattice_assign` 曾枚举 D4 **八个**朝向（含 4 个镜像）。机器人系与场地系
+- `assign_grid_cells` 曾枚举 D4 **八个**朝向（含 4 个镜像）。机器人系与场地系
   同为右手系（x 右 / y 前 / z 上），格阵基 e2 = CCW90(e1) 也是右手构造，
   故"格阵整数坐标 → 场地格号"的真解必为真旋转；镜像候选却能通过旧的全部
-  约束并被选中 → 布局被转置 + `_pose_bootstrap` 崩（"光轴无向下分量"）。
+  约束并被选中 → 布局被转置 + `_pose_from_panels` 崩（"光轴无向下分量"）。
   真实照片实测分离度：真旋转 RMS 0.62cm vs 镜像 18.75cm。
-- `_lattice_grid_fit` 的参数网格"多数票不足"分支返回 2 元组而调用方解包
+- `_fit_grid` 的参数网格"多数票不足"分支返回 2 元组而调用方解包
   4 元组 → 该分支必崩（本该是"前进一步重扫"）。
 
 本测试锁定：
@@ -34,8 +34,8 @@ from core.camera_config import (
 )
 from core.ground_homography import grid_cell_center, cell_index, GRID_CELL_CM
 from levels.nine_grid_shared import (
-    NineGridShared, lattice_assign, PITCH_NAV, PITCH_DOWN,
-    LATTICE_RMS_MAX_CM,
+    NineGridShared, assign_grid_cells, PITCH_NAV, PITCH_DOWN,
+    GRID_FIT_RMS_MAX_CM,
 )
 from sim.nine_grid_sim import SIM_LAYOUT
 
@@ -85,7 +85,7 @@ def test_physical_never_wrong():
     for _ in range(300):
         pts = _synth_points(rng, rng.uniform(25, 75), rng.uniform(-45, -5),
                             rng.uniform(-45, 45))
-        cells, info, _ranked = lattice_assign(pts, clean=set(pts))
+        cells, info, _ranked = assign_grid_cells(pts, clean=set(pts))
         n += 1
         if cells is None:
             amb += 1
@@ -107,7 +107,7 @@ def test_only_proper_family_returned():
     for _ in range(120):
         pts = _synth_points(rng, rng.uniform(25, 75), rng.uniform(-45, -5),
                             rng.uniform(-45, 45))
-        cells, _info, ranked = lattice_assign(pts, clean=set(pts))
+        cells, _info, ranked = assign_grid_cells(pts, clean=set(pts))
         for cand in ranked:
             fam = _family_of(cand["cells"])
             seen.add(fam)
@@ -121,7 +121,7 @@ def test_only_proper_family_returned():
 def test_too_few_points_refused():
     """可见数字 <4 无法定朝向：必须拒绝而不是猜"""
     pts = {d: grid_cell_center(c) for d, c in list(TRUTH.items())[:3]}
-    cells, info, ranked = lattice_assign(pts)
+    cells, info, ranked = assign_grid_cells(pts)
     assert cells is None and ranked == [], f"3 点竟给出布局 {cells}"
     print(f"  3 点输入被拒：{info} ✓")
 
@@ -153,19 +153,19 @@ def _synth_pix_obs(x, y, bearing_deg, layout=TRUTH, off_deg=22.0, h_cm=50.0,
     return obs
 
 
-def test_self_calibration_and_pose_bootstrap():
+def test_self_calibration_and_pose_from_panels():
     """合成像素观测：自标定出布局 + (偏移, 高度)，位姿自举回到真值"""
     level = NineGridShared(None)
     x, y, brg = 50.0, -20.0, 0.0
     obs = _synth_pix_obs(x, y, brg)
     assert len({e[2] for e in obs}) == 7, "合成观测应覆盖 7 个数字"
-    fit = level._lattice_grid_fit(obs)
+    fit = level._fit_grid(obs)
     assert fit.cells == TRUTH, f"布局解算错误: {fit.cells} != {TRUTH}（{fit.info}）"
     assert abs(fit.offset_deg - 22.0) <= 5.0, \
         f"自标定偏移 {fit.offset_deg:.1f}° 偏离真值 22° 超 5°"
     assert abs(fit.cam_height_cm - 50.0) <= 7.5, \
         f"自标定高度 {fit.cam_height_cm:.1f}cm 偏离真值 50cm 超一个网格步"
-    assert level._pose_bootstrap(fit), "位姿自举失败"
+    assert level._pose_from_panels(fit), "位姿自举失败"
     err_xy = float(np.hypot(level.pose[0] - x, level.pose[1] - y))
     err_th = abs(np.degrees(level.pose[2] - np.radians(brg)))
     assert err_xy < 2.0 and err_th < 2.0, \
@@ -179,9 +179,9 @@ def test_coverage_requires_all_digits():
     """只有 6 个数字的观测：整函数判失败（不允许返回残缺布局）"""
     level = NineGridShared(None)
     obs = [e for e in _synth_pix_obs(50.0, -20.0, 0.0) if e[2] != 4]
-    fit = level._lattice_grid_fit(obs)
+    fit = level._fit_grid(obs)
     assert fit.cells is None, f"缺 1 个数字竟给出布局 {fit.cells}"
-    assert level._pose_bootstrap(fit) is False, "残缺拟合不应通过位姿自举"
+    assert level._pose_from_panels(fit) is False, "残缺拟合不应通过位姿自举"
     print(f"  6 数字观测被拒：{fit.info} ✓")
 
 
@@ -197,7 +197,7 @@ def test_clipped_bias_downweighted():
                             margin_px=-1e9)      # margin 负值 → 全部保留
     biased = [e for e in biased if e[2] == 4]
     biased = [(p, h, d, px, True) for (p, h, d, px, _c) in biased]
-    fit = level._lattice_grid_fit(others + biased)
+    fit = level._fit_grid(others + biased)
     assert fit.cells == TRUTH, f"裁切偏差导致布局错误: {fit.cells}（{fit.info}）"
     assert 4 in fit.weights and fit.weights[4] < 1.0, \
         "仅裁切观测的数字应被降权"
@@ -226,7 +226,7 @@ def test_outlier_never_yields_wrong_layout():
             px = project_ground_to_pixel(g, 50.0, -20.0, 0.0, pitch, head,
                                          22.0, 50.0)[0]
             fake.append((pitch, head, d, px, False))
-        fit = level._lattice_grid_fit([e for e in obs if e[2] != 7] + fake)
+        fit = level._fit_grid([e for e in obs if e[2] != 7] + fake)
         assert fit.cells is None or fit.cells == TRUTH, \
             f"注入 {bias:.0f}cm 偏差后给出错布局: {fit.cells}"
         if bias >= 30.0:
@@ -252,8 +252,8 @@ if __name__ == "__main__":
     test_too_few_points_refused()
     test_physical_never_wrong()
     test_only_proper_family_returned()
-    test_self_calibration_and_pose_bootstrap()
+    test_self_calibration_and_pose_from_panels()
     test_coverage_requires_all_digits()
     test_clipped_bias_downweighted()
     test_outlier_never_yields_wrong_layout()
-    print(f"全部格阵拟合测试通过 ✓（干净子集 RMS 门 {LATTICE_RMS_MAX_CM:.0f}cm）")
+    print(f"全部格阵拟合测试通过 ✓（干净子集 RMS 门 {GRID_FIT_RMS_MAX_CM:.0f}cm）")

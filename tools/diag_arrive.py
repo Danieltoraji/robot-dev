@@ -13,7 +13,7 @@ Pi 侧读不到状态。于是出现了一种最难发现的失败："日志判�
   | 落点真值         | 跑完该格时真值离该格格心          | 大 ⇒ **假到达**（身份误判）  |
   | 位姿漂移         | 跑完该格时 |死推位姿 − 真值|      | 大而落点小 ⇒ 位姿不可信      |
   | 到达残差         | 关卡自报的落点残差（死推）        | 与落点真值对比 ⇒ 残差是否可信|
-  | 峰值帧证据       | 颜色峰值那一帧的面板 hull / 画幅  | <0.08 ⇒ 证据门会拒绝（正确） |
+  | 峰值帧证据       | 颜色峰值那一帧的面板 hull / 画幅  | <0.08 ⇒ 到达判断条件会拒绝（正确） |
   | 到达依据         | 关卡自报"凭什么算到达"            | 看是哪一条判据接手           |
 
 **怎么读**：`落点真值` 是第一优先级——它超半格（16.7cm）就是假到达，
@@ -90,7 +90,7 @@ def _install_probes(rows):
             ctx["_peak_frame_pending"] = False
         return out
 
-    _orig_ar = ng.NineGridLevel._arrive_visual
+    _orig_ar = ng.NineGridLevel._walk_until_underfoot
 
     def arrive_visual(self, digit, t_end):
         ctx.update({"digit": digit, "peak": 0.0, "peak_cover": -1.0,
@@ -108,7 +108,7 @@ def _install_probes(rows):
 
     NineGridDetector.color_ratio = color_ratio
     NineGridDetector.detect_panels = detect_panels
-    ng.NineGridLevel._arrive_visual = arrive_visual
+    ng.NineGridLevel._walk_until_underfoot = arrive_visual
 
 
 def run_scene(tag, quiet=False):

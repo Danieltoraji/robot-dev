@@ -47,7 +47,7 @@ LEVELS = {
         "run_level": level_goodluck.run_level,
     },
     # 数字宫格：无 AprilTag，用地面单应定位（tag_poses 留空即可）
-    # 两条决策路线各是一个模块，入口名分开，现场跑哪条一眼可辨。
+    # 两种决策办法各是一个模块，入口名分开，现场跑哪条一眼可辨。
     "nine_grid": {
         "module": level_nine_grid,
         "tag_poses": {},

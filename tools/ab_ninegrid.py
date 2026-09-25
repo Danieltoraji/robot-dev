@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ab_ninegrid.py —— nine_grid 多种子 A/B 对照工具（入版本库，带**活性断言**）
+"""ab_ninegrid.py —— nine_grid 多种子 A/B 对照工具（入版本库，带**先证明真的跑了**）
 
 为什么需要它（2026-09-24 立）
 ------------------------------------------------
@@ -9,36 +9,36 @@
 1. `tools/_tmp_recalib.py` 的 `run(seeds, zone=False)` 里 `zone` 参数**从未被引用**
    （死参数）⇒ 它扫的 17 组规划常量全是同一条二值路径 ⇒ "49/56 vs 54/56"
    其实是 A/A 对照，已作废。
-2. `tools/_tmp_recalib2.py` 的 A/B 机制是**对的**，但它报出"四个阈值臂逐位相同"
+2. `tools/_tmp_recalib2.py` 的 A/B 机制是**对的**，但它报出"四个阈值对照组一个数都不差"
    时，没人去证明"被测分支真的执行了" ⇒ 结论"分区律没有可测出的增益"被写进
-   交接文档，直到 2026-09-24 才查明真正原因是 `_align_visual:2280` 的裸死区把
+   交接文档，直到 2026-09-24 才查明真正原因是 `_turn_to_face_target:2280` 的裸死区把
    `_zone_of` 的结果短路掉，**蓝档动作从未执行**。
 
-⇒ 本工具的硬规则：**任何一臂都必须先证明"被测分支确实执行且两臂计数不同"，
+⇒ 本工具的硬规则：**任何一组都必须先证明"被测分支确实执行且两组计数不同"，
 否则该组结果直接标 INVALID，不参与比较。** 这条比数字本身重要。
 
 用法
 ------------------------------------------------
     python tools/ab_ninegrid.py --list
-    python tools/ab_ninegrid.py --arms unified three_stage --seeds 3 7 11 21
-    python tools/ab_ninegrid.py --arms unified three_stage --primitives real
-    python tools/ab_ninegrid.py --arms unified three_stage --layout random \
+    python tools/ab_ninegrid.py --variants unified three_stage --seeds 3 7 11 21
+    python tools/ab_ninegrid.py --variants unified three_stage --primitives real
+    python tools/ab_ninegrid.py --variants unified three_stage --layout random \
         --seeds 3 7 11 21 42 100 202 303 --json archive/result/ab.json
-    python tools/ab_ninegrid.py --arms unified --deform 1.5
+    python tools/ab_ninegrid.py --variants unified --deform 1.5
     # 临时改常量对照（内存内，不改仓库默认值）；
-    # `--set` 自己会追加一根独立的臂，臂名形如 set:shared.XXX=0.75
-    python tools/ab_ninegrid.py --arms unified \
-        --set shared.VIS_COLOR_DROP_FRAC=0.75
+    # `--set` 自己会追加一根独立的对照组，名字形如 set:shared.XXX=0.75
+    python tools/ab_ninegrid.py --variants unified \
+        --set shared.COLOR_DROP_FRAC=0.75
 
 设计约束
 ------------------------------------------------
 - 只 **in-memory** 改模块属性 / 类属性（与 `_tmp_recalib.py` 同一套机制），
   不写任何文件；退出时恢复原状。
-- 一臂 = (setup, teardown)。setup 返回一个"期望两臂不同的计数器名"。
+- 一组 = (setup, teardown)。setup 返回一个"期望两组不同的计数器名"。
 - 逐种子跑 `sim.nine_grid_sim.run_simulation`，统计到达格数 / 拍照 / 动作 /
   布局是否正确 / 离场护栏是否触发。
-- 选算法只走 `run_simulation(three_stage=)`：两条路线已是两个模块，
-  臂的名字就是路线名。
+- 选算法只走 `run_simulation(three_stage=)`：两种办法已是两个模块，
+  对照组的名字就是名字。
 """
 from __future__ import annotations
 
@@ -57,8 +57,8 @@ if _ROOT not in sys.path:
 
 import numpy as np  # noqa: E402
 
-import levels.nine_grid as NG  # noqa: E402  统一决策（默认路线）
-import levels.nine_grid_shared as SH  # noqa: E402  两条路线共用
+import levels.nine_grid as NG  # noqa: E402  统一决策（默认办法）
+import levels.nine_grid_shared as SH  # noqa: E402  两种办法共用
 import levels.nine_grid_three_stage as THREE  # noqa: E402  三段式
 import sim.nine_grid_sim as SIM  # noqa: E402
 
@@ -117,23 +117,23 @@ def set_level_real():
     """把关卡侧的规划常量也换成实测值（返回还原句柄）
 
     ⚠️ 交接文档 §6.9：单独换这一半或那一半都会把基线打挂，需独立立项。
-    本工具只在 `--primitives real` 下成对调用，供"实测口径"对照用，
+    本工具只在 `--primitives real` 下成对调用，供"现场实测参数"对照用，
     **不改仓库里的任何默认值**。
     """
     # 常量按归属分开改：动作模型与步长在共用模块，对准死区那条不变量在三段式。
     old_sh = {n: getattr(SH, n) for n in
               ("FORWARD_ONE_STEP_CM", "LEFT_MOVE_CM", "RIGHT_MOVE_CM")}
     old_three = {n: getattr(THREE, n) for n in
-                 ("FIELD_SMALL_TURN_STEP_DEG",) if hasattr(THREE, n)}
+                 ("SMALL_TURN_STEP_DEG",) if hasattr(THREE, n)}
     old_model = dict(SH.ACTION_MODEL)
     SH.FORWARD_ONE_STEP_CM = REAL["fwd"]
     SH.LEFT_MOVE_CM = REAL["left"]
     SH.RIGHT_MOVE_CM = REAL["right"]
-    if hasattr(THREE, "FIELD_SMALL_TURN_STEP_DEG"):
-        THREE.FIELD_SMALL_TURN_STEP_DEG = REAL["tls"]
+    if hasattr(THREE, "SMALL_TURN_STEP_DEG"):
+        THREE.SMALL_TURN_STEP_DEG = REAL["tls"]
     SH.ACTION_MODEL["go_forward_one_step"] = ("fwd", REAL["fwd"])
-    SH.ACTION_MODEL["left_move"] = ("lat", -REAL["left"])
-    SH.ACTION_MODEL["right_move"] = ("lat", REAL["right"])
+    SH.ACTION_MODEL["left_move"] = ("side", -REAL["left"])
+    SH.ACTION_MODEL["right_move"] = ("side", REAL["right"])
     SH.ACTION_MODEL["turn_left_small_step"] = ("turn", -REAL["tls"])
     SH.ACTION_MODEL["turn_right_small_step"] = ("turn", REAL["trs"])
 
@@ -152,9 +152,9 @@ def set_level_real():
 # =====================================================================
 
 class Probe:
-    """记录被测分支的"活性证据"：判档返回计数 + 真正下发的动作计数
+    """记录被测分支的"执行计数"：判档返回计数 + 真正下发的动作计数
 
-    两条路线现在是两个类，所以探针挂在**共用基类**上（一次覆盖两条路线）；
+    两种办法现在是两个类，所以探针挂在**共用基类**上（一次覆盖两种办法）；
     像素判档只有统一决策那条有，单独挂它。
     """
 
@@ -163,8 +163,8 @@ class Probe:
         self.acts = Counter()
         self.anchor = Counter()
         self._orig_act = SH.NineGridShared._act
-        self._orig_anchor = SH.NineGridShared._map_anchor
-        self._orig_zone_px = getattr(NG.NineGridLevel, "_zone_of_px", None)
+        self._orig_anchor = SH.NineGridShared._map_pose
+        self._orig_zone_px = getattr(NG.NineGridLevel, "_zone_at_pixel", None)
 
     def install(self):
         probe = self
@@ -179,20 +179,20 @@ class Probe:
             return out
 
         SH.NineGridShared._act = act
-        SH.NineGridShared._map_anchor = anc
+        SH.NineGridShared._map_pose = anc
         if probe._orig_zone_px is not None:
             def zone_px(self_, px, py, w, h, prev=None):
                 r = probe._orig_zone_px(self_, px, py, w, h, prev)
                 probe.zone[r] += 1
                 return r
 
-            NG.NineGridLevel._zone_of_px = zone_px
+            NG.NineGridLevel._zone_at_pixel = zone_px
 
     def remove(self):
         SH.NineGridShared._act = self._orig_act
-        SH.NineGridShared._map_anchor = self._orig_anchor
+        SH.NineGridShared._map_pose = self._orig_anchor
         if self._orig_zone_px is not None:
-            NG.NineGridLevel._zone_of_px = self._orig_zone_px
+            NG.NineGridLevel._zone_at_pixel = self._orig_zone_px
 
     def snapshot(self):
         return {"zone": dict(self.zone), "acts": dict(self.acts),
@@ -205,35 +205,35 @@ class Probe:
 
 
 # =====================================================================
-# 臂定义：一根臂 = 一条决策路线（或 `--set` 现场改常量）
+# 对照组的定义：一根对照组 = 一条决策办法（或 `--set` 现场改常量）
 # =====================================================================
-# 两条路线拆成两个模块之后，"选哪条"不再靠改开关，而是 run_simulation(three_stage=)
-# ⇒ 路线臂不需要 setup/restore，只需要一个名字。
+# 两种办法拆成两个模块之后，"选哪条"不再靠改开关，而是 run_simulation(three_stage=)
+# ⇒ 选办法的那一组不需要 setup/restore，只需要一个名字。
 #
-# 已经答过的问题（旧臂的结论留档，别再重问一遍）：
+# 已经答过的问题（以前的对照组的结论留档，别再重问一遍）：
 #   · 三档分区律 vs 二值死区：16 种子统计上不可区分（78.6% vs 78.4%），且多花
-#     约 5% 拍照 ⇒ 分区律没有可测增益（旧臂 zone_off/zone_on/zone_near_*/
+#     约 5% 拍照 ⇒ 分区律没有可测增益（以前的对照组 zone_off/zone_on/zone_near_*/
 #     zone_tail/zone_nohyst/zone_nohyst_tail/tail_only 的结论）。
-#   · 迟滞：名义口径有益、实测口径有害，差异都在 ±3 格（≈1σ）⇒ 不足以定论。
+#   · 迟滞：名义参数有益、现场实测参数有害，差异都在 ±3 格（≈1σ）⇒ 不足以定论。
 #   · 收尾禁转：与"无迟滞"逐项完全相同（工具当时正确判 INVALID）⇒ 恒等操作。
-#   · 地图锚：只算不用时指标逐位相同，可用率仅 5~16% ⇒ 现在只作核验与遥测。
+#   · 地图锚：只算不用时指标一个数都不差，可用率仅 5~16% ⇒ 现在只作核验与遥测。
 
 
 def _noop_setup(**_kw):
     return lambda: None
 
 
-ARMS = {
-    "unified": (_noop_setup, "统一决策（三档分区＋一个循环，默认路线）",
+VARIANTS = {
+    "unified": (_noop_setup, "统一决策（三档分区＋一个循环，默认办法）",
                 "acts", True),
     "three_stage": (_noop_setup, "三段式（现场发货的稳定实现）", "acts", True),
 }
 
 
-def arm_generic(sets):
-    """通用臂：把 `--set 模块.常量=VALUE` 的值存进对应模块（内存内）
+def variant_from_sets(sets):
+    """通用对照组：把 `--set 模块.常量=VALUE` 的值存进对应模块（内存内）
 
-    模块名：shared（两条路线共用）/ level（统一决策）/ three_stage（三段式）。
+    模块名：shared（两种办法共用）/ level（统一决策）/ three_stage（三段式）。
     不带模块名时三个模块都试，命中多处直接报错——避免"改了但没生效"。
     """
     mods = {"shared": SH, "level": NG, "three_stage": THREE}
@@ -258,18 +258,18 @@ def arm_generic(sets):
     return setup
 
 
-def make_generic_arm(name, sets):
-    # 通用臂的活性判据用**动作流**（acts）：改任何控制常量都必须体现在动作上，
-    # 否则就是"改了但没生效"。
-    ARMS[name] = (arm_generic(sets), f"自定义: {sets}", "acts", True)
+def add_generic_variant(name, sets):
+    # 通用对照组怎么算"真的跑了"：看**动作流**（acts）——改任何控制常量都必须
+    # 体现在动作上，否则就是"改了但没生效"。
+    VARIANTS[name] = (variant_from_sets(sets), f"自定义: {sets}", "acts", True)
 
 
 # =====================================================================
 # 主流程
 # =====================================================================
 
-def run_arm(name, seeds, layout_mode, deform, primitives):
-    setup, _desc, _lv, _exp = ARMS[name]
+def run_variant(name, seeds, layout_mode, deform, primitives):
+    setup, _desc, _lv, _exp = VARIANTS[name]
     restore = setup()
     probe = Probe()
     probe.install()
@@ -336,8 +336,8 @@ def summarize(rows):
     # ★ 自报 vs 真值（2026-09-24 加）：`st["results"]` 里的 ok 是**关卡自己**的
     # 判断（go_to_panel 返回 True），**不是仿真器的判定**。以前只报这个数，
     # 会把"提前喊到达"算成成功（实测有格子自报到达却停在 25~75cm 外）。
-    # 这里补上三个口径：
-    #   arrived        = 自报到达（旧口径，只能当"关卡以为自己到了"）
+    # 这里补上三个量：
+    #   arrived        = 自报到达（旧算法，只能当"关卡以为自己到了"）
     #   arrived_true   = 自报到达 **且** 真值落点 ≤ 半格（仿真确认在目标格上）
     #   arrived_tight  = 自报到达 **且** 真值落点 ≤ 5.5cm（仿真确认踩进开关区）
     a_true = a_tight = 0
@@ -376,7 +376,7 @@ def summarize(rows):
         "dr_hits": dict(sum((Counter(r.get("dr_hits") or []) for r in rows),
                             Counter())),
         "dr_land": [v for r in rows for v in (r.get("dr_landing") or [])],
-        # 几何到达判据（WS4）活性证据
+        # 几何到达判据（WS4）执行计数
         "anchor_arrive_hits": sum(r.get("anchor_arrive_hits", 0) for r in rows),
         "anchor_arrive_d": [v for r in rows
                             for v in (r.get("anchor_arrive_d") or [])],
@@ -385,9 +385,9 @@ def summarize(rows):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="nine_grid 多种子 A/B（带活性断言）")
-    ap.add_argument("--arms", nargs="+", default=["unified", "three_stage"],
-                    choices=sorted(ARMS))
+        description="nine_grid 多种子 A/B（带先证明真的跑了）")
+    ap.add_argument("--variants", nargs="+", default=["unified", "three_stage"],
+                    choices=sorted(VARIANTS))
     ap.add_argument("--seeds", type=int, nargs="+", default=DEFAULT_SEEDS)
     ap.add_argument("--layout", choices=("fixed", "random"), default="random",
                     help="fixed=SIM_LAYOUT（seed 只影响动作噪声）；"
@@ -400,13 +400,13 @@ def main(argv=None):
                     metavar="[模块.]NAME=VALUE",
                     help="把某个模块的常量改成 VALUE（内存内），可重复；模块 ∈ "
                          "shared / level / three_stage，省略则三个都找。"
-                         "每次出现生成一根独立的臂，名字形如 "
-                         "'set:shared.VIS_COLOR_DROP_FRAC=0.75'")
-    ap.add_argument("--list", action="store_true", help="列出可用臂")
+                         "每次出现生成一根独立的对照组，名字形如 "
+                         "'set:shared.COLOR_DROP_FRAC=0.75'")
+    ap.add_argument("--list", action="store_true", help="列出可用的对照组")
     args = ap.parse_args(argv)
 
-    # `--set` 生成的臂追加进 ARMS。一次 `--set` 可以给**多个**赋值（逗号分隔）
-    # ⇒ 它们属于同一个臂（用于"组合改动"的对照，例如同时改两个常量）。
+    # `--set` 生成的对照组追加进 VARIANTS。一次 `--set` 可以给**多个**赋值（逗号分隔）
+    # ⇒ 它们属于同一个对照组（用于"组合改动"的对照，例如同时改两个常量）。
     for item in args.set:
         sets = {}
         for part in item.split(","):
@@ -420,12 +420,12 @@ def main(argv=None):
             val = parse_value(v)
             sets[k] = val
         nm = f"set:{item.strip()}"
-        make_generic_arm(nm, sets)
-        args.arms.append(nm)
+        add_generic_variant(nm, sets)
+        args.variants.append(nm)
 
     if args.list:
-        for k in sorted(ARMS):
-            print(f"  {k:14s} {ARMS[k][1]}")
+        for k in sorted(VARIANTS):
+            print(f"  {k:14s} {VARIANTS[k][1]}")
         return 0
     restores = []
     if args.primitives == "real":
@@ -436,17 +436,17 @@ def main(argv=None):
         deform = {"sigma_tilt_deg": args.deform, "sigma_h_cm": 0.5,
                   "max_tilt_deg": 15.0, "max_h_cm": 2.0}
 
-    print(f"[AB] 臂={args.arms} 种子={args.seeds} 布局={args.layout} "
+    print(f"[AB] 对照组={args.variants} 种子={args.seeds} 布局={args.layout} "
           f"原语={args.primitives} 形变={args.deform}")
 
     results = {}
     try:
-        for name in args.arms:
-            rows = run_arm(name, args.seeds, args.layout, deform,
+        for name in args.variants:
+            rows = run_variant(name, args.seeds, args.layout, deform,
                            args.primitives)
             results[name] = {"rows": rows, "sum": summarize(rows)}
             s = results[name]["sum"]
-            print(f"\n[AB] 臂 {name}（{ARMS[name][1]}）")
+            print(f"\n[AB] 对照组 {name}（{VARIANTS[name][1]}）")
             print(f"     自报到达 {s['arrived']}/{s['cells']}"
                   f"（**关卡自己说的**，不是仿真判定）"
                   f"  逐种子 {s['per_seed']}  布局OK {s['layout_ok']}/{len(args.seeds)}")
@@ -478,15 +478,15 @@ def main(argv=None):
         for r in reversed(restores):
             r()
 
-    # ---- 活性断言：比数字更重要的是"被测分支真的执行了吗" ----
+    # ---- 先证明真的跑了：比数字更重要的是"被测分支真的执行了吗" ----
     print("\n" + "=" * 68)
-    print("活性断言（先证明分支执行，再谈数字）")
+    print("先证明真的跑了（先证明分支执行，再谈数字）")
     print("=" * 68)
-    base = args.arms[0]
+    base = args.variants[0]
     bsum = results[base]["sum"]
     ok_all = True
-    for name in args.arms[1:]:
-        _s, _d, k, expects_behavior = ARMS[name]
+    for name in args.variants[1:]:
+        _s, _d, k, expects_behavior = VARIANTS[name]
         asum = results[name]["sum"]
         branch_differs = (cnt_of(bsum, k) != cnt_of(asum, k))
         acts_differ = (bsum.get("acts", {}) != asum.get("acts", {}))
@@ -497,7 +497,7 @@ def main(argv=None):
             why.append(f"{k} 计数完全相同 ⇒ 被测分支可能根本没执行")
         if expects_behavior and not acts_differ:
             tag = "INVALID ARM"
-            why.append("动作流逐项相同 ⇒ 该臂没有改变任何行为"
+            why.append("动作流逐项相同 ⇒ 这一组没有改变任何行为"
                        "（这正是 2026-09-23 两次错判的根因）")
         if tag != "OK":
             ok_all = False
@@ -508,13 +508,13 @@ def main(argv=None):
                         asum.get('acts', {}).get(a, 0))
                     for a in set(bsum.get('acts', {})) | set(asum.get('acts', {}))
                     if bsum.get('acts', {}).get(a, 0) != asum.get('acts', {}).get(a, 0)}
-            print(f"     动作流差异（基线→该臂）: {diff}")
+            print(f"     动作流差异（基线→这一组）: {diff}")
         for w in why:
             print(f"     ⚠ {w}")
-    # ---- 两两同一性：任何两个"声称不同"的臂若逐项相同，也要报警 ----
+    # ---- 两两同一性：任何两个"声称不同"的对照组若逐项相同，也要报警 ----
     # （2026-09-24 加：`zone_tail` 与 `zone_on` 逐项相同时，只跟基线比是发现不了的）
-    print("\n  两两同一性（claimed-different arms must differ）:")
-    names = list(args.arms)
+    print("\n  两两同一性（claimed-different variants must differ）:")
+    names = list(args.variants)
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
             a, b = results[names[i]]["sum"], results[names[j]]["sum"]
@@ -522,22 +522,22 @@ def main(argv=None):
                     and a["captures"] == b["captures"]
                     and a["actions"] == b["actions"]
                     and a.get("acts") == b.get("acts"))
-            exp_a = ARMS[names[i]][3]
-            exp_b = ARMS[names[j]][3]
+            exp_a = VARIANTS[names[i]][3]
+            exp_b = VARIANTS[names[j]][3]
             if same and (exp_a or exp_b):
                 ok_all = False
                 print(f"    {names[i]} ≡ {names[j]} 逐项相同 → INVALID"
-                      "（两臂声称有行为差异，但一个动作都没差）")
+                      "（两组声称有行为差异，但一个动作都没差）")
             else:
                 print(f"    {names[i]} vs {names[j]}: "
-                      f"{'相同（均为对照臂，可接受）' if same else '不同'}")
+                      f"{'相同（均为对照用的那一组，可接受）' if same else '不同'}")
     print("=" * 68)
 
     if args.json:
         os.makedirs(os.path.dirname(os.path.abspath(args.json)), exist_ok=True)
         with open(args.json, "w", encoding="utf-8") as f:
-            json.dump({"args": vars(args), "arms": results,
-                       "liveness_ok": ok_all}, f, ensure_ascii=False, indent=2)
+            json.dump({"args": vars(args), "variants": results,
+                       "branch_ran_ok": ok_all}, f, ensure_ascii=False, indent=2)
         print(f"[AB] 结果已写入 {args.json}")
     return 0 if ok_all else 2
 
@@ -571,9 +571,9 @@ def parse_value(v):
 
 
 def cnt_of(sumdict, key):
-    """活性强度：把该计数器组的**全部键值**规范化成可比较的元组
+    """计数的完备性：把该计数器组的**全部键值**规范化成可比较的元组
 
-    （2026-09-24 修：原来只比 'lat' 次数，会漏掉"只改 rot/move 不改 lat"的臂）
+    （2026-09-24 修：原来只比 'side' 次数，会漏掉"只改 rot/move 不改 lat"的对照组）
     """
     d = sumdict.get(key, {})
     return tuple(sorted((str(k), int(v)) for k, v in d.items()))
@@ -582,7 +582,7 @@ def cnt_of(sumdict, key):
 def fmt_cnt(sumdict, key):
     d = sumdict.get(key, {})
     if key == "zone":
-        return f"lat={d.get('lat', 0)}/{dict(d)}"
+        return f"lat={d.get('side', 0)}/{dict(d)}"
     return f"{dict(d)}"
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MAP-ANCHOR 单测：地图锚定的逐帧自标定（levels/nine_grid._map_anchor）
+"""MAP-ANCHOR 单测：地图锚定的逐帧自标定（levels/nine_grid._map_pose）
 
 判据（都来自本轮数值实测，见方案文档 §1.4/§1.5）：
 1. 合成场景（名义相机常数）位姿复原误差 < 1cm；
@@ -23,14 +23,14 @@ ALL_CELLS = [cell_index(r, c) for r in range(3) for c in range(3)]
 
 
 class _StubState:
-    """_map_anchor 只需要一个能报头部脉宽的状态对象"""
+    """_map_pose 只需要一个能报头部脉宽的状态对象"""
 
     def __init__(self, head=HEAD):
         self.current_head_pulse = head
 
 
 class _StubObs:
-    """冒充 PanelObservation：_anchor_corr 用 clipped / digit / center_px /
+    """冒充 PanelObservation：_map_pose_correction 用 clipped / digit / center_px /
     bbox / hull_poly"""
 
     def __init__(self, digit, px, clipped=False, bbox=None, hull_poly=()):
@@ -44,7 +44,7 @@ class _StubObs:
 
 
 class _Frame:
-    """只提供 shape 的假帧（_clip_sides_of 只用 shape）"""
+    """只提供 shape 的假帧（_clip_sides 只用 shape）"""
 
     def __init__(self, w=2592, h=1944):
         self.shape = (h, w, 3)
@@ -90,9 +90,9 @@ FAR_SITE = (50.0, -60.0)
 def test_anchor_recovers_pose_nominal():
     """名义常数 + 2px 质心噪声 ⇒ 位姿复原误差 < 1cm"""
     obs, cells, px, gd, inb = _scene(noise=2.0, seed=1)
-    assert len(obs) >= NG.MAP_ANCHOR_MIN_PTS, "合成场景对应点不足，测试前提不成立"
+    assert len(obs) >= NG.MAP_POSE_MIN_PTS, "合成场景对应点不足，测试前提不成立"
     lv = _make_level(cells)
-    a = lv._map_anchor(obs, FRAME)
+    a = lv._map_pose(obs, FRAME)
     assert a is not None, "应能解出锚"
     err = float(np.linalg.norm(a["pose"][:2] - np.array([50.0, -20.0])))
     assert err < 1.0, f"位姿误差 {err:.2f}cm 应 < 1cm"
@@ -106,9 +106,9 @@ def test_anchor_is_deformation_immune():
     而 MAP-ANCHOR 从观测里自己解出来。
     """
     obs, cells, px, gd, inb = _scene(h=41.0, noise=2.0, seed=2)
-    assert len(obs) >= NG.MAP_ANCHOR_MIN_PTS
+    assert len(obs) >= NG.MAP_POSE_MIN_PTS
     lv = _make_level(cells)
-    a = lv._map_anchor(obs, FRAME)
+    a = lv._map_pose(obs, FRAME)
     assert a is not None
     err = float(np.linalg.norm(a["pose"][:2] - np.array([50.0, -20.0])))
     assert err < 1.0, f"形变下位姿误差 {err:.2f}cm 应 < 1cm"
@@ -127,7 +127,7 @@ def test_anchor_rejects_impostor():
     moved = np.asarray(obs[bad_i].center_px, float) + np.array([170.0, -110.0])
     obs[bad_i] = _StubObs(bad_digit, moved)
     lv = _make_level(cells)
-    a = lv._map_anchor(obs, FRAME)
+    a = lv._map_pose(obs, FRAME)
     assert a is not None
     out_digits = [o.digit for o in a["outliers"]]
     assert bad_digit in out_digits, \
@@ -139,9 +139,9 @@ def test_anchor_rejects_impostor():
 def test_anchor_abstains_when_too_few_points():
     """对应点不足 ⇒ 返回 None（诚实弃权），不硬解"""
     obs, cells, px, gd, inb = _scene(noise=0.0, seed=4)
-    few = obs[:NG.MAP_ANCHOR_MIN_PTS - 1]
+    few = obs[:NG.MAP_POSE_MIN_PTS - 1]
     lv = _make_level(cells)
-    assert lv._map_anchor(few, FRAME) is None
+    assert lv._map_pose(few, FRAME) is None
 
 
 def test_anchor_abstains_without_redundancy():
@@ -150,22 +150,22 @@ def test_anchor_abstains_without_redundancy():
     （5 点单应无冗余，任何一点都可被解释；宁可弃权也不要假信心）
     """
     obs, cells, px, gd, inb = _scene(noise=0.0, seed=9)
-    assert len(obs) > NG.MAP_ANCHOR_MIN_PTS
+    assert len(obs) > NG.MAP_POSE_MIN_PTS
     lv = _make_level(cells)
-    a = lv._map_anchor(obs[:NG.MAP_ANCHOR_MIN_PTS], FRAME)
-    assert a is None or a["n_inliers"] >= NG.MAP_ANCHOR_MIN_INLIERS
+    a = lv._map_pose(obs[:NG.MAP_POSE_MIN_PTS], FRAME)
+    assert a is None or a["n_inliers"] >= NG.MAP_POSE_MIN_INLIERS
 
 
-def test_anchor_corr_uses_centre_for_unclipped_only():
+def test_map_pose_correction_uses_centre_for_unclipped_only():
     """未裁切观测贡献 1 个中心对应；不在 map 里的数字一律不参与"""
     obs, cells, px, gd, inb = _scene(noise=2.0, seed=5)
     good = len(obs)
     lv = _make_level(cells)
-    corr, keep = lv._anchor_corr(obs, FRAME)
+    corr, keep = lv._map_pose_correction(obs, FRAME)
     assert len(corr) == good
     # 数字不在 map 里 ⇒ 不参与
     lv2 = _make_level({})
-    assert lv2._anchor_corr(obs, FRAME)[0] == []
+    assert lv2._map_pose_correction(obs, FRAME)[0] == []
 
 
 def _clipped_scene(side="B", cam_xy=(50.0, 0.0), h=CAM_HEIGHT_STANDING_CM):
@@ -181,7 +181,7 @@ def _clipped_scene(side="B", cam_xy=(50.0, 0.0), h=CAM_HEIGHT_STANDING_CM):
     corners = [(g[0] - half, g[1] - half), (g[0] + half, g[1] - half),
                (g[0] + half, g[1] + half), (g[0] - half, g[1] + half)]
     px = np.asarray(hg.ground_to_pixels(corners), float)
-    # 与 _anchor_corr 的规则一致：可见的是"被裁边对面"的那一对角
+    # 与 _map_pose_correction 的规则一致：可见的是"被裁边对面"的那一对角
     # 角点索引：0=(x−h,y−h) 近左  1=(x+h,y−h) 近右  2=(x+h,y+h) 远右  3=(x−h,y+h) 远左
     # （本关场地系 y 越大越靠近入口；画幅上沿=远、下沿=近）
     idx = {"B": (2, 3), "T": (0, 1), "L": (1, 2), "R": (3, 0)}[side]
@@ -209,7 +209,7 @@ def test_anchor_uses_clipped_panel_corners(side):
     """
     obs, cells, want = _clipped_scene(side)
     lv = _make_level(cells)
-    corr, keep = lv._anchor_corr(obs, FRAME)
+    corr, keep = lv._map_pose_correction(obs, FRAME)
     assert len(corr) == 2, f"裁边 {side}：应产出 2 个角点对应，实际 {len(corr)}"
     got = sorted([tuple(np.round(c[0], 3)) for c in corr])
     exp = sorted([tuple(np.round(np.asarray(w, float), 3)) for w in want])
@@ -226,8 +226,8 @@ def test_anchor_corner_pair_swap_is_tried():
     lv = _make_level({})
     obs, cells, _want = _clipped_scene("B")
     lv.digit_cell = dict(cells)
-    a1 = lv._anchor_corr(obs, FRAME, swap_corners=False)
-    a2 = lv._anchor_corr(obs, FRAME, swap_corners=True)
+    a1 = lv._map_pose_correction(obs, FRAME, swap_corners=False)
+    a2 = lv._map_pose_correction(obs, FRAME, swap_corners=True)
     assert len(a1[0]) == len(a2[0]) == 2
     # 逆序必须真的把两个场地点换了位置（否则"补试"是假的）
     assert not np.allclose(a1[0][0][0], a2[0][0][0]), \
@@ -247,7 +247,7 @@ def test_anchor_skips_corner_clipped_panels():
                  bbox=(0.0, 1900.0, 300.0, 44.0),      # 同时贴 L 和 B
                  hull_poly=[tuple(px[0])])
     lv = _make_level({1: cell_index(0, 0)})
-    corr, _keep = lv._anchor_corr([o], FRAME)
+    corr, _keep = lv._map_pose_correction([o], FRAME)
     assert corr == [], "角点被裁的面板不应产生任何对应"
 
 
@@ -256,7 +256,7 @@ def test_anchor_skips_clipped_without_hull_poly():
     o = _StubObs(1, (1200.0, 1800.0), clipped=True,
                  bbox=(1150.0, 1780.0, 100.0, 60.0), hull_poly=())
     lv = _make_level({1: cell_index(0, 0)})
-    assert lv._anchor_corr([o], FRAME)[0] == []
+    assert lv._map_pose_correction([o], FRAME)[0] == []
 
 
 if __name__ == "__main__":

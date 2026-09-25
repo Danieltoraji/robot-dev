@@ -7,7 +7,7 @@
 它回答的问题
 ------------------------------------------------
 "统一决策"（三档分区 + 不分三阶段）打算**每帧**解一次 MAP-ANCHOR 拿实测位姿。
-锚解算是 RANSAC（枚举 4 子集，上限 `MAP_ANCHOR_MAX_COMBOS`），**开销随对应点数
+锚解算是 RANSAC（枚举 4 子集，上限 `MAP_POSE_MAX_COMBOS`），**开销随对应点数
 增长**；而对应点数取决于"画面里能看到几块面板"（远时多、贴近时少）。
 ⇒ 本脚本量出「对应点数 N → 锚解算耗时」曲线与**最坏情况**，再折算成
    "每帧多花多少秒、单格 70s 预算还够不够"。
@@ -17,7 +17,7 @@
 用**当前站位**拍一张帧取真实观测；对应点不足时用带抖动的副本补齐到目标 N。
 N 只影响 RANSAC 的计算量，所以耗时是有代表性的（几何退化只影响"解不算得出来"，
 不影响单次求解的代价）。
-计时**直接调生产的 `_map_anchor`**（只把 `_anchor_corr` 换成注入的合成对应集），
+计时**直接调生产的 `_map_pose`**（只把 `_map_pose_correction` 换成注入的合成对应集），
 不复制任何算法代码。
 
 怎么跑
@@ -67,7 +67,7 @@ def _read_with_retry(path, tries=4, wait=0.15):
 
 
 class _ObsStub:
-    """极简观测桩：_map_anchor 只用 digit / clipped / center_px / bbox / hull_poly"""
+    """极简观测桩：_map_pose 只用 digit / clipped / center_px / bbox / hull_poly"""
 
     def __init__(self, digit):
         self.digit = int(digit)
@@ -114,7 +114,7 @@ def main(argv=None):
     obs = det.detect_panels(frame, arbitrate=False, drop_border=False)
     lv = NG.NineGridShared(st)
     lv.digit_cell = {d: d - 1 for d in range(1, 8)}   # 合成映射，仅用于计时
-    corr, _keep = lv._anchor_corr(obs, frame)
+    corr, _keep = lv._map_pose_correction(obs, frame)
     base = [(np.asarray(c[0], float), np.asarray(c[1], float)) for c in corr]
     print(f"  本帧观测 {len(obs)} 个；可作对应的点 {len(base)} 个")
     if not base:
@@ -123,28 +123,28 @@ def main(argv=None):
                  np.array([900.0 + 300.0 * i, 900.0])) for i in range(3)]
 
     rng = np.random.default_rng(12345)
-    orig_corr = lv._anchor_corr
+    orig_corr = lv._map_pose_correction
 
     def bench_anchor(n, reps):
-        """把 _anchor_corr 换成 N 个合成对应，计时生产的 `_map_anchor`"""
+        """把 _map_pose_correction 换成 N 个合成对应，计时生产的 `_map_pose`"""
         pts = []
         while len(pts) < n:
             g, p = base[len(pts) % len(base)]
             pts.append((g + rng.normal(0, 0.5, 2), p + rng.normal(0, 1.5, 2)))
-        setattr(lv, "_anchor_corr",
+        setattr(lv, "_map_pose_correction",
                 lambda o, f, swap_corners=False: (pts, [_ObsStub(i + 1)
                                                         for i in range(n)]))
         lv._anchor_quiet = True        # 静音，避免刷屏影响计时
         try:
-            lv._map_anchor([], frame, why="bench")     # 预热
+            lv._map_pose([], frame, why="bench")     # 预热
             ts = []
             for _ in range(reps):
                 t = time.perf_counter()
-                lv._map_anchor([], frame, why="bench")
+                lv._map_pose([], frame, why="bench")
                 ts.append(time.perf_counter() - t)
             return min(ts), sum(ts) / len(ts)
         finally:
-            setattr(lv, "_anchor_corr", orig_corr)
+            setattr(lv, "_map_pose_correction", orig_corr)
             lv._anchor_quiet = False
 
     # ---------------- 逐点数档计时 ----------------
@@ -154,15 +154,15 @@ def main(argv=None):
     print(f"  {'对应点数N':>9s} {'4子集数':>8s} {'实际枚举':>8s} "
           f"{'最小(s)':>10s} {'均值(s)':>10s}")
     worst = 0.0
-    for n in range(NG.MAP_ANCHOR_MIN_PTS, args.nmax + 1):
+    for n in range(NG.MAP_POSE_MIN_PTS, args.nmax + 1):
         combos = math.comb(n, 4)
-        used = min(combos, NG.MAP_ANCHOR_MAX_COMBOS)
+        used = min(combos, NG.MAP_POSE_MAX_COMBOS)
         mn, av = bench_anchor(n, args.reps)
         worst = max(worst, av)
         print(f"  {n:>9d} {combos:>8d} {used:>8d} {mn:>10.4f} {av:>10.4f}")
 
     # ---------------- 折算 ----------------
-    budget = NG.VIS_CELL_HARD_TIMEOUT_S
+    budget = NG.CELL_LIMIT_TIMEOUT_S
     print("\n" + "=" * 72)
     print("折算")
     print("=" * 72)

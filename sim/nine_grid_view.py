@@ -36,7 +36,6 @@
 - `--delay 0` 映射为 `waitKey(1)`（`waitKey(0)` 是永久阻塞，不能当"最快"）。
 """
 
-import argparse
 import os
 import sys
 

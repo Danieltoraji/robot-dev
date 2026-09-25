@@ -2,15 +2,15 @@
 # -*- coding: utf-8 -*-
 """yaw 的**增益标定**不变量（2026-09-24 定稿）
 
-`_see_target` 的 yaw 是**伺服误差**（横向像素偏移换算的"名义度"），
+`_find_target_panel` 的 yaw 是**伺服误差**（横向像素偏移换算的"名义度"），
 不是可信的角度数值。本测试不驱动任何控制路径，只用纯数学把两件事钉住：
 
 1. **增益 ≈ 0.734**：`yaw = -(dx/W)·CAMERA_FOV_H_DEG` 与真实相机方位角之比。
    - 名义 FOV 60° ≠ 真实 `2·atan(1296/1944.9) = 67.36°`
    - 线性代替 atan
    - 两条合成后随距离缓变：20cm 处 0.696、55cm 处 0.752、130cm 处 0.719
-2. **这个增益是承重的**：整族 yaw 域阈值（`VIS_ALIGN_TOL_DEG` / `VIS_BIG_TURN_DEG`
-   / `VIS_ALIGN_WORSEN_DEG` / 改善判据 0.5° / 小转规划下限）都在这个坐标下标定。
+2. **这个增益是承重的**：整族 yaw 域阈值（`ALIGN_DEAD_ZONE_DEG` / `BIG_TURN_DEAD_ZONE_DEG`
+   / `ALIGN_WORSEN_DEG` / 改善判据 0.5° / 小转规划下限）都在这个坐标下标定。
 
 2026-09-24 实测（16 种子、实测原语）把控制侧换成"去畸变 + atan"的精确公式：
     到达 112/112 → **72/111**，真值落点最大 4.3cm → **128cm**，超半格 0 → 35；
@@ -72,8 +72,8 @@ def _sweep():
 def test_yaw_gain_is_about_0734():
     """增益（关卡 yaw / 真实方位角）必须仍在 0.734 附近
 
-    这个倍率一变，`VIS_ALIGN_TOL_DEG` / `VIS_BIG_TURN_DEG` /
-    `VIS_ALIGN_WORSEN_DEG` 等**整族阈值**都要重标（见模块 docstring 的实测）。
+    这个倍率一变，`ALIGN_DEAD_ZONE_DEG` / `BIG_TURN_DEAD_ZONE_DEG` /
+    `ALIGN_WORSEN_DEG` 等**整族阈值**都要重标（见模块 docstring 的实测）。
     """
     rows = _sweep()
     ratios = [r[1] / r[2] for r in rows if abs(r[2]) > 3.0]
@@ -109,12 +109,12 @@ def test_exact_yaw_model_is_NOT_in_control_path():
     assert not hasattr(NG, "YAW_EXACT_MODEL"), \
         "YAW_EXACT_MODEL 又被加回来了——请先读 CAMERA_FOV_H_DEG 的注释"
     src = open(NG.__file__, encoding="utf-8").read()
-    # `_see_target` 里不得出现 undistortPoints（它属于"修准 yaw"那条被否证的路）
-    i = src.find("def _see_target")
-    j = src.find("def _see_target_any")
+    # `_find_target_panel` 里不得出现 undistortPoints（它属于"修准 yaw"那条被否证的路）
+    i = src.find("def _find_target_panel")
+    j = src.find("def _find_any_panel")
     assert i > 0 and j > i
     assert "undistortPoints" not in src[i:j], \
-        "_see_target 里出现了 undistortPoints —— 精确 yaw 被接回控制路径了"
+        "_find_target_panel 里出现了 undistortPoints —— 精确 yaw 被接回控制路径了"
 
 
 if __name__ == "__main__":

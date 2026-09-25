@@ -52,7 +52,7 @@ def _s_lo_of(s_min):
 
 
 def _v_lo_of(v_min):
-    """V 下限同理取松（暗阴影交给几何门 / 数字证据门拦）"""
+    """V 下限同理取松（暗阴影交给几何门 / 数字到达判断条件拦）"""
     return round(min(V_MIN_CAP, max(V_MIN_FLOOR, float(v_min) * (1 - MARGIN))), 1)
 
 

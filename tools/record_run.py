@@ -17,7 +17,7 @@
     # 选算法（不写就是统一决策）
     --three-stage         走三段式（现场发货的稳定实现）
     --tune                绿走廊×0.6 + 蓝区高 0.60
-    --primitives real     运动原语用现场实测值（与 AB 同口径）
+    --primitives real     运动原语用现场实测值（与 AB 用同一套参数）
 
 画面里能看到：左边相机帧（含检出框），右边场地俯视图（真值面板布局、**估计位姿
 vs 真值位姿**两条轨迹），底下一行状态（阶段/目标/拍照数/前后横向差）。
@@ -25,8 +25,6 @@ vs 真值位姿**两条轨迹），底下一行状态（阶段/目标/拍照数/
 from __future__ import annotations
 
 import argparse
-import contextlib
-import io
 import os
 import sys
 
@@ -37,7 +35,6 @@ for p in (_ROOT, _HERE):
         sys.path.insert(0, p)
 
 import cv2  # noqa: E402
-import numpy as np  # noqa: E402
 
 import levels.nine_grid as NG  # noqa: E402  统一决策（不写 --three-stage 时用它）
 import levels.nine_grid_three_stage as THREE  # noqa: E402  三段式
@@ -155,21 +152,21 @@ def main(argv=None):
         restores.append(AB.set_level_real())
     # 画面分档参数只在**统一决策**里有用；三段式不看它。
     if args.tune:
-        NG.VIS_ZONE_GREEN_TOP = 0.0329
-        NG.VIS_ZONE_GREEN_BOT = 0.0719
-        NG.VIS_ZONE_BLUE_HEIGHT = 0.60
+        NG.ZONE_GREEN_TOP = 0.0329
+        NG.ZONE_GREEN_BOT = 0.0719
+        NG.ZONE_BLUE_HEIGHT = 0.60
     # 终端打印用的完整中文说明（录像顶栏用 ASCII 简写 + 第二行阈值）
     algo = ("三段式（搜索→对准→接近→到达）" if args.three_stage
             else "统一决策（三档分区＋一个循环）")
     banner_nav = ("NAV three-stage" if args.three_stage
                   else "NAV unified | arrive region")
     if args.three_stage:
-        hint = (f"arrive: peak color {THREE.VIS_COLOR_SEEN_MIN:.2f} then "
-                f"drop below {THREE.VIS_COLOR_DROP_FRAC:.2f} of peak")
+        hint = (f"arrive: peak color {THREE.COLOR_SEEN_MIN:.2f} then "
+                f"drop below {THREE.COLOR_DROP_FRAC:.2f} of peak")
     else:
-        hint = (f"arrive: underfoot purple >= {NG.VIS_ARRIVE_PURPLE_MIN:.2f}"
-                f" | far orange <= {NG.VIS_ARRIVE_ORANGE_MAX:.2f}"
-                f" | L/R imbalance <= {NG.VIS_ARRIVE_ASYM_MAX:.2f}")
+        hint = (f"arrive: underfoot purple >= {NG.ARRIVE_PURPLE_MIN:.2f}"
+                f" | far orange <= {NG.ARRIVE_ORANGE_MAX:.2f}"
+                f" | L/R imbalance <= {NG.ARRIVE_ASYMMETRY_MAX:.2f}")
     layout = SIM.random_layout(args.seed) if args.layout == "random" \
         else SIM.SIM_LAYOUT
     seed = args.seed

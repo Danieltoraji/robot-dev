@@ -27,7 +27,7 @@ import numpy as np
 
 from core.camera_config import HEAD_RIGHT
 from levels.nine_grid_shared import (
-    NineGridShared, PITCH_NAV, clipped_quad_centroid,
+    NineGridShared, PITCH_NAV, clipped_centroid,
     project_ground_to_pixel,
 )
 from sim.nine_grid_sim import SimNineGridRobot, SIM_LAYOUT
@@ -40,7 +40,7 @@ SCENE_HEAD = HEAD_RIGHT
 def _frame_observations(level, robot, pitch):
     """拍一帧并检测 → [(格心, 观测, 头部脉宽, 是否裁切), ...]
 
-    与已删的 `_capture_corr` 同一口径：只保留地图里已知的数字，
+    与已删的 `_capture_corr` 同一算法：只保留地图里已知的数字，
     观测点取"未裁切用对角线交点、裁切用凸包质心"。
     """
     frame = robot.capture_frame()
@@ -79,7 +79,7 @@ def test_clipped_observation_model():
 
     max_clip_err, min_center_err = 0.0, 1e9
     for cell_xy, o, head in clipped:
-        pred_clip = clipped_quad_centroid(
+        pred_clip = clipped_centroid(
             cell_xy, truth[0], truth[1], truth[2], PITCH_NAV, head)
         pred_center = project_ground_to_pixel(
             cell_xy, truth[0], truth[1], truth[2], PITCH_NAV, head)[0]
@@ -140,7 +140,7 @@ def test_clipped_prediction_inside_image():
     from core.ground_homography import grid_cell_center
     center = grid_cell_center(4)  # 面板 4 在格心 (50,50)
     # 站在面板中心（pitch 1040）：裁切质心在画内靠底，中心投影已出画
-    on_panel = clipped_quad_centroid(center, 50.0, 50.0, 0.0, 1040)
+    on_panel = clipped_centroid(center, 50.0, 50.0, 0.0, 1040)
     center_px = project_ground_to_pixel(center, 50.0, 50.0, 0.0, 1040)[0]
     assert on_panel is not None and 0 <= on_panel[0] <= 2592 \
         and on_panel[1] > 1944 * 0.75, \
@@ -148,12 +148,12 @@ def test_clipped_prediction_inside_image():
     assert center_px[1] > 1944, \
         f"站在面板中心时面板中心投影应已出画（下沿外），实际 {center_px}"
     # 导航档站在面板中心：面板完全在视野外 → 钳到画幅的极限点（不返回 None）
-    outside = clipped_quad_centroid(center, 50.0, 50.0, 0.0, PITCH_NAV)
+    outside = clipped_centroid(center, 50.0, 50.0, 0.0, PITCH_NAV)
     assert outside is not None, "画外预测应给连续极限点而非 None"
     assert 0 <= outside[0] <= 2592 and 1944 - 1.0 <= outside[1] <= 1944, \
         f"完全出画时应钳到画幅底边，实际 {outside}"
     # 站在 60cm 外：面板大部分可见 → 画内点（明显高于底边）
-    far = clipped_quad_centroid(center, 50.0, -10.0, 0.0, PITCH_NAV)
+    far = clipped_centroid(center, 50.0, -10.0, 0.0, PITCH_NAV)
     assert far is not None, "远距应给出裁切预测"
     assert 0 <= far[0] <= 2592 and 0 <= far[1] < 1944 - 100, \
         f"远距预测点应在画内偏上: {far}"

@@ -175,7 +175,7 @@ def run_diag(robot, level):
     clean = {e[2] for e in pix_obs if not e[4]}
     print(f"[diag] 观测汇总: {len(pix_obs)} 条，数字 {seen}，"
           f"未裁切覆盖 {len(clean)}/7")
-    fit = level._lattice_grid_fit(pix_obs)
+    fit = level._fit_grid(pix_obs)
     print(f"[diag] 拟合: cells={fit.cells}")
     print(f"[diag] 说明: {fit.info}")
     for w in fit.warnings:

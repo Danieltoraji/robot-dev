@@ -27,3 +27,4 @@ _tmp_code.py
 #   确需入库时用 `git add -f` 显式点名，遵循"禁止 git add -A"的协作铁律）
 /.zcode/plans/
 _tmp_*.md
+_tmp_*.txt

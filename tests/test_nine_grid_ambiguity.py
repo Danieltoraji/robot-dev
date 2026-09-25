@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(_HERE))
 import numpy as np
 
 from core.ground_homography import grid_cell_center
-from levels.nine_grid_shared import ambiguity_repair, GRID_CELL_CM
+from levels.nine_grid_shared import repair_ambiguous_digits, GRID_CELL_CM
 
 
 def _scene(swap=True, jitter=0.0):
@@ -41,7 +41,7 @@ def _scene(swap=True, jitter=0.0):
 
 def test_swap_repair_recovers_truth():
     cells, pick, truth = _scene(swap=True)
-    fixed, notes = ambiguity_repair(cells, pick, {3: {1}})
+    fixed, notes = repair_ambiguous_digits(cells, pick, {3: {1}})
     assert fixed == truth, f"未修复：{fixed} != 真值 {truth}"
     assert notes and "交换" in notes[0]
     print(f"  交换修复：{notes[0][:52]}… ✓")
@@ -50,7 +50,7 @@ def test_swap_repair_recovers_truth():
 def test_no_repair_without_ambiguity():
     """没有歧义记录 ⇒ 一个格号都不许动（修复只在有歧义时介入）"""
     cells, pick, truth = _scene(swap=True)
-    fixed, notes = ambiguity_repair(cells, pick, {})
+    fixed, notes = repair_ambiguous_digits(cells, pick, {})
     assert fixed == cells and not notes
     print("  无歧义不介入 ✓")
 
@@ -58,7 +58,7 @@ def test_no_repair_without_ambiguity():
 def test_no_repair_when_geometry_inconclusive():
     """观测点两边都不明显（余量不足）⇒ 保持原判（宁可不猜）"""
     cells, pick, truth = _scene(swap=False)      # 格号本来就对
-    fixed, notes = ambiguity_repair(cells, pick, {3: {1}})
+    fixed, notes = repair_ambiguous_digits(cells, pick, {3: {1}})
     assert fixed == truth and not notes, f"不该动：{fixed} / {notes}"
     print("  几何不明确时不猜 ✓")
 
@@ -68,7 +68,7 @@ def test_reference_too_few():
     cells, pick, _truth = _scene(swap=True)
     pick = {"med": {d: v for d, v in pick["med"].items() if d in (1, 3, 5)},
             "clean": {1, 3, 5}}
-    fixed, notes = ambiguity_repair(cells, pick, {3: {1}})
+    fixed, notes = repair_ambiguous_digits(cells, pick, {3: {1}})
     assert fixed == cells and not notes
     print("  参照不足不介入 ✓")
 
@@ -76,9 +76,9 @@ def test_reference_too_few():
 def test_repair_survives_noise_and_margin():
     """加 1.5cm 观测噪声仍能修复；余量抬到 40cm（> 格距）则不再交换"""
     cells, pick, truth = _scene(swap=True, jitter=1.5)
-    fixed, _notes = ambiguity_repair(cells, pick, {3: {1}})
+    fixed, _notes = repair_ambiguous_digits(cells, pick, {3: {1}})
     assert fixed == truth, f"带噪声未修复：{fixed}"
-    fixed2, notes2 = ambiguity_repair(cells, pick, {3: {1}}, margin_cm=2 * GRID_CELL_CM)
+    fixed2, notes2 = repair_ambiguous_digits(cells, pick, {3: {1}}, margin_cm=2 * GRID_CELL_CM)
     assert fixed2 == cells and not notes2, "余量超格距时不该交换"
     print(f"  噪声 1.5cm 仍修复；余量 {2 * GRID_CELL_CM:.0f}cm 时拒绝交换 ✓")
 

@@ -7,7 +7,7 @@
     truth.json          程序化真值集：逐条 {color, photo, bbox, area_work, ...}
     index.json          按颜色的原始索引（人工标注用）
 
-真值口径见 truth.json 的 `note` 字段与同目录 README.md。
+真值读法见 truth.json 的 `note` 字段与同目录 README.md。
 
 用法：
     python tools/build_truth_matrix.py
