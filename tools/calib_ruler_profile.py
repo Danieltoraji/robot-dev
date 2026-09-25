@@ -306,10 +306,39 @@ def print_mapping(m):
           "刻度平面cm 列系统性偏短，只作标定原始记录。")
 
 
+def point_table(d, y, fit_x, use_dist=True):
+    """逐点残差表 + 坏点判定
+
+    点击误差是这类标定最大的误差源，而且**看不出来**——一两个坏点会把整体
+    RMS 拖坏，但残差表能把它们直接点出来。判定用"3 倍中位残差"而不是绝对
+    阈值：点得准时阈值自动收紧，点得糙时也不会满屏报警。
+    """
+    fy0 = float(CAMERA_INTRINSIC[1, 1])
+    cy0 = float(CAMERA_INTRINSIC[1, 2])
+    k1 = float(CAMERA_DISTORTION[0])
+    k2 = float(CAMERA_DISTORTION[1])
+    he, th, t = float(fit_x[0]), float(fit_x[1]), float(fit_x[2])
+    d = np.asarray(d, float)
+    y = np.asarray(y, float)
+    pred = phys_y(d + t, he, np.radians(th), fy0, cy0, use_dist, k1, k2)
+    res = y - pred
+    thr = max(3.0 * float(np.median(np.abs(res))), 4.0)   # 至少 4px，防误报
+    rows = []
+    for dd, yc, ym, rr in zip(d, y, pred, res):
+        step = abs(phys_y(dd + t + 1.0, he, np.radians(th), fy0, cy0,
+                          use_dist, k1, k2) - ym)          # 该处每 cm 多少像素
+        rows.append({"d_cm": float(dd), "y_px": float(yc), "model_y_px": float(ym),
+                     "resid_px": float(rr),
+                     "resid_cm": float(rr / step) if step > 1e-6 else float("nan"),
+                     "outlier": bool(abs(rr) > thr)})
+    return rows, thr
+
+
 def report(d, y, x=None, lock_height=None, lock_ruler_h=0.0,
-           ruler_thickness=None):
+           ruler_thickness=None, drop=None):
     """跑全部拟合并打印。返回结果字典
 
+    drop           ：要剔除的刻度读数（列表）。坏点判定见逐点残差表。
     lock_height    ：可选的交叉校验——先锁死"光心离刻度平面的高度"再拟合。
                      缺省 None = 不锁，三个参数全自由（**推荐**）。
     ruler_thickness：卷尺厚度 λ（cm），**量出来的，不是猜的**。给了它才会
@@ -319,6 +348,14 @@ def report(d, y, x=None, lock_height=None, lock_ruler_h=0.0,
     """
     d = np.asarray(d, float)
     y = np.asarray(y, float)
+    if drop:
+        keep = ~np.isin(d, np.asarray(list(drop), float))
+        if keep.sum() < len(d):
+            print(f"  按 --drop 剔除 {len(d) - int(keep.sum())} 个点"
+                  f"（读数 {sorted(drop)}）")
+        d, y = d[keep], y[keep]
+        if x is not None:
+            x = np.asarray(x, float)[keep]
     out = {"n_points": int(len(d)), "dists_cm": d.tolist(), "y_px": y.tolist()}
     if x is not None:
         cx = float(CAMERA_INTRINSIC[0, 2])
@@ -387,6 +424,24 @@ def report(d, y, x=None, lock_height=None, lock_ruler_h=0.0,
     print("      这两者模型里只以差值出现，**永远分不开**，所以量地面目标时")
     print("      还需把卷尺厚度加回去（影响约 λ/h 的比例，40cm 约 1cm、2cm 仅 0.06cm）")
 
+    # --- 逐点残差：点击误差是最大误差源，必须点出来 ---
+    if best_free is not None:
+        rows, thr = point_table(d, y, best_free.x, use_dist=True)
+        bad = [r for r in rows if r["outlier"]]
+        print(f"\n  --- 逐点残差（含畸变模型，坏点阈值 {thr:.1f}px）---")
+        for r in rows:
+            print(f"    d={r['d_cm']:6.1f}  点击y={r['y_px']:8.1f}  "
+                  f"模型y={r['model_y_px']:8.1f}  "
+                  f"残差={r['resid_px']:+7.1f}px ({r['resid_cm']:+.2f}cm)"
+                  + ("   ⚠ 疑似坏点" if r["outlier"] else ""))
+        if bad:
+            ds_bad = ",".join(f"{r['d_cm']:.0f}" for r in bad)
+            print(f"    ⚠ {len(bad)} 个疑似坏点（读数 {ds_bad}）。"
+                  f'用 --drop "{ds_bad}" 重算，或在工具里 u 撤销重点')
+        else:
+            print("    无坏点 ✓")
+        out["points_table"] = rows
+
     # --- 可选交叉校验：锁死高度 ---
     if lock_height is not None:
         print(f"\n  --- 交叉校验：锁死刻度平面高度 {lock_height:.2f}cm ---")
@@ -448,7 +503,7 @@ class RulerClicker:
     }
 
     def __init__(self, frame, dists, out_path, image_path=None, pitch=None,
-                 lock_height=None, ruler_thickness=None):
+                 lock_height=None, ruler_thickness=None, drop=None):
         self.img = frame
         self.h, self.w = frame.shape[:2]
         self.dists = list(dists)
@@ -457,6 +512,7 @@ class RulerClicker:
         self.pitch = pitch
         self.lock_height = lock_height
         self.ruler_thickness = ruler_thickness
+        self.drop = list(drop) if drop else []
         self.points = []          # [(d_cm, x_px, y_px)]
         self.skipped = []
         self.i = 0
@@ -648,7 +704,8 @@ class RulerClicker:
         x = [p[1] for p in self.points]
         y = [p[2] for p in self.points]
         res = report(d, y, x=x, lock_height=self.lock_height,
-                      ruler_thickness=self.ruler_thickness)
+                      ruler_thickness=self.ruler_thickness,
+                      drop=self.drop)
         res.update({"image": self.image_path, "pitch": self.pitch,
                     "lock_height": self.lock_height,
                     "ruler_thickness_cm": self.ruler_thickness,
@@ -697,6 +754,8 @@ def parse_args():
     ap.add_argument("--lock-height", type=float, default=None,
                     help="可选：锁死『光心离刻度平面的高度』(cm) 做交叉校验。"
                          "缺省不锁——三个参数全自由，不需要任何猜测值")
+    ap.add_argument("--drop", default=None,
+                    help="剔除坏点：刻度读数逗号分隔（先跑一遍看逐点残差表）")
     ap.add_argument("--px", default=None, help="脚本模式：像素点 'x,y;x,y;...'")
     ap.add_argument("--fit-only", action="store_true", help="只算拟合，不开窗口")
     ap.add_argument("--pitch", type=int, default=None, help="记录用：俯仰脉宽")
@@ -723,7 +782,8 @@ def main():
             sys.exit(1)
         res = report(dists, [p[1] for p in pts], x=[p[0] for p in pts],
                      lock_height=args.lock_height,
-                     ruler_thickness=args.ruler_thickness)
+                     ruler_thickness=args.ruler_thickness,
+                     drop=_parse_floats(args.drop) if args.drop else None)
         res.update({"image": args.image, "pitch": args.pitch,
                     "lock_height": args.lock_height,
                     "ruler_thickness_cm": args.ruler_thickness,
@@ -739,7 +799,8 @@ def main():
 
     RulerClicker(frame, dists, args.out, image_path=args.image,
                  pitch=args.pitch, lock_height=args.lock_height,
-                 ruler_thickness=args.ruler_thickness).run()
+                 ruler_thickness=args.ruler_thickness,
+                 drop=_parse_floats(args.drop) if args.drop else None).run()
 
 
 if __name__ == "__main__":
