@@ -237,11 +237,85 @@ def solve_zero_offset(d_read, y, h, use_dist=True, ruler_h=0.0):
     return best
 
 
-def report(d, y, x=None, lock_height=None, lock_ruler_h=0.0):
+def emit_mapping(y, fit_x, use_dist=True, ruler_thickness=None, n_rows=25):
+    """把拟合结果变成**可直接用的像素 → 距离映射**
+
+    拟合出来的是"刻度平面"上的映射（因为刻度点就长在那个高度上）。要量
+    **地面**目标（木条根部、胶条根部），整体乘一个系数：
+
+        a = h / h_eff = 1 + λ / h_eff        （λ = 卷尺厚度）
+
+    乘完之后对地面目标精确——合成数据实测残留 0.000cm。
+
+    为什么只需要一个系数：把距离 d 乘以 k 与把相机高度 h 除以 k 是**同一个
+    投影**，所以"刻度高了 λ"在数据里长得和"相机矮了 λ"一模一样。这一个
+    数据**结构上**分不出两者，能定出的形状完全正确，只差这个整体倍数。
+
+    λ 不必很准：估错 1mm，70cm 处差 0.2cm，2cm 处差 0.006cm。
+    """
+    he, th, t = float(fit_x[0]), float(fit_x[1]), float(fit_x[2])
+    fy0 = float(CAMERA_INTRINSIC[1, 1])
+    cy0 = float(CAMERA_INTRINSIC[1, 2])
+    k1 = float(CAMERA_DISTORTION[0])
+    k2 = float(CAMERA_DISTORTION[1])
+    a = (1.0 + float(ruler_thickness) / he) if ruler_thickness is not None else None
+
+    ys = np.linspace(float(np.min(y)), float(np.max(y)), n_rows)
+    rows = []
+    for yv in ys:
+        # inv_phys 解出的就是"该像素对应的地面水平距离"（含零点偏移），
+        # 不要再减零点偏移——减了就退回成卷尺读数了
+        dt = inv_phys(yv, he, np.radians(th), fy0, cy0, use_dist, k1, k2)
+        rows.append({"y_px": float(yv), "d_tick_cm": float(dt),
+                     "d_floor_cm": (float(dt * a) if a else None)})
+    return {"h_eff_cm": he, "theta_deg": th, "zero_offset_cm": t,
+            "fy": fy0, "cy": cy0, "k1": k1, "k2": k2,
+            "ruler_thickness_cm": ruler_thickness, "scale_a": a,
+            "table": rows}
+
+
+def print_mapping(m):
+    """打印映射表与用法"""
+    print("\n  ===== 像素 → 距离 映射 =====")
+    print(f"    模型参数（刻度平面）：高度 h_eff={m['h_eff_cm']:.2f}cm  "
+          f"俯角={m['theta_deg']:.2f}°  零点偏移={m['zero_offset_cm']:+.2f}cm")
+    if m["scale_a"] is None:
+        print("    ⚠ 没给 --ruler-thickness，**绝对刻度会偏**：地面读数整体"
+              f"偏小约 λ/h_eff（λ=1cm 时约 {100*1.0/m['h_eff_cm']:.1f}%）")
+        print("      形状是对的，只差这一个倍数。量一下卷尺厚度填进去即可。")
+    else:
+        print(f"    卷尺厚度 λ={m['ruler_thickness_cm']:.2f}cm  ⇒  "
+              f"缩放系数 a = 1 + λ/h_eff = {m['scale_a']:.5f}")
+        print(f"    **地面距离 = 刻度平面读数 × a**（+{(m['scale_a']-1)*100:.2f}%）")
+    print()
+    hdr = f"    {'y_px':>8} {'刻度平面cm':>12}"
+    if m["scale_a"] is not None:
+        hdr += f" {'地面cm':>10}"
+    print(hdr)
+    for row in m["table"]:
+        line = f"    {row['y_px']:>8.0f} {row['d_tick_cm']:>12.2f}"
+        if row["d_floor_cm"] is not None:
+            line += f" {row['d_floor_cm']:>10.2f}"
+        print(line)
+    print("\n    用法：按上表线性插值即可（y 越大 = 越近）。"
+          "表已存进 JSON 的 mapping 段。")
+    print(f"    ⚠ 表只覆盖你点过的刻度范围（地面 "
+          f"{m['table'][-1]['d_tick_cm']:.1f}~{m['table'][0]['d_tick_cm']:.1f}cm）"
+          "——超出即为**外推**，不保证准。")
+    print("    ⚠ 要量地面目标（木条根部、胶条根部）用**地面cm**列；"
+          "刻度平面cm 列系统性偏短，只作标定原始记录。")
+
+
+def report(d, y, x=None, lock_height=None, lock_ruler_h=0.0,
+           ruler_thickness=None):
     """跑全部拟合并打印。返回结果字典
 
-    lock_height：可选的交叉校验——先锁死"光心离刻度平面的高度"再拟合。
-                 缺省 None = 不锁，三个参数全自由（**推荐**）。
+    lock_height    ：可选的交叉校验——先锁死"光心离刻度平面的高度"再拟合。
+                     缺省 None = 不锁，三个参数全自由（**推荐**）。
+    ruler_thickness：卷尺厚度 λ（cm），**量出来的，不是猜的**。给了它才会
+                     输出对**地面**目标可直接用的映射（= 刻度平面读数 ×
+                     (1+λ/h_eff)）。不给则形状照样对，只是绝对刻度偏小
+                     约 λ/h_eff（λ=1cm 时约 3%）。
     """
     d = np.asarray(d, float)
     y = np.asarray(y, float)
@@ -290,10 +364,13 @@ def report(d, y, x=None, lock_height=None, lock_ruler_h=0.0):
 
     # --- 主结果：三参全自由，不需要任何猜测值 ---
     print("\n  --- 主结果：刻度平面高度 / 俯角 / 零点偏移（三参全自由）---")
+    best_free = None
     for use_dist in (True, False):
         r = fit_all(d, y, use_dist=use_dist)
         if r is None:
             continue
+        if use_dist:
+            best_free = r
         he, th, t = float(r.x[0]), float(r.x[1]), float(r.x[2])
         rms = float(np.sqrt(np.mean(r.fun ** 2)))
         dh = np.array([inv_phys(yv, he, np.radians(th), fy0, cy0,
@@ -335,6 +412,13 @@ def report(d, y, x=None, lock_height=None, lock_ruler_h=0.0):
     print("   · 针孔族的上限是自由射影；含畸变的物理模型不属该族，**可以更好**")
     print("   · 「含畸变 vs 无畸变」的差就是桶形畸变帮了多少忙")
     print("   · 最终要的是**近段距离误差**（起跨点靠的是近距零点），不是总 RMS")
+
+    # --- 最终交付物：可直接用的像素 → 距离映射 ---
+    if best_free is not None:
+        m = emit_mapping(y, best_free.x, use_dist=True,
+                         ruler_thickness=ruler_thickness)
+        print_mapping(m)
+        out["mapping"] = m
     return out
 
 
@@ -346,7 +430,7 @@ class RulerClicker:
     """带缩放/平移的刻度点击器（缩放着实必要：刻度是细线，不放大点不准）"""
 
     def __init__(self, frame, dists, out_path, image_path=None, pitch=None,
-                 lock_height=None):
+                 lock_height=None, ruler_thickness=None):
         self.img = frame
         self.h, self.w = frame.shape[:2]
         self.dists = list(dists)
@@ -354,6 +438,7 @@ class RulerClicker:
         self.image_path = image_path
         self.pitch = pitch
         self.lock_height = lock_height
+        self.ruler_thickness = ruler_thickness
         self.points = []          # [(d_cm, x_px, y_px)]
         self.skipped = []
         self.i = 0
@@ -492,9 +577,11 @@ class RulerClicker:
         d = [p[0] for p in self.points]
         x = [p[1] for p in self.points]
         y = [p[2] for p in self.points]
-        res = report(d, y, x=x, lock_height=self.lock_height)
+        res = report(d, y, x=x, lock_height=self.lock_height,
+                      ruler_thickness=self.ruler_thickness)
         res.update({"image": self.image_path, "pitch": self.pitch,
                     "lock_height": self.lock_height,
+                    "ruler_thickness_cm": self.ruler_thickness,
                     "skipped_cm": self.skipped,
                     "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "points": [{"d_cm": p[0], "x_px": p[1], "y_px": p[2]}
@@ -533,6 +620,10 @@ def parse_args():
                     help="按点击顺序对应的距离(cm)，逗号分隔；缺省用内置序列")
     ap.add_argument("--offset", type=float, default=0.0,
                     help="已知零点偏移(cm)时先加上；**不知道就别填**，缺省由拟合解出")
+    ap.add_argument("--ruler-thickness", type=float, default=None,
+                    help="卷尺厚度(cm)：量出来的（卡尺/尺子比一下），不是猜的。"
+                         "给了它才会输出对地面目标的映射（读数 × (1+λ/h_eff)）；"
+                         "不给则形状照样对，只是绝对刻度偏小约 λ/h_eff（λ=1cm 约 3%）")
     ap.add_argument("--lock-height", type=float, default=None,
                     help="可选：锁死『光心离刻度平面的高度』(cm) 做交叉校验。"
                          "缺省不锁——三个参数全自由，不需要任何猜测值")
@@ -561,9 +652,11 @@ def main():
             print(f"点数不一致: px={len(pts)} dists={len(dists)}")
             sys.exit(1)
         res = report(dists, [p[1] for p in pts], x=[p[0] for p in pts],
-                     lock_height=args.lock_height)
+                     lock_height=args.lock_height,
+                     ruler_thickness=args.ruler_thickness)
         res.update({"image": args.image, "pitch": args.pitch,
                     "lock_height": args.lock_height,
+                    "ruler_thickness_cm": args.ruler_thickness,
                     "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "points": [{"d_cm": d, "x_px": p[0], "y_px": p[1]}
                                for d, p in zip(dists, pts)]})
@@ -575,7 +668,8 @@ def main():
         return
 
     RulerClicker(frame, dists, args.out, image_path=args.image,
-                 pitch=args.pitch, lock_height=args.lock_height).run()
+                 pitch=args.pitch, lock_height=args.lock_height,
+                 ruler_thickness=args.ruler_thickness).run()
 
 
 if __name__ == "__main__":
