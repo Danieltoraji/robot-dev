@@ -1,0 +1,1827 @@
+# -*- coding: utf-8 -*-
+"""数字宫格两条路线共用的部分（levels/nine_grid_shared.py）
+
+这里只放"与走哪条决策路线无关"的东西：
+  · 布局扫描：宽扫 → 格阵拟合 → 自标定相机常数 → 由面板反推初始位姿；
+  · 投影与裁切预测：格心 ↔ 像素（定位、自标定、位置核对共用）；
+  · 位置核对：把"地图说数字 d 在格 c"与本帧看到的东西配对，解出实测位姿；
+  · 动作白名单、位姿推算、单格时间/拍照/动作三重预算与熔断、场地边界护栏；
+  · 逐格主流程 run_level（子类只实现 _drive_to_panel）。
+
+路线专属的判据、阈值、决策循环一律留在路线模块，不要往这里加。
+"""
+
+
+import time
+from collections import namedtuple
+from itertools import combinations
+import numpy as np
+import cv2
+
+from core.camera_config import (
+    CAMERA_DISTORTION,
+    CAMERA_HEIGHT,
+    CAMERA_INTRINSIC,
+    CAMERA_WIDTH,
+    CAM_HEIGHT_STANDING_CM,
+    CAM_PITCH_MOUNT_OFFSET_DEG,
+    HEAD_CENTER,
+    HEAD_LEFT,
+    HEAD_RIGHT,
+    HEAD_WIDE_LEFT,
+    HEAD_WIDE_RIGHT,
+    SERVO_DEG_PER_US,
+)
+
+from core.ground_homography import (
+    CAMERA_TO_BODY_FORWARD_CM,
+    GRID_CELL_CM,
+    GroundHomography,
+    cell_index,
+    grid_cell_center,
+)
+
+from core.robot_core import (
+    CAM_AUTO_EXPOSURE_ENABLED,
+    RobotState,
+    auto_calibrate_exposure,
+    lock_camera_controls,
+)
+
+from vision.nine_grid_detector import (
+    ID_TO_COLOR,
+    NineGridDetector,
+)
+
+
+# 相机光心高度缺省值：来自 camera_config（机器人自身属性）；layout_scan
+# 运行时用格阵拟合参数网格自标定刷新（self._cam_height_cm）
+CAM_HEIGHT_CM = CAM_HEIGHT_STANDING_CM
+PITCH_NAV = 1200      # 前视导航/布局预扫（下沿 53.5°；转弯不拍到自身）
+PITCH_DOWN = 1040     # 低头：可见地面带 **3.8~85.7cm**（近距/脚下判定；2026-09-24 复算）
+PANEL_HALF_CM = 14.0  # 面板色块半边长（33cm 格含缝，色块约 28cm）——P3 实测校准
+
+# =====================================================================
+# 动作白名单与名义位移模型（预测用；实测标定值见 levels/goodluck.py）
+# =====================================================================
+# 本场地禁用 go_forward / go_forward_fast：5cm 步幅在 33cm 小面板+打滑地板上
+# 容易重心前扑摔倒（现场结论）。前进一律用 go_forward_one_step（2cm），
+# 远距允许小批量（≤3 次=6cm）。白名单外的动作由 _act 直接拒绝。
+DISABLED_ACTIONS = ("go_forward", "go_forward_fast")
+
+FORWARD_ONE_STEP_CM = 2.0   # go_forward_one_step（唯一前进原语）
+BACK_ONE_STEP_CM = 3.2      # back_one_step
+LEFT_MOVE_CM = 1.9
+RIGHT_MOVE_CM = 2.2
+TURN_LEFT_DEG = 22.0
+TURN_RIGHT_DEG = 25.7
+
+# (类型, 名义增量)：fwd 前向 cm（负=后退）、lat 右向 cm、turn 右转度（右正）
+ACTION_MODEL = {
+    "go_forward_one_step": ("fwd", FORWARD_ONE_STEP_CM),
+    "back_one_step": ("fwd", -BACK_ONE_STEP_CM),
+    "left_move": ("lat", -LEFT_MOVE_CM),
+    "right_move": ("lat", RIGHT_MOVE_CM),
+    "turn_left": ("turn", -TURN_LEFT_DEG),
+    "turn_right": ("turn", TURN_RIGHT_DEG),
+    "turn_left_small_step": ("turn", -2.0),
+    "turn_right_small_step": ("turn", 2.0),
+    "stand": (None, 0.0),
+}
+
+# 动作名 → 日志用中文名（只用于打印；动作名本身仍是 ACTION_MODEL 里的键）
+_ACTION_LABEL_CN = {
+    "go_forward_one_step": "前进一步",
+    "back_one_step": "后退一步",
+    "left_move": "左移",
+    "right_move": "右移",
+    "turn_left": "左大转",
+    "turn_right": "右大转",
+    "turn_left_small_step": "左小转",
+    "turn_right_small_step": "右小转",
+    "stand": "站立",
+}
+
+
+def _action_cn(name, times=1):
+    """动作名 → 日志可读文案（如 (turn_left_small_step, 6) → '左小转×6'）"""
+    label = _ACTION_LABEL_CN.get(name, str(name))
+    return label if int(times) <= 1 else f"{label}×{int(times)}"
+
+# =====================================================================
+# 自适应小转向（继承参考方案：在线估计 + 失效升级）
+# =====================================================================
+SMALL_TURN_INIT_DEG = 2.0     # 小转单次角度初估（P3 实测覆盖；goodluck 实测不可靠）
+GN_CAUCHY_C_PX = 4.0      # IRLS 鲁棒核尺度（px）：大残差（裁切野值）近零权重
+CAMERA_FOV_H_DEG = 60.0         # yaw = -(dx/W)*FOV：**伺服增益**，不是角度标称值
+MAP_ANCHOR_MIN_PTS = 5          # 参与解算的最少对应数（4 能解但无法核验且会退化）
+MAP_ANCHOR_MIN_INLIERS = 5      # 共识下限（**不是 4**）：4 点单应是恰定解、自身残差
+                                # 恒为 0、没有任何冗余 ⇒ 既无法核验、数值上也会
+                                # 外推出荒谬解（实测 4 点时 `ground_pose()` 直接抛
+                                # "相机未俯视地面"）。5 点给出 2 个残差自由度。
+MAP_ANCHOR_INLIER_PX = 6.0      # 内点门限（原生 px）；内点实测 ≤3.6px、外点 ≥29px
+MAP_ANCHOR_H_RANGE_CM = (25.0, 90.0)   # 反解相机高度的合理区间
+MAP_ANCHOR_COL_DIFF_MAX = 0.05  # H 前两列模长相对差上限（真单应的性质）
+MAP_ANCHOR_POSE_TOL_CM = 60.0   # 反解位姿离场地中心的最大允许距离（荒谬解守卫）
+MAP_ANCHOR_MAX_COMBOS = 80      # 4 子集枚举上限（C(9,4)=126 → 抽稀到 80）
+# 裁切面板角点判据：`hull_poly` 顶点距画幅边 ≥ 此值（原生 px）才认为是"真角点"。
+# 取 12：detector 的贴边判据是 work 分辨率 8px × scale(≈2) = 16 原生 px，
+# 这里取略小一点，宁可多收一个顶点（错的那个会被 RANSAC 判为外点）。
+MAP_ANCHOR_CORNER_MARGIN_PX = 12.0
+# ★ 为什么默认关闭：
+#   2026-09-23 实测（tools/_tmp_recalib2.py，8 局 56 格）：在**实测运动常量**下
+#   分区律与二值判据的到达数完全相同（42/56 / 40/56 / 45/56，三组配置各自
+#   逐位相同；默认常量的整关仿真也都是 7/7、206 拍照、176 动作）。
+#   ⇒ **分区律目前没有可测出的增益**，所以不给它改默认行为。
+#
+#   ★ 已排除的两个"假原因"（都曾是本开关关闭的理由，现已作废）：
+#     ① "收益只在实测常量下体现 / 49-56 vs 54-56" —— 那个旧对照**无效**：
+#        tools/_tmp_recalib.py 没接管 `_zone_of`，两次跑的是同一条路径。
+#     ② "中间档不可达" —— **确实发生过，已修**：`_approach_visual` 的快捷判据
+#        原写死 `abs(yaw) <= VIS_ALIGN_TOL_DEG(12°)`，在咨询分区之前就放行前进，
+#        导致 yaw 落在 6~12°（蓝档该生效的区间）时 `_zone_of` 根本没被问到
+#        （实测：返回 'lat' **0 次**）。改成走同一套 `_zone_of` 后，'lat'
+#        25 次 / 'move' 12 次 / 'rot' 45 次，中间档可达。
+#        修完后默认路径仍逐位不变（7/7、206、176），75 个测试全绿。
+#
+#   另一条并行阻塞（未解决）: 把关卡运动常量换成实测值（Hindsight 记的冻结矩阵
+#   2.652 / 8.625 / 5.2）后，仿真基线从 7/7 掉到 5/7；扫了 17 组规划常量
+#   （tools/_tmp_recalib.py）最好 20/21（种子3/7/11），8 种子口径 42~45/56，
+#   仍不如名义常量的 49/56。所以那一步也不该现在做。
+#
+#   ⇒ 下一步该做的是"**让分区律有增益**"，而不是继续调它的阈值：目前它发出的
+#     横移动作与到达段自己的厘米级纠偏（VIS_ARRIVE_LAT_VIA_SIDESTEP）功能重叠，
+#     所以看不出差别。要么把到达段的纠偏收进分区律统一调度，要么让分区律承担
+#     到达段目前做不了的事（例如远距离的低效横移改用旋转）。
+#
+#   ⚠️ **已解（2026-09-24）**：原记录"扫 VIS_ZONE_ROT_NEAR ∈ {0.35,0.0,0.5,0.9,9.0}
+#     结果逐位相同，而 'lat' 确实执行了 25 次/局 ⇒ 该对照装置可疑"——**装置没问题**，
+#     'lat' 计数随阈值变化是 63/67/11/0；无差异的真正原因是**蓝档动作是死代码**：
+#     `_align_visual` 旧的首判据是 `abs(yaw) <= VIS_ALIGN_TOL_DEG or (...)`，
+#     |yaw| 落在 6~12°（蓝档该生效的区间）时第一个析取项已经成立 ⇒ 函数立刻
+#     "已对准"返回 ⇒ 后面的横移档（`_act`）**在数学上不可达**（走到那里必须
+#     |yaw| > 12°，而那时 `_zone_of` 只会给 'rot'）。全部 'lat' 都来自
+#     `_approach_visual` 的"咨询"，咨询完就把结果丢了。
+#     **e43a803 只打通了 APPROACH 段的咨询，ALIGN 段（本函数首判据）没打通。**
+#     实测：开启分区后 2 局 14 格里 `_act` 的动作计数与关闭时**逐项完全相同**
+#     （`tools/ab_ninegrid.py --arms zone_off zone_on`）。
+#     已修：首判据改为统一走 `_zone_of`，见下方 `_zone_of_h` 与 `_align_visual`。
+#   ⇒ **推论**：`VIS_ZONE_MOVE_DEG/ROT_DEG/ROT_NEAR` 的标定结论（36 组扫描
+#     21/28→27/28、`_tmp_zone_sim.py` 的运动学级结论）**不能**作为"分区律有用/
+#     无用"的证据——蓝档从未执行过。要下结论必须用 `tools/ab_ninegrid.py`
+#     重跑（它带活性断言，会拒绝"两臂计数相同"的无效对照）。
+#   相关复算脚本：tools/ab_ninegrid.py（入版本库）/ _tmp_recalib.py / _tmp_recalib2.py
+
+PANEL_WIDTH_CM = 28.0           # 色块宽（像素↔厘米换算基准；与 PANEL_HALF_CM 同源）
+# ---- 单格转向护栏（2026-09-13 真机"一直转 → 冲出场地"复盘，安全项） ----
+# 现场现象：机器人在某一格内持续转向（对准与搜索互相接管），最后转出场外。
+# 旧实现只在时间/拍照数/动作数上设了上限，而**转向是最便宜的动作**（不拍照、
+# 不耗帧）：没有"转够了就停"的概念，它可以在死区里空转很久。
+# 对策：单格累计**命令**转角（含搜索/对准/大转/纠横的所有 turn_*）超预算即
+# 熔断本格，并**拒绝执行**那最后一次转向（见 _act）——宁可本格记未确认。
+# 360° 依据（180° → 360°，2026-09-13 形变随机游走实测修正）：一格里**正常**
+# 的转向总量 = 对准 ≤60°（几个 10° 小步）+ 搜索换视角最多两轮大转
+# （每轮 ≤129°）≈ 320°；取"整圈" 360° 只拦"已经在原地打转"的情形，
+# 正常最坏路径不误伤（仿真单格实测最大 180°）。早期取 180° 会在"目标在身后、
+# 一轮搜索没扫到"时误熔断——deform 随机游走场景面板 4 就是这样丢的。
+VIS_TURN_BUDGET_DEG = 360.0     # 单格累计命令转角上限（一整圈）
+# ---- 离场护栏（同上，安全项） ----
+# 场地是 1m×1m 台面（格心 16.7~83.3cm），起点在台面南侧 (50,-20)（见 __init__）。
+# 外框取"台面 ± 1 格"（33cm）：拦的是**彻底失控**（已经跑到台面外一整格），
+# 不是防跌落预案。为什么不收得更紧：死推位姿本身在形变下实测能偏 30cm+
+# （到达判据"颜色峰值回落"在俯仰 ±15° 时会误判，_reanchor_pose 又把位姿锚到
+# "以为"的格心——deform 随机游走实测落点残差最大 36.6cm）。真按 ±18cm 收，
+# 会拿一个已经不可信的位姿把好局误熔断（该场景实测：面板4 之后整局被误中止）。
+# **真正管住"继续动"的是上面三条**：转向预算 360°、停转/来回摆判据、前压封顶。
+# 越界即站立并**中止整局**（不再搜索下一格）——走下台面的代价远大于丢分。
+VIS_FIELD_X_CM = (-33.0, 133.0)
+VIS_FIELD_Y_CM = (-48.0, 133.0)
+
+# =====================================================================
+# 容错预算
+# =====================================================================
+TARGET_TIME_BUDGET_S = 110.0   # 单格软预算（15min/7格 ≈ 128s，留裕量）
+TOTAL_TIME_BUDGET_S = 780.0    # 全局看门狗 13min（给上下场留 2min）
+# ---- 单格硬熔断（2026-09-11 真机"终点不停"后新增，安全项） ----
+# 现场现象：走到第 7 块面板后机器人仍在继续行动；日志显示它并没有"越界"，
+# 而是第 7 格一直没确认到位，于是"搜索→对准→接近→低头→蹭步"整条链在单格内
+# 反复重试，直到格预算耗尽——人看着就是"到了终点不停"。
+# 旧实现的问题：超时只在**子循环入口**判（`while time.time() < t_end`），而真机
+# 拍照 ~0.7s/张（2026-09-13 实测，见 VIS_CAPTURE_COST_S），一次 `_see_target_any`
+# （头部五档）也有 ~4s，嵌套后单格实际能跑到 150s+，且过冲量随嵌套层数叠加。
+# 对策（三重护栏，任一触发即"本格记未确认、立刻返回"）：
+#   1) 时间：VIS_CELL_HARD_TIMEOUT_S，且在**每次拍照前**判（最细粒度，过冲
+#      最多 1 张照片 ~0.7s，而不是一个子循环 4s+）；
+#   2) 拍照数 VIS_CELL_HARD_FRAMES /   3) 动作数 VIS_CELL_HARD_ACTIONS：
+#      与时钟无关的确定性护栏——即使某环节出现"不拍照也不动作"的空转或
+#      "疯狂动作"的失控，也一定在有限步内退出（防新增死循环的保险丝）。
+# 取值依据（时间 70s）：
+#   - 总预算：全局 780s，布局扫真机实测 60~90s，剩 ~690s / 7 格 ≈ 98s/格；
+#     70s 给"搜索/对准/接近/低头"四段各留失败重试余量，同时保证**最坏情况**
+#     （7 格全熔断）90 + 7×70 = 580s < 780s，绝不拖过看门狗；
+#   - **实测余量充足**（2026-09-13 订正）：整局 206 张 × 0.70s ≈ 2.4 分钟，
+#     即使全部 7 格都跑到 70s 上限也只有 490s+90s < 780s。历史上"真机 2~4s/张"
+#     的估计**偏高约 4 倍**（疑似把网络 RTT 当成了拍照耗时），曾据此误判"整局会
+#     撞看门狗、单格只够 21 张"——按实测这个担心不成立。70s 仍是硬上限，
+#     它管的是"某个环节卡死"，不是"正常流程不够用"。
+#   - 仿真（sim，7 格全程只花 ~13s，单格最长 ≈3s；见 test_nine_grid_sim 的
+#     [进度] 行）：70s 在仿真里永不触发。
+VIS_CELL_HARD_TIMEOUT_S = 70.0
+# 全局剩余时间按剩余格数分摊的比例（自适应收缩）：硬熔断 = min(70s,
+# 剩余时间/剩余格数 × 0.9)。这样即使每格都被熔断，累计也不会超过全局看门狗
+# （分摊是望远镜求和：Σ 剩余/剩余格数 = 剩余时间），0.9 再留 10% 余量。
+# 下限 45s：避免最后一格因前面拖时而只剩几秒、连一次搜索都跑不完。
+VIS_CELL_HARD_BUDGET_FRAC = 0.9
+VIS_CELL_HARD_TIMEOUT_MIN_S = 45.0
+VIS_CELL_HARD_FRAMES = 140     # 单格拍照硬上限（基线整局 206 张、单格最多 ~38 张）
+VIS_CELL_HARD_ACTIONS = 300    # 单格动作硬上限（基线整局 176 次、单格最多 ~55 次）
+# ---- 单格"拍照数"预算（与时间预算绑定，让真机不会把时间耗在拍照上） ----
+# 为什么需要它：旧护栏 VIS_CELL_HARD_FRAMES=140 是死判据（单格最多 ~38 张，永不
+# 触发），拦不住"某环节反复拍照把单格时间耗光"。做法是把"本格还剩多少时间"
+# 换算成"还允许拍几张"：frame_budget = 本格硬预算秒数 ÷ 单张耗时估计。
+# 单张耗时估计由 state.capture_cost_s 提供（真机默认见 VIS_CAPTURE_COST_S；
+# 仿真里 SimNineGridRobot 声明一个极小值 ⇒ 该闸不会先于时间闸触发，回归可比）。
+#
+# **实测（2026-09-13 现场直接量，不要再用猜的）**：
+#     fswebcam 2592x1944 -S 3 × 6 次 = 0.74/0.61/0.66/0.61/0.63/0.61s（均值 0.62s）
+#     走代码路径 RobotState.capture_frame()（fswebcam + cv2.imread）= **0.70s**
+# 历史文档里"真机 2~4s/张"的估计**偏高约 4 倍**（很可能是把 RTT/弱链路读数当成
+# 了拍照耗时）。这个高估会把拍照预算压到 70/3×0.9 ≈ 21 张/格，而实测单格需求
+# 最多 61 张 ⇒ **预算会先把本来能跑完的好格砍掉**。故按实测取 0.9s（留 ~30%
+# 裕量覆盖进程/内存竞争），得到 ≈70 张/格，与 70s 时间闸等价而不更严。
+# 换机器人/换相机请重测（tools/field_probe_ninegrid.py 可复用其锁相机链路）。
+VIS_CAPTURE_COST_S = 0.9       # 机器人单张耗时（秒；2026-09-13 实测 0.70s + 裕量）
+VIS_CAPTURE_COST_SAFETY = 0.9  # 再留 10% 裕量（动作/转头也吃时间）
+
+
+# =====================================================================
+# 格阵拟合（布局扫 v2：机器人系相对几何，无站位/标定依赖）
+# =====================================================================
+# 数学原理：可见面板是已知 3×3 刚性格阵（间距 GRID_CELL_CM，格6恒空）经未知
+# 刚体变换（平移+旋转）后的带噪子集。拟合三步：
+#   1) 枚举"某对面板=相邻格"假设，其余面板在该假设格阵基下整数化，
+#      残差 ≤LATTICE_INLIER_CELL 格距者为内点（对角/跨格假设被共识自动否决）；
+#   2) 取内点最多的假设为格阵基（要求**全部输入数字**都是内点，否则判失败）；
+#   3) 枚举 **4 个真旋转**（不含镜像）作为格号朝向候选，硬约束过滤：
+#      无重复占格 / 覆盖门（每块板都在自己格号 0.35 格距内）/ 刚体残差门
+#      （干净子集 RMS）/ 入口侧谓词 / 列序谓词；"格6 恒空"优先但不硬杀
+#      （全灭时降级并告警，避免约定不符直接崩溃）。
+#
+# 为什么只枚举真旋转（手性论证，2026-09-11 修复 P0）：
+#   像素→机器人系（GroundHomography.from_pose((0,0),…)）与像素→场地系
+#   （project_ground_to_pixel）用的是同一套投影模型，两个坐标系都是
+#   x 右 / y 前 / z 上的右手系；格阵基 e2 = CCW90(e1) 也是右手构造，
+#   因此"格阵整数坐标 → 场地格号"的真解必然是真旋转（det = +1 族），
+#   镜像候选在几何上不可能成立。历史 bug：D4 把镜像一并枚举，镜像候选能
+#   通过全部旧约束并被选中 → 布局被转置且位姿自举崩溃。真实照片实测分离度
+#   （2701 干净点集）：真旋转 RMS 0.62cm vs 镜像 18.75cm。
+LATTICE_INLIER_CELL = 0.35      # 格阵基整数化/覆盖门残差上限（格距单位）
+LATTICE_RMS_MAX_CM = 8.0        # 干净子集刚体拟合 RMS 上限（cm）
+# 阈值依据（2026-09-11 现场照片实测）：真旋转族 0.6~4.5cm（含参数网格量化：
+# 偏移步 2.5° 在 1m 处 ≈4cm），镜像族 17.4~18.8cm → 取 8cm 兼顾现场裕量与
+# 区分度（真/镜像相差 2 倍以上）。过紧会让现场"3 轮重扫后直接失败丢整关"。
+LATTICE_RMS_MAX_ALL_CM = 0.35 * GRID_CELL_CM   # 无干净子集时的退化门（≈11.7cm）
+LATTICE_CLIPPED_WEIGHT = 0.3    # 仅由裁切观测支撑的数字，刚体拟合中的权重
+LATTICE_CENTER_PRIOR_X_CM = 50.0  # 入口居中先验（场地系 x，cm）
+LATTICE_CENTER_MARGIN_CM = 10.0   # 居中度差距小于此且解不同 → 判歧义（重扫）
+
+# ---- 参数网格自标定（见 NineGridLevel._lattice_grid_fit） ----
+# 偏移下界必须含 0：2026-09-11 现场照片实测，pitch1040 的最优偏移落在 10°
+# 边界上（有效俯角 ≈51.5°），网格下界留 0 才不会把真值卡在边界。
+LAYOUT_OFFSET_MIN_DEG = 0.0
+LAYOUT_OFFSET_MAX_DEG = 40.0
+LAYOUT_OFFSET_STEP_DEG = 2.5
+LAYOUT_HEIGHT_MIN_CM = 36.0
+LAYOUT_HEIGHT_MAX_CM = 70.0
+LAYOUT_HEIGHT_STEP_CM = 5.0
+LAYOUT_VOTE_MIN_FRAC = 0.6      # 胜出布局须占全部成功组合的比例
+LAYOUT_VOTE_MIN_COMBOS = 10     # 且组合数下限（防少数组合碰巧一致）
+# 像素域五参数精修门（见 _pixel_pose_calib）：重投影 RMS 上限 = 导航的 GN 门控
+# （GN_PIXEL_GATE）——自标定常数必须让导航级残差合格，否则真机会定位风暴。
+# 门用**中位残差**而不是 RMS：真实照片里少数面板会因光照/阴影/半合并使
+# 观测中心偏几十 px，RMS 被它们抬高（实测中位 ~20px 而 RMS ~110px），
+# 但参数估计由多数好观测驱动，故用稳健的统计量判定。
+PIXEL_CALIB_MED_MAX_PX = 40.0
+SPREAD_MAX_CM = 8.0             # 簇内离散告警阈值（cm；超出说明该数字观测不可信）
+# 歧义修复（E）交换余量：歧义数字的观测点必须"离竞争格比离本格近"这么多 cm
+# 才考虑交换格号（约 1/4 格距，远大于现场观测 1~2cm 的跨帧离散）。
+AMBIG_SWAP_MARGIN_CM = 8.0
+CLUSTER_RADIUS_CM = 6.0         # 同数字跨帧观测聚类半径（cm）：取最大一致簇
+LAYOUT_MIN_CLEAN_DIGITS = 6     # 提前结束扫描所需的"未裁切观测覆盖数字数"
+POSE_BOOTSTRAP_RMS_MAX_CM = 0.35 * GRID_CELL_CM  # 位姿自举刚体残差上限
+# 取"覆盖门同量级"（0.35 格距 ≈11.7cm）：布局若已被 lattice_assign 接受
+# （每点 ≤0.35 格距、干净子集 RMS ≤LATTICE_RMS_MAX_CM），自举就不该用更严的
+# 门把它否掉——否则会出现"布局通过但位姿被拒"的自相矛盾流程。区分"布局错"
+# 靠的是覆盖门 + 手性 RMS 门 + 规则/入口侧/列序谓词，不靠本门。
+POSE_BOOTSTRAP_X_RANGE = (-10.0, 110.0)   # 自举位姿合理性门（场地系 cm）
+POSE_BOOTSTRAP_Y_RANGE = (-45.0, 105.0)   # 入口在场外，y 允许负值
+
+# 布局扫一次拟合的完整结果（cells=None 表示失败；见 _lattice_grid_fit）
+# pose = 像素域精修得到的位姿 (x, y, θ)（None = 未收敛，回退刚体自举）
+LatticeFit = namedtuple(
+    "LatticeFit",
+    "cells info offset_deg cam_height_cm pts_robot clean weights "
+    "rms_clean_cm rms_all_cm spread_cm res_max_cm warnings pose")
+
+
+def _pixel_pose_calib(entries, p0, off0, h0, iters=12):
+    """像素域五参数联合精修 (x, y, θ, 安装偏移, 相机高度) → (pose5, rms_px)
+
+    为什么需要：格阵刚性判据只约束"这批点是不是 33.3cm 格阵"，(安装偏移,
+    相机高度) 存在一条**等价退化谷**——sim 实测 (18.5°, 56cm) 与 (19.5°, 59cm)
+    的刚体 RMS 都是 0.30cm，但导航用的投影对谷内位置很敏感：高度差 3cm 会让
+    GN 残差从 <1px 涨到 16~23px，直接触发"定位风暴"（拍照数爆表）。
+    像素域目标用的是完整投影模型（含裁切感知观测），谷被消掉。
+
+    entries: [(格心场地坐标, 观测像素, head_pulse, 裁切?, pitch_pulse), ...]
+    与导航同一残差定义 + Cauchy 鲁棒 + 弱先验（观测少时仍可解）。
+    无效（面板跑到相机背后/参数越界）返回 (None, None)。
+    """
+    ent = [(np.asarray(g, dtype=np.float64), np.asarray(px, dtype=np.float64),
+            int(head), bool(cl), int(pitch))
+           for g, px, head, cl, pitch in entries]
+    if len(ent) < 4:
+        return None, None, None
+    w_obs = np.array([1.0 if not cl else 0.6 for _g, _px, _h, cl, _p in ent])
+    sig = np.array([20.0, 20.0, np.radians(20.0), 12.0, 20.0])  # 弱先验 σ
+    ref = np.array([p0[0], p0[1], p0[2], float(off0), float(h0)], dtype=np.float64)
+
+    def resid(p):
+        out = np.empty((len(ent), 2))
+        for k, (g, px, head, cl, pitch) in enumerate(ent):
+            # 有效性守卫：观测点当初是在画幅内被检出的，若预测中心跑到画幅外
+            # 很远（或面板跑到相机背后），这一步长把参数推到了不自洽处 →
+            # 视为无效，由线搜索缩步。否则优化器会"收敛"到把面板甩出画外的
+            # 大残差解（实测真实照片集上出现干净残差 2.6e4 px 的假收敛）。
+            qc = project_ground_to_pixel(g, p[0], p[1], p[2], pitch, head,
+                                         pitch_offset_deg=p[3],
+                                         cam_height_cm=p[4])[0]
+            if not np.all(np.isfinite(qc)) or not (
+                    -1500.0 <= qc[0] <= CAMERA_WIDTH + 1500.0
+                    and -1500.0 <= qc[1] <= CAMERA_HEIGHT + 1500.0):
+                return None
+            if cl:
+                q = clipped_quad_centroid(g, p[0], p[1], p[2], pitch, head,
+                                          pitch_offset_deg=p[3],
+                                          cam_height_cm=p[4])
+            else:
+                q = qc
+            if q is None:
+                return None
+            q = np.asarray(q, dtype=np.float64)
+            if not np.all(np.isfinite(q)):
+                return None
+            out[k] = q - px
+        return out
+
+    p = ref.copy()
+    r = resid(p)
+    if r is None:
+        return None, None, None
+    steps = np.array([0.5, 0.5, np.radians(0.5), 0.5, 1.0])
+    dmax = np.array([3.0, 3.0, np.radians(3.0), 3.0, 3.0])
+    for _it in range(iters):
+        per = np.linalg.norm(r, axis=1)
+        # Cauchy 权重按观测给（与 _gn_run 同一鲁棒核）
+        w = w_obs / (1.0 + (per / GN_CAUCHY_C_PX) ** 2)
+        J = np.zeros((r.size + 5, 5))
+        for j in range(5):
+            e = np.zeros(5)
+            e[j] = steps[j]
+            r1 = resid(p + e)
+            r2 = resid(p - e)
+            if r1 is None or r2 is None:
+                return None, None, None
+            J[:r.size, j] = ((r1 - r2) / (2.0 * steps[j])).ravel()
+        for j in range(5):                      # 弱先验行
+            J[r.size + j, j] = 1.0 / sig[j]
+        rp = np.concatenate([r.ravel(), (p - ref) / sig])
+        wf = np.concatenate([np.repeat(w, 2), np.ones(5)])
+        try:
+            d = np.linalg.solve(J.T @ (J * wf[:, None]) + 1e-8 * np.eye(5),
+                                -(J.T @ (rp * wf)))
+        except np.linalg.LinAlgError:
+            return None, None, None
+        d = np.clip(d, -dmax, dmax)
+        ok = False
+        for _ls in range(6):
+            cand = p + d
+            if (-15.0 <= cand[3] <= 55.0 and 25.0 <= cand[4] <= 100.0
+                    and abs(cand[0] - ref[0]) <= 60.0
+                    and abs(cand[1] - ref[1]) <= 60.0
+                    and abs(_wrap_angle(cand[2] - ref[2])) <= np.radians(40.0)):
+                rc = resid(cand)
+                if rc is not None:
+                    p, r, ok = cand, rc, True
+                    break
+            d = d * 0.5
+        if not ok:
+            break
+        if np.max(np.abs(d[:3])) < 1e-3 and abs(d[3]) < 0.02 and abs(d[4]) < 0.02:
+            break
+    per = np.linalg.norm(r, axis=1)
+    cl = np.array([c for _g, _px, _h, c, _p in ent])
+    rms_all = float(np.sqrt(np.mean(per ** 2)))
+    med_clean = (float(np.median(per[~cl]))
+                 if int(np.count_nonzero(~cl)) >= 3 else float(np.median(per)))
+    return p, rms_all, med_clean
+
+
+def _fit_failure(info, warnings=None):
+    """构造失败的 LatticeFit（cells=None）；见 _lattice_grid_fit"""
+    return LatticeFit(cells=None, info=info, offset_deg=0.0, cam_height_cm=0.0,
+                      pts_robot={}, clean=set(), weights={}, rms_clean_cm=None,
+                      rms_all_cm=None, spread_cm={}, res_max_cm=None,
+                      warnings=list(warnings or []), pose=None)
+
+
+def _rigid_fit_2d(gs, ps, w=None):
+    """p ≈ R·g + t 的 2D **加权**刚体最小二乘（R 为真旋转）。
+
+    gs: (N,2) 场地格心；ps: (N,2) 机器人系点；w: (N,) 权重（缺省 1）。
+    返回 (R, t, rms_cm, per_point_cm)。R 把场地系映射到机器人系，故
+    机器人在场地系的位置 = -Rᵀ·t（机器人系原点 p=0 的场地坐标）。
+    """
+    gs = np.asarray(gs, dtype=np.float64)
+    ps = np.asarray(ps, dtype=np.float64)
+    ww = np.ones(len(gs)) if w is None else np.asarray(w, dtype=np.float64)
+    sw = float(ww.sum())
+    gm = (gs * ww[:, None]).sum(axis=0) / sw
+    pm = (ps * ww[:, None]).sum(axis=0) / sw
+    Hm = ((gs - gm) * ww[:, None]).T @ (ps - pm)
+    U, _S, Vt = np.linalg.svd(Hm)
+    d = np.sign(np.linalg.det(Vt.T @ U.T))
+    Rm = Vt.T @ np.diag([1.0, d]) @ U.T
+    tt = pm - Rm @ gm
+    per = np.linalg.norm(ps - ((Rm @ gs.T).T + tt), axis=1)
+    return Rm, tt, float(np.sqrt(np.mean(per ** 2))), per
+
+
+def ambiguity_repair(cells, pick, ambig, margin_cm=None):
+    """歧义修复（E）：用格阵共识复核颜色有歧义、形状又没定案的面板
+
+    输入：cells = {数字: 格号}（格阵投票胜出解）；pick = 该解的拟合明细
+    （含 med=各数字机器人系点、clean=可信数字集合）；ambig = {数字: {竞争数字}}。
+    做法：
+      1. 只用**无歧义且可信**的数字拟合刚体变换（场地格心 → 机器人系点）；
+      2. 对每个歧义数字 d 与其竞争数字 c（两者都已在 cells 里）：比较 d 的观测点
+         到"格(d)"与"格(c)"预测位置的距离，若后者近出一个余量以上 ⇒ 交换二者格号；
+      3. 交换后用全点重算残差，**只有残差变小才接受**（否则回退）。
+    返回 (cells, notes)：notes 为人类可读的修复记录（无修复时为空）。
+    几何不可判（置信数字 <3、缺观测、候选不在解里）时原样返回——宁可不动。
+    """
+    margin_cm = AMBIG_SWAP_MARGIN_CM if margin_cm is None else margin_cm
+    notes = []
+    if not ambig or not cells or pick is None:
+        return cells, notes
+    med = pick.get("med") or {}
+    pairs = []
+    for d, cands in ambig.items():
+        if d not in cells or d not in med:
+            continue
+        for c in cands:
+            if c in cells and c != d and c in med and (c, d) not in pairs:
+                pairs.append((d, c))
+    if not pairs:
+        return cells, notes
+    clean = set(pick.get("clean") or ())
+    base_amb = {d for pr in pairs for d in pr}
+    ref = [d for d in cells if d in med and d in clean and d not in base_amb]
+    if len(ref) < 3:                      # 可信参照不足：换用全部非歧义数字
+        ref = [d for d in cells if d in med and d not in base_amb]
+    if len(ref) < 3:
+        return cells, notes
+
+    def _resid(cells_now):
+        ds = sorted(d for d in cells_now if d in med)
+        gs = np.array([grid_cell_center(cells_now[d]) for d in ds])
+        ps = np.array([med[d] for d in ds])
+        w = np.array([1.0 if d in clean else LATTICE_CLIPPED_WEIGHT for d in ds])
+        _R, _t, _rms, per = _rigid_fit_2d(gs, ps, w)
+        return float(np.sqrt(np.mean(np.asarray(per) ** 2)))
+
+    # 参照刚体变换：只用参考数字（歧义数字的观测不参与，避免"自己证明自己"）
+    gs = np.array([grid_cell_center(cells[d]) for d in sorted(ref)])
+    ps = np.array([med[d] for d in sorted(ref)])
+    R, t, _rms, _per = _rigid_fit_2d(gs, ps, np.ones(len(ref)))
+
+    def _pred(cell):
+        return R @ grid_cell_center(cell) + t
+
+    new_cells = dict(cells)
+    for d, c in pairs:
+        pd, pc = np.asarray(med[d]), np.asarray(med[c])
+        d_own = float(np.linalg.norm(pd - _pred(cells[d])))
+        d_other = float(np.linalg.norm(pd - _pred(cells[c])))
+        # 对称检查：竞争数字 c 的观测也应更靠近格(d)，否则不动（可能只是噪声）
+        c_own = float(np.linalg.norm(pc - _pred(cells[c])))
+        c_other = float(np.linalg.norm(pc - _pred(cells[d])))
+        if d_other + margin_cm >= d_own or c_other + margin_cm >= c_own:
+            continue
+        cand = dict(new_cells)
+        cand[d], cand[c] = new_cells[c], new_cells[d]
+        if _resid(cand) < _resid(new_cells):
+            notes.append(
+                f"数字 {d}↔{c} 交换格号（{new_cells[d]}↔{new_cells[c]}）："
+                f"观测点距对格 {d_own:.1f}cm、距竞争格 {d_other:.1f}cm"
+                f"（余量 {margin_cm:.0f}cm），交换后残差下降")
+            new_cells = cand
+    return new_cells, notes
+
+
+
+def lattice_assign(points_by_digit, spacing_cm=GRID_CELL_CM, weights=None,
+                   clean=None):
+    """机器人系相对几何格阵拟合：{digit: (x,y)} → ({digit: cell}, info, ranked)
+
+    points_by_digit: 各面板在**机器人系**地面坐标（像素经名义高度/俯仰/
+    头部角的单应映射，与场地系无关）。
+    weights: {digit: w} 刚体拟合权重（缺省 1.0；仅裁切观测支撑的数字应降权，
+    见 LATTICE_CLIPPED_WEIGHT）。
+    clean:   可信（未裁切）数字集合；刚体残差门优先在它上面判（<3 个时退化
+    为全点门）。手性/参数错时镜像族会在这里被拒。
+    返回 (cells|None, info, ranked)：
+      cells  = 数字→格号，覆盖**全部**输入数字（覆盖不足即整体判失败）；
+      ranked = 全部可行候选（rule_ok / cam_x / rms_* 字段），供诊断与调用方自检。
+
+    算法（假设-共识）：
+      1) 枚举"某对面板=相邻格"假设（长度带内全部有序对），把其余面板在
+         该假设的格阵基下整数化，残差 ≤LATTICE_INLIER_CELL 格距者为内点；
+      2) 取内点最多的假设（并列取残差和最小）；对角/跨格假设会被共识
+         自动否决（第三块板落不到整数格上）；
+      3) 对内点整数坐标枚举 4 个真旋转（非镜像，见本节顶部手性论证），
+         硬约束过滤 + 居中先验裁决；多解不猜（判歧义，由调用方前进一步重扫）。
+    """
+    digits = sorted(points_by_digit)
+    if len(digits) < 4:
+        return None, f"可见面板仅 {len(digits)} 块（需≥4 才能定朝向）", []
+    pts = {d: np.asarray(points_by_digit[d], dtype=np.float64) for d in digits}
+
+    # ---- 1) 假设-共识：找最优格阵基与整数坐标 ----
+    best = None  # ((n_inliers, -res_sum), int_coords, inliers)
+    for i in digits:
+        for j in digits:
+            if i == j:
+                continue
+            v = pts[j] - pts[i]
+            L = float(np.linalg.norm(v))
+            if not 0.55 * spacing_cm <= L <= 1.7 * spacing_cm:
+                continue
+            e1 = v / L
+            e2 = np.array([-e1[1], e1[0]])
+            coords, res = {}, {}
+            for d in digits:
+                w = (pts[d] - pts[i]) / spacing_cm
+                a, b = float(w @ e1), float(w @ e2)
+                ia, ib = int(round(a)), int(round(b))
+                coords[d] = (ia, ib)
+                res[d] = max(abs(a - ia), abs(b - ib))
+            inliers = [d for d in digits if res[d] <= LATTICE_INLIER_CELL]
+            if len(inliers) < len(digits):
+                continue  # 覆盖率门：任一块板落不到整数格 → 假设或观测有误
+            intc = {d: coords[d] for d in inliers}
+            as_ = [a for a, _ in intc.values()]
+            bs = [b for _, b in intc.values()]
+            if max(as_) - min(as_) > 2 or max(bs) - min(bs) > 2:
+                continue
+            if len(set(intc.values())) != len(intc):
+                continue  # 两板落同一格 → 假设不成立
+            score = (len(inliers), -sum(res[d] for d in inliers))
+            if best is None or score > best[0]:
+                best = (score, intc, inliers)
+    if best is None:
+        return (None, "无一致格阵假设（面板相对位置与 33cm 格阵不符，或存在"
+                      "坏观测/假阳，需重扫）", [])
+    _score, ij, inliers = best
+
+    # ---- 2) 4 个真旋转枚举：硬约束 + 刚体残差门 + 入口侧/列序谓词 ----
+    # 行号/列号约定：行0=远排、行2=入口排（格6-8）；列0=入口视角左
+    # （标号约定单一真源 = core/ground_homography.ROW0_IS_FAR / COL0_IS_LEFT，
+    #  格号构造统一走 cell_index）。
+    # 入口侧判定：对每个候选朝向做 2D 刚体 Procrustes（网格系→机器人系），
+    # 机器人在网格系的 y 必须小于所有可见面板的网格 y（+半格容差）——
+    # 即"机器人从入口侧进入、位于全部可见面板之前"的严格表达。
+    # （"入口行均值距离最近"这类启发式在侧偏+大偏航下会误判，弃用）
+    # "格6 恒空"是本关规则硬约束，但它与"机位/标号约定"耦合：若 4 个真旋转
+    # 里无一满足，则降级接受并打警告，避免约定不符时直接崩溃、白丢整关。
+    ds = sorted(ij)                    # 覆盖率门保证 == sorted(digits)
+    w_all = np.array([(weights or {}).get(d, 1.0) for d in ds])
+    clean_set = set(clean or ())
+    feet = []
+    for rot in range(4):               # 只枚举真旋转（手性论证见本节顶部）
+        mapping = {}
+        for d, (a, b) in ij.items():
+            aa, bb = a, b
+            for _ in range(rot):
+                aa, bb = bb, -aa
+            mapping[d] = (aa, bb)
+        amin = min(a for a, _ in mapping.values())
+        bmin = min(b for _, b in mapping.values())
+        cells = {d: cell_index(a - amin, b - bmin)
+                 for d, (a, b) in mapping.items()}
+        if len(set(cells.values())) != len(cells):
+            continue  # 两板落同一格 → 该朝向不成立
+        gs = np.array([grid_cell_center(cells[d]) for d in ds])
+        ps = np.array([pts[d] for d in ds])
+        Rm, tt, rms_all, per = _rigid_fit_2d(gs, ps, w_all)
+        # 覆盖率门：每块板都必须落在自己格号的 0.35 格距内
+        if float(np.max(per)) > LATTICE_INLIER_CELL * spacing_cm:
+            continue
+        idx = [k for k, d in enumerate(ds) if d in clean_set]
+        rms_clean = (float(np.sqrt(np.mean(per[idx] ** 2)))
+                     if len(idx) >= 3 else None)
+        gate = (LATTICE_RMS_MAX_CM if rms_clean is not None
+                else LATTICE_RMS_MAX_ALL_CM)
+        if (rms_clean if rms_clean is not None else rms_all) > gate:
+            continue
+        cam_grid = -Rm.T @ tt
+        # 入口侧精确谓词：机器人必须在全部可见面板的入口侧
+        if cam_grid[1] >= float(np.min(gs[:, 1])) + GRID_CELL_CM / 2:
+            continue  # 机器人不在全部可见面板的入口侧 → 朝向错
+        # 列0 必须在机器人系更左（x 更小；列间 66.6cm ≫ 偏航余弦衰减）
+        col_x = {}
+        for d, cell in cells.items():
+            col_x.setdefault(cell % 3, []).append(pts[d][0])
+        if 0 in col_x and 2 in col_x \
+                and float(np.mean(col_x[0])) > float(np.mean(col_x[2])):
+            continue
+        feet.append({"rule_ok": 6 not in cells.values(),
+                     "cells": {d: int(cells[d]) for d in ds},
+                     "cam_x": float(cam_grid[0]), "cam_y": float(cam_grid[1]),
+                     "rms_clean": rms_clean, "rms_all": rms_all,
+                     "res_max_cm": float(np.max(per))})
+
+    if not feet:
+        return None, ("4 个真旋转均不满足约束（无重复格 / 覆盖 0.35 格距门 / "
+                      "刚体残差门 / 入口侧 / 列序）——可见子集不对称、观测"
+                      "有误或标号约定不符"), []
+
+    # 排序：先满足"格6恒空"（规则），再入口居中先验（场地入口在底边中央
+    # x=50），最后比刚体残差。多解且居中度相近 → 判歧义（调用方前进一步重扫）。
+    def _rank_key(fc):
+        return (not fc["rule_ok"],
+                abs(fc["cam_x"] - LATTICE_CENTER_PRIOR_X_CM),
+                fc["rms_clean"] if fc["rms_clean"] is not None
+                else fc["rms_all"])
+
+    ranked = sorted(feet, key=_rank_key)
+    pool = [fc for fc in ranked if fc["rule_ok"]] or ranked
+    if len(pool) > 1:
+        margin = (abs(pool[1]["cam_x"] - LATTICE_CENTER_PRIOR_X_CM)
+                  - abs(pool[0]["cam_x"] - LATTICE_CENTER_PRIOR_X_CM))
+        if margin < LATTICE_CENTER_MARGIN_CM \
+                and pool[1]["cells"] != pool[0]["cells"]:
+            return None, (f"朝向歧义（{len(pool)} 个可行解且居中度相近）"
+                          "——前进一步重扫消解"), ranked
+    best = pool[0]
+    if not best["rule_ok"]:
+        return (dict(best["cells"]),
+                "格阵拟合成功（警告：格位 6 有面板占据——数字与格位的对应关系"
+                "或站位存疑，需现场逐格核对）", ranked)
+    if best["rms_clean"] is None:
+        info = (f"格阵拟合成功（{len(feet)} 个可行的格阵朝向，"
+                "无完整可见子集，改用全部观测的均方根残差判据）")
+    else:
+        info = (f"格阵拟合成功（{len(feet)} 个可行的格阵朝向，"
+                f"完整可见观测的均方根残差 {best['rms_clean']:.1f}cm）")
+    return dict(best["cells"]), info, ranked
+
+
+# =====================================================================
+# 投影与工具
+# =====================================================================
+
+# 画幅矩形（裁切预测用；与 camera_config 的原生分辨率一致）
+_IMAGE_RECT = np.array([[0.0, 0.0], [CAMERA_WIDTH, 0.0],
+                        [CAMERA_WIDTH, CAMERA_HEIGHT],
+                        [0.0, CAMERA_HEIGHT]], dtype=np.float32)
+
+
+def _camera_rotation(th_rad, pitch_pulse, head_pulse,
+                     pitch_offset_deg=CAM_PITCH_MOUNT_OFFSET_DEG):
+    """世界->相机旋转矩阵（行 = 相机三轴在世界系方向）
+
+    有效俯仰 = 舵机名义角 + 安装下俯偏移（2026-09-11 现场实测：名义 27°
+    实际 ≈45°+，见 camera_config.CAM_PITCH_MOUNT_OFFSET_DEG）。
+    头部偏航：脉宽左转(>1500)为正，相机方位角 = 机体航向 − 头部角
+    （与 core/robot_core.pulse_to_angle、单测验证的补偿模型一致）。
+    """
+    a = np.radians((1500 - pitch_pulse) * SERVO_DEG_PER_US + pitch_offset_deg)
+    f = th_rad - np.radians((head_pulse - HEAD_CENTER) * SERVO_DEG_PER_US)
+    sa, ca = np.sin(a), np.cos(a)
+    sf, cf = np.sin(f), np.cos(f)
+    return np.vstack([np.array([cf, -sf, 0.0]),                    # 图像右
+                      np.array([-sa * sf, -sa * cf, -ca]),         # 图像下
+                      np.array([ca * sf, ca * cf, -sa])])          # 视轴
+
+
+def project_ground_to_pixel(pts_ground, x, y, th_rad, pitch_pulse,
+                            head_pulse=HEAD_CENTER,
+                            pitch_offset_deg=CAM_PITCH_MOUNT_OFFSET_DEG,
+                            cam_height_cm=CAM_HEIGHT_CM):
+    """格心(场地系 cm) → 像素：位姿 (x,y,θ) + 俯仰/头部档 + 真实内参/畸变"""
+    R = _camera_rotation(th_rad, pitch_pulse, head_pulse, pitch_offset_deg)
+    pts = np.atleast_2d(np.asarray(pts_ground, dtype=np.float64))
+    if pts.shape[1] == 2:
+        pts = np.column_stack([pts, np.zeros(len(pts))])  # 地面 z=0
+    diff = pts - np.array([x, y, cam_height_cm])  # 相机光心高度
+    p_cam = (R @ diff.T).T
+    norm = p_cam[:, :2] / p_cam[:, 2:3]
+    pts3 = np.column_stack([norm, np.ones(len(norm))]).reshape(-1, 1, 3)
+    pix, _ = cv2.projectPoints(pts3.astype(np.float32), np.zeros(3),
+                               np.zeros(3), CAMERA_INTRINSIC,
+                               CAMERA_DISTORTION)
+    return pix[:, 0, :]
+
+
+def clipped_quad_centroid(center_xy, x, y, th_rad, pitch_pulse,
+                          head_pulse=HEAD_CENTER, half_cm=PANEL_HALF_CM,
+                          pitch_offset_deg=CAM_PITCH_MOUNT_OFFSET_DEG,
+                          cam_height_cm=CAM_HEIGHT_CM):
+    """裁切感知预测：面板四角投影 → 与画幅求交 → 交多边形面积质心
+
+    与检测端 hull_centroid_px 同定义（都是"可见区域"的面积质心），
+    因此被画幅裁切时仍然成立；未裁切时也成立（只是精度略低于中心模型）。
+    面板角点落到相机背后（z<=0.05）或投影非有限时返回 None（该起点判无效）；
+    面板在画外时返回"四角钳到画幅后的均值"，保持数值雅可比连续。
+    """
+    if cv2 is None:
+        return None
+    R = _camera_rotation(th_rad, pitch_pulse, head_pulse)
+    cx, cy = float(center_xy[0]), float(center_xy[1])
+    corners = np.array([[cx - half_cm, cy - half_cm],
+                        [cx + half_cm, cy - half_cm],
+                        [cx + half_cm, cy + half_cm],
+                        [cx - half_cm, cy + half_cm]], dtype=np.float64)
+    pts = np.column_stack([corners, np.zeros(4)])
+    p_cam = (R @ (pts - np.array([x, y, cam_height_cm])).T).T
+    if np.any(p_cam[:, 2] <= 0.05):
+        return None
+    norm = p_cam[:, :2] / p_cam[:, 2:3]
+    pts3 = np.column_stack([norm, np.ones(len(norm))]).reshape(-1, 1, 3)
+    pix, _ = cv2.projectPoints(pts3.astype(np.float32), np.zeros(3),
+                               np.zeros(3), CAMERA_INTRINSIC,
+                               CAMERA_DISTORTION)
+    pix = pix[:, 0, :]
+    if not np.all(np.isfinite(pix)):
+        return None
+    # 画外角点投影可达 1e5+（面板近边贴相机平面），这是合法输入——
+    # 交给 intersectConvexConvex 裁到画幅即可；只防 float32 溢出。
+    pix = np.clip(pix, -1e6, 1e6)
+    area, inter = cv2.intersectConvexConvex(pix.astype(np.float32),
+                                            _IMAGE_RECT)
+    if inter is not None and len(inter) >= 3 and area > 1e-9:
+        m = cv2.moments(inter)
+        if m["m00"] > 1e-9:
+            return np.array([m["m10"] / m["m00"], m["m01"] / m["m00"]])
+    # 投影与画幅无交集（或退化）：返回"四角钳到画幅后的均值"作极限。
+    # 必须连续——数值雅可比对位姿扰动 ±0.5cm/±0.5° 时，边缘处的交集可能
+    # 一步消失；若直接返回 None 会让整个起点解算失败（实测某位姿 6 点全丢）。
+    return np.clip(pix, [0.0, 0.0],
+                   [CAMERA_WIDTH, CAMERA_HEIGHT]).mean(axis=0)
+
+
+def _wrap_angle(a):
+    """角度弧度归一化到 (-π, π]"""
+    while a > np.pi:
+        a -= 2 * np.pi
+    while a <= -np.pi:
+        a += 2 * np.pi
+    return a
+# =====================================================================
+# 两条路线共用的机制（动作、预算、布局扫、地图像核验、投影）
+# =====================================================================
+
+class NineGridShared:
+    """数字宫格两条路线共用的部分：逐格主流程、护栏、布局扫、投影、位置核对
+
+    子类只需实现 `_drive_to_panel(digit)`：
+      · `levels/nine_grid.py`          统一决策（三档分区，一个循环走完）；
+      · `levels/nine_grid_three_stage.py` 三段式（对准 → 接近 → 到达）。
+    """
+    def __init__(self, state: RobotState, start_cam_xy=(50.0, -20.0),
+                 start_bearing_deg=0.0):
+        self.state = state
+        self.detector = NineGridDetector()
+        self.start_cam_xy = np.array(start_cam_xy, dtype=np.float64)
+        self.start_bearing_deg = float(start_bearing_deg)
+        self.digit_cell = {}        # 数字(1..7) -> 位置编号(0..8)
+        self.cell_conflict = set()  # 布局扫时仲裁冲突的格（近距复核）
+        self.deadline = None
+        # 位姿 (x, y, θrad)：相机光心地面投影 + 机体航向（右正弧度）
+        self.pose = np.array([self.start_cam_xy[0], self.start_cam_xy[1],
+                              np.radians(self.start_bearing_deg)])
+        # 自适应小转状态（整场共享：地面条件一致，一次失效全场大转）
+        self._small_turn_deg = SMALL_TURN_INIT_DEG
+        self._small_turn_usable = True
+        self._small_turn_fail = 0   # 连续失效批次数（>=SMALL_TURN_FAIL_BATCHES 升级）
+        self._turn_updates = 0      # EMA 更新次数（前几次用快收敛）
+        self._last_turn = None      # (action, times)：定位丢失时撤销转向用
+        self._last_big_turn = None  # (方向, 转前|bearing|)：大转防振荡
+        self._turn_oscillation = False  # 大转振荡已发生 → 改用航向偏置接近
+        # 相机安装/高度常数（机器人级，缺省取 camera_config）；layout_scan
+        # 运行时用格阵拟合参数网格自标定刷新，GN 投影随动
+        self._pitch_offset_deg = CAM_PITCH_MOUNT_OFFSET_DEG
+        self._cam_height_cm = CAM_HEIGHT_CM
+        # 到达确认状态（每格重置）
+        self._target_seen = False   # 接近/进入段是否检出过目标数字面板
+        self._loc_count = 0         # 本格定位次数（时间预算诊断）
+        # 转向/离场护栏状态（见 VIS_TURN_* / VIS_FIELD_*；每格重置）
+        self._cell_turn_cmd_deg = 0.0   # 本格累计**命令**转角（含搜索/对准/大转）
+        self._align_stall = 0       # 连续"转向后 |yaw| 没改善"次数（打转判据）
+        self._align_worsen = 0      # 连续"同号误差被转得更大"次数（方向自检）
+        self._align_flips = 0       # 死区外左右来回摆的次数（打转判据）
+        self._align_ladder = 0      # 打转升级阶梯档位（1 换大转 / 2 放弃对准 / 3 熔断）
+        self._align_sign = 1.0      # 对准转向符号；方向自检判反了取 -1（整局保持）
+        self._zone_last = None      # 上一次分区判定（迟滞用；每格重置）
+        self._tail_rot_blocked = 0  # 收尾禁转拦下的转向次数（活性遥测，见 A/B 工具）
+        # MAP-ANCHOR 遥测（诚实记录"锚可用率"——它决定这套机制值不值得留）
+        self._anchor_calls = 0      # 调用次数（整局）
+        self._anchor_ok = 0         # 成功解出锚的次数（整局）
+        self._anchor_log = []       # 锚日志（只留最近若干条，避免日志爆炸）
+        self._anchor_drift = []     # 锚位姿 vs 死推位姿的偏差（cm，诊断用）
+        self._anchor_last = None    # 最近一次成功的锚（供搜索提示用）
+        self._anchor_quiet = False  # True 时 `_anchor_stat` 不计数不打印（逆序补试）
+        self._abort_level = None    # 非 None = 整局收手原因（离场护栏）
+        # 诚实遥测：本格"到达"的依据 / 交棒 yaw / 落点死推残差（不参与决策）
+        self._arrive_evidence = None
+        self._cell_handoff_yaw = None
+        self._cell_arrive_resid_cm = None
+        # 死推判据命中证据（整局累计，不每格清空——用于回答"死推到底在帮倒忙吗"）
+        self._dr_hits = []          # ["stop"/"fallback", ...]
+        self._dr_hit_landing = []   # 命中时的**真值**离格心距离（cm；真机为空）
+        # 几何到达判据证据（WS4；整局累计）
+        self._anchor_arrive_hits = 0    # 几何判据成立次数（活性证据）
+        self._anchor_arrive_d = []      # 每次锚可用时"实测离格心"的距离（cm）
+        # 单格硬熔断状态（每格重置；见 VIS_CELL_HARD_* 常量）
+        self._cell_deadline = None  # 本格硬熔断时刻（None = 未开预算，不拦）
+        self._cell_t0 = None        # 本格开始时刻（日志用）
+        self._cell_frames = 0       # 本格拍照数
+        self._cell_actions = 0      # 本格动作数
+        self._cell_tripped = None   # 熔断原因（None = 未熔断）
+        self.cell_trips = {}        # {数字: 熔断原因}——未确认格的可观测记录
+        # FSM 阶段标签（纯诊断：日志/仿真可视化用，不参与任何决策）
+        self.phase = "INIT"
+        # 逐阶段拍照计数（真机时间预算诊断：拍照 ~0.7s/张，7 格总预算 780s）
+        self.phase_frames = {}
+        # 逐格**落点真值**留档：{digit: (离格心 cm, 来源)}。来源 "真值"（仿真有
+        # state.pos）或 "死推"（真机只有位姿估计）。用于回归时直接抓"假到达"
+        # ——视觉判 ✓ 但真值不在格上（2026-09-13 面板3 就是 89.5cm 判 ✓）。
+        self.panel_landing = {}
+
+    # =================================================================
+    # 单格硬熔断（安全项：宁可早停记未确认，也不要失控）
+    # =================================================================
+
+    def _cell_budget_begin(self, digit):
+        """开本格预算：返回**软预算** t_end（旧语义），并装好硬熔断闸
+
+        软预算（TARGET_TIME_BUDGET_S）= 各子循环入口的既有超时判据，保持
+        不变以最小化行为改动；硬熔断（VIS_CELL_HARD_*）= 新增的、在**每次
+        拍照前**都判的细粒度闸，先于软预算生效（70s < 110s），保证任何环节
+        卡住都在有限时间内退出。两者都取 min(self.deadline)，绝不越过全局
+        看门狗。
+        """
+        now = time.time()
+        if self.deadline is None:       # 直接调用 go_to_panel（测试/工具）时的兜底
+            self.deadline = now + TOTAL_TIME_BUDGET_S
+        t_soft = min(now + TARGET_TIME_BUDGET_S, self.deadline)
+        cells_left = max(1, 8 - int(digit))          # 含本格
+        share = (self.deadline - now) / cells_left * VIS_CELL_HARD_BUDGET_FRAC
+        hard = float(np.clip(share, VIS_CELL_HARD_TIMEOUT_MIN_S,
+                             VIS_CELL_HARD_TIMEOUT_S))
+        self._cell_deadline = min(now + hard, t_soft)
+        self._cell_t0 = now
+        self._cell_frames = 0
+        # 单格拍照预算：本格时间预算 ÷ 单张耗时估计（见 VIS_CAPTURE_COST_*）。
+        # 真机上它 ≈ 70/3×0.9 = 21 张——与"70s 里真能拍几张"一致，所以它才是
+        # 真机真正生效的那道闸；仿真里 state 声明单张≈0 → 该闸不会先于时间闸
+        # 触发，于是回归结果不受影响，而"真机跑不完"这件事在仿真里也能被看见。
+        self._cell_frame_budget = int(np.clip(
+            (self._cell_deadline - now)
+            / max(float(getattr(self.state, "capture_cost_s",
+                                VIS_CAPTURE_COST_S)), 1e-3)
+            * VIS_CAPTURE_COST_SAFETY,
+            1.0, float(VIS_CELL_HARD_FRAMES)))
+        self._cell_actions = 0
+        self._cell_tripped = None
+        # 转向护栏 + 诚实遥测（每格重置；_align_sign 是整局标定，刻意不重置）
+        self._cell_turn_cmd_deg = 0.0
+        self._align_stall = 0
+        self._align_worsen = 0
+        self._align_flips = 0
+        self._align_ladder = 0
+        self._zone_last = None      # 迟滞状态每格重置（新格 = 新几何）
+        self._arrive_evidence = None
+        self._cell_handoff_yaw = None
+        self._cell_arrive_resid_cm = None
+        print(f"[护栏] 面板{digit} 本格限额：最长 {hard:.0f}s"
+              f"（提示阈值 {(t_soft - now):.0f}s，全局剩余 "
+              f"{self.deadline - now:.0f}s／{cells_left} 格）"
+              f"｜拍照上限 {self._cell_frame_budget} 张"
+              f"（按单张 {float(getattr(self.state, 'capture_cost_s', VIS_CAPTURE_COST_S)):.1f}s 折算）")
+        return t_soft
+
+    def _cell_expired(self):
+        """单格硬熔断判据（**每次拍照/动作前**调用；True = 本格立即收手）
+
+        三重护栏（时间 / 拍照数 / 动作数）任一超限即 True，并把原因记在
+        self._cell_tripped（供 run_level 汇总打印与 self.cell_trips 留档）。
+        设计上只"允许收手"，不改变任何既有判据的语义——所以它能在不引入
+        新死循环的前提下，兜住搜索/对准/接近/低头补步任一环节。
+        """
+        if self._cell_tripped is not None:      # 已熔断：保持熔断（不反复打印）
+            return True
+        reason = None
+        if self._cell_actions > VIS_CELL_HARD_ACTIONS:
+            reason = f"动作次数 {self._cell_actions} 次 > 上限 {VIS_CELL_HARD_ACTIONS} 次"
+        elif self._cell_frames > VIS_CELL_HARD_FRAMES:
+            reason = f"拍照 {self._cell_frames} 张 > 上限 {VIS_CELL_HARD_FRAMES} 张"
+        elif self._cell_frames > self._cell_frame_budget:
+            # 与时间预算等价的拍照闸（见 VIS_CAPTURE_COST_S）：真机上"拍满了"
+            # 就等于"时间快用完了"，但它在**拍照前**就能判，不必等时间闸响。
+            reason = (f"拍照 {self._cell_frames} 张 > 本格上限 "
+                      f"{self._cell_frame_budget} 张（按单张 "
+                      f"{float(getattr(self.state, 'capture_cost_s', VIS_CAPTURE_COST_S)):.1f}s"
+                      " 折算的时间限额）")
+        elif self._cell_deadline is not None \
+                and time.time() > self._cell_deadline:
+            reason = (f"本格已用时 {time.time() - self._cell_t0:.0f}s，"
+                      f"超过最长 {VIS_CELL_HARD_TIMEOUT_S:.0f}s")
+        if reason is None:
+            return False
+        self._cell_tripped = reason
+        return True
+
+    def _trip_cell(self, reason, abort_level=False):
+        """立即熔断本格（安全项统一出口）；abort_level=True 时整局一起收手
+
+        与 _cell_expired 的三重护栏同源：置 _cell_tripped 后，所有子循环在
+        下一次 _cell_expired() 处退出，go_to_panel 返回 False，run_level 记
+        "未确认"。**绝不"再试一次"**——现场教训：为了"再试一次"继续留在场上
+        动，代价是机器人转出场地。
+        """
+        if self._cell_tripped is None:
+            self._cell_tripped = reason
+        print(f"[护栏] {reason} → 本格终止，保持站立不动")
+        if abort_level and self._abort_level is None:
+            self._abort_level = reason
+        self.state.act("stand")
+        return True
+
+    def _field_guard(self):
+        """离场护栏：死推位姿越出场地外框（台面 ±1 格）→ 熔断本格 + 中止整局
+
+        定位是"拦彻底失控"的兜底，不是防跌落预案：死推位姿在形变场景下实测
+        能偏 30cm+（到达判据本身有误差，_reanchor_pose 又把它锚到"以为"的
+        格心），所以外框放到台面 ±1 格。真正管住"继续动"的是转向预算 360°、
+        停转/来回摆判据、前压封顶 45cm 这三条。
+        """
+        if self._abort_level is not None:
+            # 已判定整局收手：保持熔断（新格开预算会清 _cell_tripped，这里补回）
+            if self._cell_tripped is None:
+                self._cell_tripped = self._abort_level
+            return True
+        x = float(self.pose[0])
+        y = float(self.pose[1])
+        if (VIS_FIELD_X_CM[0] <= x <= VIS_FIELD_X_CM[1]
+                and VIS_FIELD_Y_CM[0] <= y <= VIS_FIELD_Y_CM[1]):
+            return False
+        return self._trip_cell(
+            f"位姿越界 (x={x:.0f}, y={y:.0f}) 超出 x{VIS_FIELD_X_CM} "
+            f"y{VIS_FIELD_Y_CM}", abort_level=True)
+
+    def _capture(self):
+        """统一拍照入口：单格拍照计数（硬熔断用）+ 转发 state.capture_frame"""
+        self._cell_frames += 1
+        self._count_frame()
+        return self.state.capture_frame()
+
+    # =================================================================
+    # 入口
+    # =================================================================
+
+    def run_level(self):
+        """布局扫描 → 按 1..7 顺序逐格导航。返回 bool（全部确认到位）
+
+        每格结果同时写入 self.results（[(数字, 是否确认), ...]），供仿真/
+        真机日志与诊断使用。
+        """
+        self.deadline = time.time() + TOTAL_TIME_BUDGET_S
+        # 锁定相机白平衡/对焦（可选曝光）：一局开始钉一次，消除 fswebcam 每次
+        # 重新测光/白平衡造成的跨帧漂移（现场实测白点 R/B 差 16% → 粉 7 漏检）。
+        # 锁不上不影响继续：归一化仍能兜（见 core.robot_core.lock_camera_controls）。
+        lock_camera_controls()
+        # 自动曝光闭环：把画面均亮拉到目标值。**换灯/换场地后不必手改常数**
+        # （实测曝光写死 100 时换灯后均亮只剩 7~22，归一化失效、扫描三轮未定）。
+        if CAM_AUTO_EXPOSURE_ENABLED:
+            auto_calibrate_exposure(self.state)
+        self.layout_scan()
+        print(f"[布局] 数字对应格位: {self.digit_cell}  "
+              f"存在数字复核冲突的格: {sorted(self.cell_conflict)}")
+        done = []
+        for k in range(1, 8):
+            ok = self.go_to_panel(k)
+            done.append((k, ok))
+            self.state.act("stand")
+            elapsed = TOTAL_TIME_BUDGET_S - (self.deadline - time.time())
+            note = ""
+            if not ok and self._cell_tripped:
+                # 熔断收尾（安全项）：本格记为未确认，继续下一格/收尾，
+                # 绝不为了"再试一次"把机器人继续留在场上动。
+                note = f"（本格终止原因：{self._cell_tripped}）"
+                self.cell_trips[k] = self._cell_tripped
+                print(f"[终止] 面板{k} 未确认到位：{self._cell_tripped}"
+                      "——记为未确认，不再继续尝试")
+            print(f"[进度] 面板{k} {'已到位' if ok else '未确认（以微动开关实际触发为准）'}"
+                  f"{note}，已用时 {elapsed:.0f}s")
+            # 单格诚实遥测：一行给出现场复盘需要的全部数字（事后不用翻半个日志）
+            hy = self._cell_handoff_yaw
+            rs = self._cell_arrive_resid_cm
+            print(f"[遥测] 面板{k} 用时 {elapsed:.0f}s｜拍照 {self._cell_frames} 张"
+                  f"｜动作 {self._cell_actions} 次｜命令转角 {self._cell_turn_cmd_deg:.0f}°"
+                  f"｜交接偏角 {'无' if hy is None else f'{hy:+.1f}°'}"
+                  f"｜离格心 {'无数据' if rs is None else f'{rs:.1f}cm'}")
+            print(f"[遥测] 面板{k} 判定依据: {self._arrive_evidence or '（未到达）'}")
+            if self._abort_level:
+                # 离场护栏：已经越界，绝不再去"找下一格"——站立收手，保已得分
+                print(f"[护栏] 整局终止：{self._abort_level}"
+                      "（机器人保持站立，不再执行动作）")
+                break
+            if time.time() > self.deadline:
+                print("[看门狗] 全局时间已耗尽，停止（保住已得分，不再继续）")
+                break
+        self.results = done
+        if self.cell_trips:
+            print(f"[诊断] 中途终止的面板: {self.cell_trips}")
+        frames = sorted(self.phase_frames.items(), key=lambda kv: -kv[1])
+        print(f"[诊断] 各阶段拍照张数: {frames}  合计 {sum(self.phase_frames.values())}")
+        return all(ok for _, ok in done)
+
+    # =================================================================
+    # 布局扫描（机器人系相对几何格阵拟合，无站位/标定依赖）
+    # =================================================================
+
+    def layout_scan(self):
+        """头部双俯角宽扫全场 → 机器人系相对几何格阵拟合 → 数字→格 映射
+
+        每帧观测经"机器人系单应"（名义高度+俯仰+头部角，均自身已知）转为
+        机器人系地面坐标，按 digit 跨帧聚合（干净观测优先，同色=同板）后做
+        格阵拟合（lattice_assign：假设-共识 + 4 真旋转硬约束 + 刚体残差门）；
+        布局确定后用"机器人系点 ↔ 场地格心"刚体拟合解出位姿写入 self.pose，
+        GN 定位从此自续。全程不依赖站位复位与点击标定。
+
+        扫描终止判据：**未裁切观测覆盖 ≥LAYOUT_MIN_CLEAN_DIGITS 个数字**，
+        或扫满一轮（双俯仰×五头部）。为什么不用"见到 7 种数字"：现场照片
+        实测单帧常见 7 种数字但只有 3 个未裁切，裁切质心偏差 1.3~8.4cm，
+        据此拟合不稳定（2026-09-11 复现）。
+        歧义/缺数字/自举自检不过时自动前进一步重扫（平移视差消解朝向歧义；
+        也把没入视野的近排带进来），最多 3 轮。
+        """
+        self.phase = "LAYOUT"
+        last_err = ""
+        fit = _fit_failure("未执行")
+        for attempt in range(3):
+            pix_obs = []        # (pitch, head, digit, 观测像素, 裁切?)
+            frame_obs = []      # (pitch, head, obs)：仲裁冲突回填写
+            for pitch in (PITCH_NAV, PITCH_DOWN):
+                self.state.set_pitch(pitch)
+                for pulse in (HEAD_CENTER, HEAD_LEFT, HEAD_RIGHT,
+                              HEAD_WIDE_LEFT, HEAD_WIDE_RIGHT):
+                    self.state.set_head(pulse)
+                    frame = self.state.capture_frame()
+                    if frame is None:
+                        continue
+                    # 裁切感知：贴纸小、入口视角大半面板贴画幅边——保留
+                    # 裁切面板，用凸包质心观测（拟合时降权，见 _aggregate）
+                    # shape=True：颜色贴窗口边界时用数字形状仲裁（C3）——
+                    # 布局一次定全局，颜色错判代价最大，这里最该开形状。
+                    obs = self.detector.detect_panels(frame, arbitrate=True,
+                                                      drop_border=False,
+                                                      shape=True)
+                    frame_obs.append((pitch, pulse, obs))
+                    for o in obs:
+                        px = (o.hull_centroid_px if o.clipped
+                              else o.center_px)
+                        pix_obs.append((pitch, pulse, o.digit, px,
+                                        o.clipped))
+                    # 提前退出：须同时满足（a）未裁切覆盖 ≥6 个数字、
+                    # （b）**两档俯仰都已有观测**。只扫一档会让"安装偏移 vs
+                    # 名义俯仰角"退化（实测 (1200,25°)≡(1040,10°)），
+                    # 自标定常数无法外推到另一档，且参数网格成功组合太少
+                    # （现场照片实测：单档仅 6 个组合 < 多数票门槛）。
+                    if len({e[2] for e in pix_obs if not e[4]}) \
+                            >= LAYOUT_MIN_CLEAN_DIGITS \
+                            and len({e[0] for e in pix_obs}) >= 2:
+                        break
+                if len({e[2] for e in pix_obs if not e[4]}) \
+                        >= LAYOUT_MIN_CLEAN_DIGITS \
+                        and len({e[0] for e in pix_obs}) >= 2:
+                    break
+            self.state.set_head(HEAD_CENTER)
+            self.state.set_pitch(PITCH_NAV)
+
+            seen = {e[2] for e in pix_obs}
+            clean_digits = {e[2] for e in pix_obs if not e[4]}
+            missing = [k for k in range(1, 8) if k not in seen]
+            info = (f"缺少数字 {missing}（完整可见的仅 {len(clean_digits)} 个）"
+                    if missing else "")
+            if not missing:
+                # 参数网格自标定 + 格阵拟合（见 _lattice_grid_fit）
+                # 颜色歧义表：{数字: {竞争数字}}，供拟合后的格阵共识复核（E）
+                ambig = {}
+                n_amb = 0
+                for _p, _h, obs_list in frame_obs:
+                    for o in obs_list:
+                        if not o.ambiguous:
+                            continue
+                        n_amb += 1
+                        cands = {k for k in o.candidates if k != o.digit}
+                        if cands:
+                            ambig.setdefault(o.digit, set()).update(cands)
+                if n_amb:
+                    print(f"[布局] 颜色有歧义的观测 {n_amb} 个"
+                          f"（涉及数字 {sorted(ambig)}），交由数字复核／格阵一致性裁决")
+                fit = self._lattice_grid_fit(pix_obs, ambig)
+                info = fit.info
+                for w in fit.warnings:
+                    print(f"[布局] 警告: {w}")
+                if fit.cells is not None:
+                    worst = sorted(fit.spread_cm.items(),
+                                   key=lambda kv: -kv[1])[:3]
+                    print(f"[布局] 观测汇总: 完整可见 {len(clean_digits)}/7 "
+                          f"个数字；各帧位置最大偏差 {[(d, round(s, 1)) for d, s in worst]} cm")
+
+            if fit.cells is not None and self._pose_bootstrap(fit):
+                self.digit_cell = fit.cells
+                self._pitch_offset_deg = fit.offset_deg
+                self._cam_height_cm = fit.cam_height_cm
+                # 仲裁冲突回填：布局已知后才能把冲突面板定位到格
+                for _pitch, _head, obs in frame_obs:
+                    for o in obs:
+                        if o.arb_conflict and o.digit in self.digit_cell:
+                            cell = self.digit_cell[o.digit]
+                            self.cell_conflict.add(cell)
+                            print(f"[布局] 数字复核冲突：格 {cell} 按颜色判为数字 "
+                                  f"{o.digit}，数字模型判为 {o.model_digit}"
+                                  f"（置信度 {o.model_conf:.2f}）——待近距复核")
+                print(f"[布局] {fit.info}；标定结果: 相机相对机体前偏 "
+                      f"{self._pitch_offset_deg:+.1f}°、"
+                      f"离地 {self._cam_height_cm:.0f}cm"
+                      f"（导航档俯仰 {PITCH_NAV} 时实际俯角 "
+                      f"{self._effective_pitch_deg(PITCH_NAV):.1f}°）")
+                return
+
+            if fit.cells is not None:
+                # 布局解出但位姿自举自检没过：归因为自举，别误导成拟合失败
+                info = (f"{fit.info}；但由面板反推位姿未通过校验——重新扫描复核"
+                        f"（布局 {fit.cells}）")
+            last_err = info
+            if attempt < 2:
+                print(f"[布局] 第 {attempt + 1} 轮未能定出布局（{info}）——"
+                      "前进一步后重新扫描（用视差消除歧义）")
+                self._act("go_forward_one_step", 1)
+        seen_digits = sorted({e[2] for e in pix_obs})
+        raise RuntimeError(
+            f"布局扫描三轮未定（{last_err}）。可见数字: {seen_digits}")
+
+    def _effective_pitch_deg(self, pitch_pulse):
+        """名义脉宽角 + 自标定安装偏移 = 有效俯角（度，日志用）"""
+        return ((1500 - pitch_pulse) * SERVO_DEG_PER_US
+                + self._pitch_offset_deg)
+
+    def _lattice_grid_fit(self, pix_obs, ambig=None):
+        """参数网格自标定 + 格阵拟合 → LatticeFit
+
+        相机安装偏移/高度无法精确预知（装配离散、俯仰随头部姿态微变），在
+        (偏移, 高度) 网格上逐组合做"机器人系映射 + 逐数字聚合 + 格阵拟合"。
+        格阵归属是离散判定——落在拟合容差谷值内的组合给出同一布局，多数票
+        即布局；胜出组合的中位数即自标定常数（写回调用方）。
+
+        pix_obs: [(pitch, head, digit, 观测像素, 裁切?), ...]（跨帧全部观测）
+
+        聚合策略（2026-09-11 现场照片 + 真机布局扫实测驱动）：
+          - **最大一致簇取模式**：同一数字的多次观测先按 CLUSTER_RADIUS_CM
+            邻域聚类，取点数最多的一簇（真机实测：场内木框被橙色阈值命中、
+            蓝地垫被蓝色阈值命中，且多为**未裁切**观测——单纯"干净优先的
+            中位数"会被它们带到 40cm 外，格阵拟合整体失败）；
+          - 簇内**干净优先**：有未裁切观测就只用未裁切观测（裁切质心偏差
+            实测 1.3~8.4cm）；否则用簇内裁切观测并把权重降到
+            LATTICE_CLIPPED_WEIGHT；簇外观测计入 dropped 供告警/诊断。
+        退化提醒：只有单档俯仰有观测时，安装偏移与名义俯仰角不可分离
+        （实测 (pitch1200, offset=25°) 与 (pitch1040, offset=10°) 等价，
+        有效俯角都 ≈51.5°），此时自标定常数不可外推到另一档 → warnings。
+        """
+        warnings = []
+        pitches_seen = {e[0] for e in pix_obs}
+        if len(pitches_seen) < 2:
+            warnings.append(
+                f"仅 {sorted(pitches_seen)} 单档俯仰有观测：安装偏移与名义"
+                "俯仰角退化，自标定常数不可外推到另一档")
+        hg_cache = {}
+        obs_by_digit = {}          # digit -> [(pitch, head, px, clipped), ...]
+        for _pitch, _head, _d, _px, _cl in pix_obs:
+            obs_by_digit.setdefault(_d, []).append(
+                (int(_pitch), int(_head), _px, bool(_cl)))
+
+        def _hg(pitch, pulse, off, hcm):
+            key = (int(pitch), int(pulse), float(off), float(hcm))
+            hg = hg_cache.get(key)
+            if hg is None:
+                hg = GroundHomography.from_pose(
+                    (0.0, 0.0), float(hcm), pitch, head_pulse=pulse,
+                    pitch_offset_deg=float(off))
+                hg_cache[key] = hg
+            return hg
+
+        def _aggregate(off, hcm):
+            """逐数字机器人系点聚合 → (med, clean, wts, spread, dropped, sel)
+
+            现场实测（2026-09-11 真机布局扫 photo_1789127899~909）：场内木框
+            被橙色阈值命中、蓝地垫被蓝色阈值命中，且它们是**未裁切**观测——
+            "干净优先的中位数"会被它们带到 40cm 外，整个格阵拟合失败。
+            故先按"最大一致簇"取模式，再在簇内干净优先；簇外观测计 dropped。
+            sel[d] = 该数字**入选观测在 obs_by_digit[d] 中的下标**，供像素域
+            精修复用（精修必须只用同一批内点，否则假阳会把重投影解带飞）。
+            """
+            med, clean, wts, spread, dropped, sel = {}, set(), {}, {}, {}, {}
+            for d, lst in obs_by_digit.items():
+                pts = np.array([_hg(pitch, pulse, off, hcm).pixels_to_ground(
+                    [px], head_pulse=pulse)[0]
+                    for pitch, pulse, px, _cl in lst])
+                flags = np.array([cl for _p, _h, _px, cl in lst])
+                if len(pts) > 1:
+                    dm = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=2)
+                    n_in = (dm <= CLUSTER_RADIUS_CM).sum(axis=1)
+                    keep = dm[int(np.argmax(n_in))] <= CLUSTER_RADIUS_CM
+                else:
+                    keep = np.ones(len(pts), dtype=bool)
+                n_clean = int(np.count_nonzero(keep & ~flags))
+                use_mask = keep & ~flags if n_clean >= 1 else keep
+                use = pts[use_mask]
+                m = np.median(use, axis=0)
+                med[d] = m
+                spread[d] = float(np.max(np.linalg.norm(use - m, axis=1)))
+                dropped[d] = int(np.count_nonzero(~keep))
+                sel[d] = [int(k) for k in np.where(use_mask)[0]]
+                if n_clean >= 1:
+                    clean.add(d)
+                    wts[d] = 1.0
+                else:
+                    wts[d] = LATTICE_CLIPPED_WEIGHT
+            return med, clean, wts, spread, dropped, sel
+
+        votes = {}   # (数字→格)冻结元组 -> [每个成功组合的拟合明细, ...]
+        dropped_seen = {}
+        for off in np.arange(LAYOUT_OFFSET_MIN_DEG,
+                             LAYOUT_OFFSET_MAX_DEG + 1e-9,
+                             LAYOUT_OFFSET_STEP_DEG):
+            for hcm in np.arange(LAYOUT_HEIGHT_MIN_CM,
+                                 LAYOUT_HEIGHT_MAX_CM + 1e-9,
+                                 LAYOUT_HEIGHT_STEP_CM):
+                med, clean, wts, spread, dropped, sel = _aggregate(off, hcm)
+                if len(med) < 7:
+                    continue
+                for d, n in dropped.items():
+                    if n:
+                        dropped_seen[d] = max(dropped_seen.get(d, 0), n)
+                cells, _info, ranked = lattice_assign(med, weights=wts,
+                                                      clean=clean)
+                if cells is None or len(cells) != 7 or not ranked:
+                    continue
+                votes.setdefault(tuple(sorted(cells.items())), []).append({
+                    "off": float(off), "hcm": float(hcm), "med": med,
+                    "clean": set(clean), "wts": dict(wts),
+                    "spread": dict(spread), "sel": sel,
+                    "rms_clean": ranked[0]["rms_clean"],
+                    "rms_all": ranked[0]["rms_all"],
+                    "res_max": ranked[0]["res_max_cm"]})
+        if not votes:
+            return _fit_failure(
+                "全部参数组合均无法一致拟合 33cm 方格阵（观测含异常点、"
+                "数字与格位对应关系不符，或可见数字不足）", warnings)
+        key, combos = max(votes.items(), key=lambda kv: len(kv[1]))
+        n_assign = sum(len(v) for v in votes.values())
+        if len(combos) < LAYOUT_VOTE_MIN_FRAC * n_assign \
+                or len(combos) < LAYOUT_VOTE_MIN_COMBOS:
+            others = sorted((len(v) for k, v in votes.items() if k != key),
+                            reverse=True)
+            return _fit_failure(
+                f"参数网格投票不足（得票 {len(combos)}/{n_assign}，"
+                f"次高得票 {others[:2]}）——前进一步后重新扫描以消除歧义",
+                warnings)
+        cells = dict(key)
+        off = float(np.median([c["off"] for c in combos]))
+        hcm = float(np.median([c["hcm"] for c in combos]))
+        # 取最接近中位数的那个组合的几何数据作为基准（可复现、可诊断）
+        pick = min(combos, key=lambda c: (
+            abs(c["off"] - off) / LAYOUT_OFFSET_STEP_DEG
+            + abs(c["hcm"] - hcm) / LAYOUT_HEIGHT_STEP_CM))
+        # 像素域五参数联合精修（关键步骤，见 _pixel_pose_calib）：格阵刚性判据
+        # 对 (安装偏移, 相机高度) 只有一条退化谷（sim 实测 (18.5°,56cm) 与
+        # (19.5°,59cm) 刚体 RMS 都是 0.30cm），而导航投影对谷内位置很敏感
+        # （高度差 3cm → GN 残差 16~23px → 定位风暴）。故用"格心↔像素"重投影
+        # 残差（与导航同一残差定义）联合解出 (x, y, θ, 偏移, 高度)。
+        ds = sorted(pick["med"])
+        gs = np.array([grid_cell_center(cells[d]) for d in ds])
+        ps = np.array([pick["med"][d] for d in ds])
+        ws = np.array([pick["wts"].get(d, 1.0) for d in ds])
+        R0, t0, _rms0, _per0 = _rigid_fit_2d(gs, ps, ws)
+        pos0 = -R0.T @ t0
+        fwd0 = R0.T @ np.array([0.0, 1.0])
+        pose0 = np.array([pos0[0], pos0[1], float(np.arctan2(fwd0[0], fwd0[1]))])
+        entries = []
+        for d, pos_list in pick["sel"].items():
+            if d not in cells:
+                continue
+            for k in pos_list:
+                pitch, head, px, cl = obs_by_digit[d][k]
+                entries.append((grid_cell_center(cells[d]), px, head, cl, pitch))
+        pose5, rms_all_px, med_px = _pixel_pose_calib(entries, pose0, off, hcm)
+        pose = None
+        if pose5 is not None and med_px is not None \
+                and med_px <= PIXEL_CALIB_MED_MAX_PX:
+            o2, h2 = float(pose5[3]), float(pose5[4])
+            med2, clean2, wts2, spread2, _dr2, sel2 = _aggregate(o2, h2)
+            cells2, _i2, ranked2 = lattice_assign(med2, weights=wts2,
+                                                  clean=clean2)
+            if cells2 == cells and ranked2:
+                off, hcm = o2, h2
+                pick = {"off": off, "hcm": hcm, "med": med2, "clean": clean2,
+                        "wts": wts2, "spread": spread2, "sel": sel2,
+                        "rms_clean": ranked2[0]["rms_clean"],
+                        "rms_all": ranked2[0]["rms_all"],
+                        "res_max": ranked2[0]["res_max_cm"]}
+                pose = np.array([pose5[0], pose5[1], pose5[2]])
+                warnings.append(
+                    f"像素级校准结果: 相机相对机体前偏 {off:+.1f}°、"
+                    f"离地 {hcm:.1f}cm"
+                    f"（格心重投影残差 中位 {med_px:.1f}px／均方根 "
+                    f"{rms_all_px:.1f}px）")
+            else:
+                warnings.append("像素级校准所得的相机参数与已确定的布局不一致"
+                                "——已忽略本次校准，沿用格阵拟合所得参数")
+        else:
+            warnings.append(
+                "像素级校准未收敛（格心重投影残差中位 "
+                f"{'无数据' if med_px is None else format(med_px, '.1f') + 'px'} "
+                f"> {PIXEL_CALIB_MED_MAX_PX:.0f}px）——沿用格阵拟合所得参数，"
+                "导航精度可能下降")
+        clipped_only = sorted(d for d in cells if pick["wts"].get(d, 1.0) < 1.0)
+        if clipped_only:
+            warnings.append(
+                f"数字 {clipped_only} 无完整可见的观测，仅由贴边观测的质心定位"
+                f"（偏差可达约 8cm）")
+        if dropped_seen:
+            warnings.append(
+                f"数字 {sorted(dropped_seen)} 的部分观测位置异常，已剔除"
+                f"（每号最多 {max(dropped_seen.values())} 帧）；"
+                "疑似场内同色物体被误检为面板（木框、地垫）")
+        bad_spread = sorted(d for d, s in pick["spread"].items()
+                            if s > SPREAD_MAX_CM)
+        if bad_spread:
+            warnings.append(
+                f"数字 {bad_spread} 的观测分散度超过 {SPREAD_MAX_CM:.0f}cm，"
+                "观测质量差")
+        if 6 in cells.values():
+            warnings.append("格位 6 被判为有面板占据：与比赛规则冲突——"
+                            "数字与格位的对应关系或站位存疑，需现场逐格核对")
+        spread_max = max(pick["spread"].values()) if pick["spread"] else 0.0
+        info = (f"参数组合 {len(combos)}/{n_assign} 收敛（{len(pick['clean'])} 个"
+                f"数字有完整可见的观测，同一数字各帧偏差 ≤{spread_max:.1f}cm）")
+        # 歧义修复（E）：颜色歧义面板（同位置双色命中 / 中位 H 贴窗口边界）
+        # 若形状仲裁没能定案，这里用**格阵共识**复核一次——置信数字先定刚体
+        # 变换，再看歧义数字的观测点离"本格"还是"竞争数字那格"更近。
+        cells, rep_notes = ambiguity_repair(cells, pick, ambig or {})
+        for n in rep_notes:
+            warnings.append(n)
+            print(f"[布局] 歧义修正: {n}")
+        return LatticeFit(cells=cells, info=info, offset_deg=off,
+                          cam_height_cm=hcm, pts_robot=dict(pick["med"]),
+                          clean=set(pick["clean"]), weights=dict(pick["wts"]),
+                          rms_clean_cm=pick["rms_clean"],
+                          rms_all_cm=pick["rms_all"],
+                          spread_cm=dict(pick["spread"]),
+                          res_max_cm=pick["res_max"], warnings=warnings,
+                          pose=pose)
+
+    def _pose_bootstrap(self, fit):
+        """位姿自举 → 直接写 self.pose，返回 bool
+
+        两条路径：
+          1) **优先用像素域精修位姿**（fit.pose，见 _pixel_pose_calib）：它由
+             "格心↔像素"重投影最小二乘得到，与导航同一残差定义、同一常数，
+             精度最高；
+          2) 回退用"机器人系点 ↔ 场地格心"2D 刚体拟合（两系同为 z 轴向上的
+             地面系，只差一个刚体变换）。
+        两条路都不再解"像素↔格心"单应再 decompose——那条路把裁切质心观测
+        （偏差实测 1.3~8.4cm）送进无鲁棒最小二乘，会给出非物理 H
+        （历史崩溃："相机未俯视地面（光轴无向下分量）"）。
+        自检：残差门、机器人在入口侧、位置落在场地合理范围；任一不满足 → False。
+        """
+        ds = sorted(fit.pts_robot)
+        if len(ds) < 4 or not fit.cells or any(d not in fit.cells for d in ds):
+            print("[布局] 由面板反推位姿失败：格阵拟合结果不完整，无法反推位姿")
+            return False
+        gs = np.array([grid_cell_center(fit.cells[d]) for d in ds])
+        if fit.pose is not None:
+            pos = np.asarray(fit.pose[:2], dtype=np.float64)
+            th = float(fit.pose[2])
+            gate_txt = "像素级校准所得位姿"
+        else:
+            ps = np.array([fit.pts_robot[d] for d in ds])
+            w = np.array([1.0 if d in fit.clean else LATTICE_CLIPPED_WEIGHT
+                          for d in ds])
+            R, t, rms_all, per = _rigid_fit_2d(gs, ps, w)
+            idx = [k for k, d in enumerate(ds) if d in fit.clean]
+            if len(idx) >= 3:
+                gate_val = float(np.sqrt(np.mean(per[idx] ** 2)))
+                gate_txt = f"刚体残差 干净子集 {gate_val:.1f}cm"
+            else:
+                gate_val, gate_txt = rms_all, f"刚体残差 全点 {rms_all:.1f}cm"
+            if gate_val > POSE_BOOTSTRAP_RMS_MAX_CM:
+                print(f"[布局] 由面板反推位姿未通过校验：{gate_txt} > "
+                      f"{POSE_BOOTSTRAP_RMS_MAX_CM:.0f}cm（布局或观测存疑）")
+                return False
+            pos = -R.T @ t                  # 机器人系原点的场地坐标（相机地面投影）
+            fwd = R.T @ np.array([0.0, 1.0])   # 机器人系 +y（机体前方）的场地方向
+            th = float(np.arctan2(fwd[0], fwd[1]))
+        if not (POSE_BOOTSTRAP_X_RANGE[0] <= pos[0] <= POSE_BOOTSTRAP_X_RANGE[1]
+                and POSE_BOOTSTRAP_Y_RANGE[0] <= pos[1]
+                <= POSE_BOOTSTRAP_Y_RANGE[1]):
+            print(f"[布局] 由面板反推位姿未通过校验：位置 ({pos[0]:.1f},{pos[1]:.1f}) "
+                  "超出场地合理范围")
+            return False
+        if pos[1] >= float(np.min(gs[:, 1])) + GRID_CELL_CM / 2:
+            print("[布局] 由面板反推位姿未通过校验：机器人不在全部面板的入口一侧")
+            return False
+        self.pose = np.array([pos[0], pos[1], th])
+        print(f"[定位] 机器人位置 ({pos[0]:.1f},{pos[1]:.1f})，"
+              f"航向 {np.degrees(th):.1f}°（依据 {gate_txt}，{len(ds)} 个数字）")
+        return True
+
+    # =================================================================
+    # 定位：Gauss-Newton 地图定位（格心=地图，动作模型=先验）
+    # =================================================================
+
+    def predict_pose(self, action, times=1):
+        """按名义动作模型推进位姿预测（每步动作后调用）
+
+        小步转向的名义角用 EMA 在线估计值（地面打滑时它更接近真值）。
+        """
+        kind, step = ACTION_MODEL.get(action, (None, 0.0))
+        if action.endswith("_small_step") and kind == "turn":
+            step = (self._small_turn_deg if step > 0 else -self._small_turn_deg)
+        for _ in range(max(1, times)):
+            th = self.pose[2]
+            fwd = np.array([np.sin(th), np.cos(th)])
+            right = np.array([np.cos(th), -np.sin(th)])
+            if kind == "fwd":
+                self.pose[:2] += fwd * step
+            elif kind == "lat":
+                self.pose[:2] += right * step
+            elif kind == "turn":
+                self.pose[2] += np.radians(step)
+
+    def target_relative(self, digit):
+        """目标格心在机器人系的 (纵向, 横向, 航向差)。右正左负。"""
+        x, y, th = self.pose
+        fwd = np.array([np.sin(th), np.cos(th)])
+        right = np.array([np.cos(th), -np.sin(th)])
+        body = np.array([x, y]) - fwd * CAMERA_TO_BODY_FORWARD_CM
+        d = grid_cell_center(self.digit_cell[digit]) - body
+        forward = float(d @ fwd)
+        lateral = float(d @ right)
+        bearing = float(np.degrees(np.arctan2(lateral, forward)))
+        return forward, lateral, bearing
+
+    def _record_landing(self, digit):
+        """把"跑完本格时机器人离目标格格心的距离"记进 self.panel_landing
+
+        真机（无真值）退化为用死推位姿 self.pose 估计，并在日志里标明来源；
+        仿真里 state.pos 是真值，因此这个数字可以用来抓"假到达"。
+        """
+        cell = self.digit_cell.get(digit)
+        if cell is None:
+            self.panel_landing[digit] = None
+            return
+        center = np.asarray(grid_cell_center(cell), float)
+        truth = getattr(self.state, "pos", None)
+        if truth is not None:
+            src, pos = "真值", np.asarray(truth, float)[:2]
+        else:
+            src, pos = "死推", np.asarray(self.pose, float)[:2]
+        self.panel_landing[digit] = (float(np.linalg.norm(pos - center)), src)
+
+    def _count_frame(self):
+        """按当前阶段累计拍照数（诊断；见 run_level 的汇总打印）"""
+        self.phase_frames[self.phase] = self.phase_frames.get(self.phase, 0) + 1
+
+    def _target_color(self, digit):
+        """数字(1..7) → 检测器颜色名"""
+        return ID_TO_COLOR[digit]
+
+    # ---------------- MAP-ANCHOR（见文件头常量块的说明） ----------------
+
+    def _clip_sides_of(self, obs, frame):
+        """由 bbox 与画幅判定"贴了哪几条画幅边"（原生 px，与 detector 同口径）"""
+        H = float(frame.shape[0])
+        W = float(frame.shape[1])
+        m = MAP_ANCHOR_CORNER_MARGIN_PX
+        x, y, w, h = (float(v) for v in obs.bbox)
+        sides = []
+        if x <= m:
+            sides.append("L")
+        if y <= m:
+            sides.append("T")
+        if x + w >= W - m:
+            sides.append("R")
+        if y + h >= H - m:
+            sides.append("B")
+        return sides, W, H
+
+    def _anchor_corr(self, obs, frame, swap_corners=False):
+        """本帧观测 → (对应点, 观测) 列表（v2：未裁切用中心，裁切用**真实角点对**）
+
+        v1 只收未裁切观测，原因是裁切观测的 `center_px`（对角线交点）量的是可见
+        残片、偏差 1.3~8.4cm。但那条限制让可用率极低（整关实测 ≥4 对应的帧只占
+        **14.7%**）。v2 的观察是：**被裁切的面板仍然贡献它未被裁掉的那两个真实
+        角点**——那些是精确对应点，不是残片质心。
+
+        判据（本轮 140 面板-帧普查：裁切面板中 **78%** 满足）：
+          - 只贴**一条**画幅边（贴两条 = 角点被裁，无法确定是哪两个角 → 弃权）
+          - `hull_poly` 中距四条边都 ≥ MAP_ANCHOR_CORNER_MARGIN_PX 的顶点 ≥2 个
+        场地坐标由裁边决定（`h = PANEL_HALF_CM`，色块半边长）：
+
+          | 裁边 | 可见的是 | 场地坐标 |
+          |---|---|---|
+          | B（下沿） | 远角对 | (cx±h, cy+h) |
+          | T        | 近角对 | (cx±h, cy−h) |
+          | L        | 右角对 | (cx+h, cy±h) |
+          | R        | 左角对 | (cx−h, cy±h) |
+
+        配对方式：图像点与场地点**各自按 x 排序**后一一配对；整帧共识不足时调用方
+        用 `swap_corners=True` 再跑一次（交换所有角点对的配对顺序），由 RANSAC
+        的共识来裁决——不做任何"猜哪一对"的启发式。
+
+        实测（整关 4 种子 477 帧）：≥4 对应的帧 14.7% → **46.1%**、
+        ≥5 对应 5.5% → **34.0%**（3.1×）。
+        """
+        corr, keep = [], []
+        for o in obs:
+            if o.digit not in self.digit_cell:
+                continue
+            g = np.asarray(grid_cell_center(self.digit_cell[o.digit]), float)
+            if not o.clipped:
+                corr.append((g, np.asarray(o.center_px, float)))
+                keep.append(o)
+                continue
+            # ---- 裁切：尝试用两个真实角点 ----
+            sides, W, H = self._clip_sides_of(o, frame)
+            if len(sides) != 1:
+                continue
+            m = MAP_ANCHOR_CORNER_MARGIN_PX
+            inner = [(float(p[0]), float(p[1])) for p in (o.hull_poly or ())
+                     if m < float(p[0]) < W - m and m < float(p[1]) < H - m]
+            if len(inner) < 2:
+                continue
+            # 取该裁边"对面"那一对角的两个图像点：按远离被裁边的方向排序取前 2
+            # （下沿被裁 → 取图像里最靠上的两个内顶点；左沿被裁 → 取最靠右的两个）
+            if sides[0] == "B":
+                inner.sort(key=lambda p: p[1])
+            elif sides[0] == "T":
+                inner.sort(key=lambda p: -p[1])
+            elif sides[0] == "L":
+                inner.sort(key=lambda p: -p[0])
+            else:                                   # "R"
+                inner.sort(key=lambda p: p[0])
+            pair = inner[:2]
+            pair.sort(key=lambda p: p[0])           # 图像侧按 x 排序
+            h = PANEL_HALF_CM
+            if sides[0] == "B":
+                gp = [(g[0] - h, g[1] + h), (g[0] + h, g[1] + h)]
+            elif sides[0] == "T":
+                gp = [(g[0] - h, g[1] - h), (g[0] + h, g[1] - h)]
+            elif sides[0] == "L":
+                gp = [(g[0] + h, g[1] - h), (g[0] + h, g[1] + h)]
+            else:                                   # "R"
+                gp = [(g[0] - h, g[1] - h), (g[0] - h, g[1] + h)]
+            gp.sort(key=lambda p: p[0])             # 场地侧同样按 x 排序
+            if swap_corners:
+                gp = gp[::-1]
+            for gpt, ppt in zip(gp, pair):
+                corr.append((np.asarray(gpt, float), np.asarray(ppt, float)))
+                keep.append(o)
+        return corr, keep
+
+    def _map_anchor(self, obs, frame, why=""):
+        """地图锚定的逐帧自标定 → AnchorResult 或 None（诚实弃权）
+
+        返回 dict：hg / pose(场地系 x,y,θ) / cam_height_cm / inliers(下标集) /
+                   resid_px(逐点残差) / n_pts / n_inliers / digits
+
+        角点配对有**两种假设**（正序/逆序），二者只有一个能与其余观测自洽：
+        先按正序求共识，共识不足时交换全部角点对再跑一次，取共识更大的那个。
+        ⇒ 不做任何"猜哪一对是远角"的启发式，让 RANSAC 的共识来裁决。
+        """
+        best_all = None
+        for swapped in (False, True):
+            self._anchor_quiet = bool(swapped)
+            out = self._map_anchor_once(obs, frame, why, swapped)
+            if out is not None and (best_all is None
+                                    or out["n_inliers"] > best_all["n_inliers"]):
+                best_all = out
+            if best_all is not None and not swapped:
+                # 正序已解出且共识达标 ⇒ 不必再试逆序（省一半算力）
+                break
+        self._anchor_quiet = False
+        return best_all
+
+    def _map_anchor_once(self, obs, frame, why="", swap_corners=False):
+        corr, keep = self._anchor_corr(obs, frame, swap_corners=swap_corners)
+        n = len(corr)
+        if n < MAP_ANCHOR_MIN_PTS:
+            if not swap_corners:        # 只在第一遍记日志，避免重复刷屏
+                self._anchor_stat("弃权(对应点不足)", n, why)
+            return None
+        gd = np.array([c[0] for c in corr])
+        px = np.array([c[1] for c in corr])
+
+        # ---- RANSAC：枚举 4 子集求最大共识 ----
+        # 为什么枚举而不是 cv2.RANSAC：`GroundHomography.solve` 走的是仓库唯一的
+        # 去畸变+单应链路（`_undistort_to_norm`），复用它才能保证与导航同一残差
+        # 定义；子集只有 C(9,4)=126 个、每个都是 4 点小解，代价可忽略。
+        idx_all = list(range(n))
+        combos = list(combinations(idx_all, 4))
+        if len(combos) > MAP_ANCHOR_MAX_COMBOS:
+            step = len(combos) / float(MAP_ANCHOR_MAX_COMBOS)
+            combos = [combos[int(i * step)] for i in range(MAP_ANCHOR_MAX_COMBOS)]
+        best = None
+        for sub in combos:
+            sub = list(sub)
+            try:
+                hg = GroundHomography.solve(px[sub], gd[sub], PITCH_NAV, HEAD_CENTER)
+            except Exception:
+                continue
+            try:
+                pred = hg.ground_to_pixels(gd)
+            except Exception:
+                continue
+            res = np.linalg.norm(np.asarray(pred, float) - px, axis=1)
+            inl = res <= MAP_ANCHOR_INLIER_PX
+            k = int(inl.sum())
+            key = (k, -float(res[inl].max() if k else 1e9))
+            if best is None or key > best[0]:
+                best = (key, inl.copy(), res.copy())
+        if best is None:
+            self._anchor_stat("弃权(单应求解全部失败)", n, why)
+            return None
+        (k_best, _neg), inl, res = best
+        if k_best < MAP_ANCHOR_MIN_INLIERS:
+            self._anchor_stat(f"弃权(共识仅{k_best}<{MAP_ANCHOR_MIN_INLIERS})",
+                              n, why)
+            return None
+        # ---- 用全部内点重解一次（提高精度；仍是同一链路）----
+        try:
+            hg = GroundHomography.solve(px[inl], gd[inl], PITCH_NAV, HEAD_CENTER)
+            pred = hg.ground_to_pixels(gd)
+            res = np.linalg.norm(np.asarray(pred, float) - px, axis=1)
+            inl2 = res <= MAP_ANCHOR_INLIER_PX
+            if int(inl2.sum()) >= MAP_ANCHOR_MIN_INLIERS:
+                inl, res = inl2, res
+        except Exception:
+            pass
+        # ---- 合理性守卫（荒谬解一律弃权，绝不"先信了再说"）----
+        try:
+            pos, fwd = hg.ground_pose()
+        except Exception as e:
+            self._anchor_stat(f"弃权(位姿分解失败:{type(e).__name__})", n, why)
+            return None
+        R, t, C, col_diff = hg.decompose()
+        hcm = float(C[2])
+        if not (MAP_ANCHOR_H_RANGE_CM[0] <= hcm <= MAP_ANCHOR_H_RANGE_CM[1]):
+            self._anchor_stat(f"弃权(反解高度{hcm:.0f}cm越界)", n, why)
+            return None
+        if float(col_diff) > MAP_ANCHOR_COL_DIFF_MAX:
+            self._anchor_stat(f"弃权(H列模长差{col_diff:.3f}过大)", n, why)
+            return None
+        if float(np.linalg.norm(np.asarray(pos, float) - np.array([50.0, 50.0]))) \
+                > MAP_ANCHOR_POSE_TOL_CM + 100.0:
+            self._anchor_stat(f"弃权(位姿({pos[0]:.0f},{pos[1]:.0f})荒谬)", n, why)
+            return None
+        theta = float(np.arctan2(fwd[0], fwd[1]))
+        # 与死推位姿的**独立对照**（只记日志，不参与决策）：这是现场唯一能
+        # 量化"死推到底漂了多少"的证据，而现有所有遥测都只有死推自身。
+        dr = np.asarray(self.pose, float)
+        drift = float(np.linalg.norm(np.asarray(pos, float) - dr[:2]))
+        self._anchor_stat("OK", n, why, n_in=int(inl.sum()), h=hcm,
+                          drift=drift)
+        return {
+            "hg": hg, "pose": np.array([float(pos[0]), float(pos[1]), theta]),
+            "cam_height_cm": hcm,
+            "deadreckon_drift_cm": drift,
+            "head": int(getattr(self.state, "current_head_pulse", HEAD_CENTER)),
+            "hidden": np.array([o.digit for o in keep])[~inl],
+            "inliers": [keep[i] for i in range(n) if inl[i]],
+            "outliers": [keep[i] for i in range(n) if not inl[i]],
+            "resid_px": res, "n_pts": n, "n_inliers": int(inl.sum()),
+            "digits": [o.digit for o in keep],
+        }
+
+    # =================================================================
+    # ★ 统一决策（P1 重写，2026-09-25）——三档分区 ＋ 一个循环走完全程
+    # =================================================================
+    # 需求真相源：docs/关卡算法/彩色数字九宫格-nine_grid/
+    #             需求规格-2026-09-25-统一决策重写.md
+    #   · 三档分区（绿直行 / 蓝横移 / 橙旋转）= 用户方案第 3 条，按**画面位置**判档；
+    #   · 统一决策 = 不分三段、没有交棒点，**每帧同一套判据**；
+    #   · 一次决策只下发**一个**原语（用户明确放弃"批量转弯"）；
+    #   · 不用 yaw 的**数值**做规划（只留伺服增益），不把死推位姿接进决策。
+
+    def _body_yaw_deg(self, px, frame_w, head_pulse=None):
+        """画面列 → **机体系方位角**（右正，度）
+
+        头部不在中位时，画面列要按头部角折算回"头回中位时它该在的列"——否则
+        偏头找到的目标（头右偏 40° 时它在画面正中）会被误判成"正前方"。
+
+        ⚠️ **不要在这里补 `self._pitch_offset_deg`**（曾这么以为，已实测否证）：
+        该量在投影模型里只进**俯角** `alpha = (1500-pulse)*SERVO_DEG_PER_US +
+        pitch_offset_deg`（见 `project_ground_to_pixel` / `GroundHomography.from_pose`），
+        物理上是"相机比名义再低头多少度"，**不含任何方位（yaw）信息**。
+        仿真实测：偏移取 0° 与 19°，对"面板正前方 40/60/80cm"的**横向**像素预测
+        误差都是 **0.3px**（零影响）。而日志里那句"相机相对机体**前偏** +19.0°"
+        是**措辞错误**（应为"前倾/下俯偏移"），照它做横向补偿会凭空注入
+        ≈19°×19.7px/° ≈ **374px** 的偏置——比它想修的那点误差大一个量级。
+
+        若将来现场**确实**标定出相机-机体**方位**安装偏差（当前模型没有这个参数，
+        仿真里 CAM_BODY_OFFSET=0 且实测面板正前方落在 1283px vs 中线 1296px，
+        即 13px ≈ 0.7°），应当：① 给投影模型加一个 yaw 安装参数；
+        ② 在 `_col_forward` 里按它平移中线。**不许**挪用 `_pitch_offset_deg`。
+
+        ⚠️ 返回值是**伺服增益量**（`CAMERA_FOV_H_DEG` 是 60° 的增益标定，不是真实
+        FOV —— 见该常量注释与《完整方案》§8.2），只用于"往哪边转/偏多少"，
+        **不许拿它反推角度数值去做步数规划**。
+        """
+        hp = (self.state.current_head_pulse if head_pulse is None
+              else head_pulse)
+        head_deg = (hp - HEAD_CENTER) * SERVO_DEG_PER_US
+        return -((float(px) - frame_w / 2.0) / frame_w * CAMERA_FOV_H_DEG
+                 - head_deg)
+
+    def _col_forward(self, frame_w, head_pulse=None):
+        """"机体正前方"落在画面里的列（px）——判档中线的位置
+
+        只有头部角一项（符号与 `_zone_px_of` 的头部折算一致：脉宽大 = 头左转）；
+        **不含** `_pitch_offset_deg`，理由见 `_body_yaw_deg` 的实测说明。
+        """
+        hp = (self.state.current_head_pulse if head_pulse is None
+              else head_pulse)
+        head_deg = (hp - HEAD_CENTER) * SERVO_DEG_PER_US
+        return frame_w / 2.0 + head_deg * frame_w / CAMERA_FOV_H_DEG
+
+    # =================================================================
+    # 运动原语（白名单 + 自适应转向 + 预测推进）
+    # =================================================================
+
+    def _act(self, action, times=1):
+        """动作执行 + 位姿预测推进（GN 先验的基础）
+
+        白名单硬门：本场地禁用的大步幅动作（go_forward / go_forward_fast）
+        直接拒绝，避免后续改动误用导致摔倒。
+
+        **转向护栏（2026-09-13 真机"一直转 → 转出场地"）**：转向是最便宜的
+        动作（不拍照、不耗帧），旧实现没有任何"转够了就停"的概念，对准与搜索
+        可以互相接管、在死区里无限转下去。这里累计单格**命令**转角，超预算就
+        **拒绝执行**这次转向并熔断本格（安全项，宁可本格记未确认）。
+        **离场护栏**：动作执行后统一检查死推位姿是否越出场地外框。
+        """
+        if action in DISABLED_ACTIONS:
+            raise ValueError(
+                f"本关卡禁用动作 {action}（小面板+打滑地板易摔倒）；"
+                f"前进请用 go_forward_one_step 小批量")
+        if action not in ACTION_MODEL:
+            raise ValueError(f"未登记的动作: {action}（动作白名单见 ACTION_MODEL）")
+        if self._field_guard():
+            # 已经判定越界（整局收手）：拒绝再动，只保持站立
+            return
+        kind, delta = ACTION_MODEL[action]
+        req = abs(float(delta)) * int(times)
+        if kind == "turn" \
+                and self._cell_turn_cmd_deg + req > VIS_TURN_BUDGET_DEG:
+            self._trip_cell(
+                f"单格累计命令转角 {self._cell_turn_cmd_deg:.0f}°+{req:.0f}° "
+                f"超上限 {VIS_TURN_BUDGET_DEG:.0f}°（防原地打转/转出场地）")
+            return
+        self.state.act(action, times=times)
+        # 单格动作计数（硬熔断第三重 + 遥测）：按**实际执行的原语数**记
+        # （times 批量算 times 次）——2026-09-13 发现这个计数从来没被累加过，
+        # 也就是说 VIS_CELL_HARD_ACTIONS（300）此前是死判据，遥测里恒显示 0。
+        self._cell_actions += max(1, int(times))
+        self.predict_pose(action, times)
+        if kind == "turn":
+            self._cell_turn_cmd_deg += req
+        else:
+            # 期间发生平移：旧转向不可盲目撤销，大转振荡记忆也失效
+            self._last_turn = None
+            self._last_big_turn = None
+        self._field_guard()
