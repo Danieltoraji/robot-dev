@@ -33,8 +33,13 @@ from typing import Optional, Sequence
 
 import numpy as np
 
+try:
+    import cv2
+except Exception:  # pragma: no cover - 与 ground_homography 同样的非机器人环境屏蔽
+    cv2 = None
+
 from core.camera_config import (
-    CAMERA_HEIGHT, CAMERA_INTRINSIC, HEAD_CENTER, SERVO_DEG_PER_US,
+    CAMERA_DISTORTION, CAMERA_INTRINSIC, HEAD_CENTER, SERVO_DEG_PER_US,
 )
 from core.ground_homography import GroundHomography
 from core.paths import RESULT_DIR
@@ -72,7 +77,16 @@ class GroundLineMeter:
 
     # ------------------------------------------------------------------
 
-    def measure(self, components: Sequence[RedBandComponent]) -> LineMeasurement:
+    def measure(self, components: Sequence[RedBandComponent],
+                window_cm=None) -> LineMeasurement:
+        """度量一帧。window_cm=(lo,hi) 时只认该前向距离窗口内的簇
+
+        胶条（楼梯根部）与木条（楼梯之后）同色、同检测、都横跨赛道，
+        唯一区别是在运动轴上的位置。调用方按当前步骤指定窗口，比
+        "取最近的红东西"可靠——后者在胶条退到脚边被遮挡时，会无声地
+        跳到远处的木条上，而那正好发生在最不能出错的时刻。
+        window_cm=None 时保持原有"取最近簇"行为。
+        """
         m = LineMeasurement()
         if not components:
             m.reason = "无红色连通域"
@@ -92,9 +106,24 @@ class GroundLineMeter:
                 clusters[-1].append(idx)
             else:
                 clusters.append([idx])
-        nearest = clusters[0]
-        if len(clusters) > 1:
-            m.secondary_forward_cm = min(comp_fwd[i] for i in clusters[1])
+        cluster_fwd = [float(np.mean([comp_fwd[i] for i in cl]))
+                       for cl in clusters]   # 沿 clusters 顺序递增，[0] 即最近簇
+        if window_cm is None:
+            nearest = clusters[0]
+            if len(clusters) > 1:
+                m.secondary_forward_cm = min(comp_fwd[i] for i in clusters[1])
+        else:
+            lo, hi = float(window_cm[0]), float(window_cm[1])
+            keep = [ci for ci, f in enumerate(cluster_fwd) if lo <= f <= hi]
+            if not keep:
+                m.reason = (f"窗口 {lo:.0f}~{hi:.0f}cm 内无目标"
+                            f"（共 {len(clusters)} 簇，最近 {cluster_fwd[0]:.1f}cm）")
+                return m
+            nearest = clusters[keep[0]]
+            rest = [cluster_fwd[ci] for ci in range(len(clusters))
+                    if ci != keep[0]]
+            if rest:
+                m.secondary_forward_cm = float(min(rest))
         pts = np.vstack([pts_by_comp[i] for i in nearest])
         m.ground_pts = pts
         m.n_points = len(pts)
@@ -141,32 +170,74 @@ class GroundLineMeter:
 # =====================================================================
 
 def build_meter(pitch_pulse, cam_height_cm, path=CALIB_PATH,
-                head_pulse=HEAD_CENTER) -> GroundLineMeter:
-    """优先读现场标定档；缺失降级 from_pose 解析自举（degraded=True）"""
+                head_pulse=HEAD_CENTER,
+                pitch_offset_deg=0.0) -> GroundLineMeter:
+    """优先读现场标定档；缺失降级 from_pose 解析自举（degraded=True）
+
+    pitch_offset_deg：相机相对俯仰舵机的安装下俯偏移（度），见
+    core.camera_config.CAM_PITCH_MOUNT_OFFSET_DEG。降级路径必须传它，
+    否则自举出来的几何整体偏浅（相机实际比名义角度更低头）。
+    """
     hg = GroundHomography.load(pitch_pulse, path=path)
     if hg is not None:
         return GroundLineMeter(hg, degraded=False)
     hg = GroundHomography.from_pose((0.0, 0.0), cam_height_cm,
-                                    pitch_pulse, head_pulse=head_pulse)
+                                    pitch_pulse, head_pulse=head_pulse,
+                                    pitch_offset_deg=pitch_offset_deg)
     return GroundLineMeter(hg, degraded=True)
 
 
 def pitch_down_deg(pitch_pulse) -> float:
-    """俯仰脉宽 -> 俯角（度）：1500=水平，越小越低头"""
+    """俯仰脉宽 -> 名义俯角（度）：1500=水平，越小越低头
+
+    不含安装偏移；完整俯角 = 本值 + pitch_offset_deg。
+    """
     return (1500 - pitch_pulse) * SERVO_DEG_PER_US
 
 
-def min_visible_ground_cm(cam_height_cm, pitch_pulse) -> float:
+_HALF_VFOV_DEG = None
+
+
+def half_vfov_deg() -> float:
+    """画幅垂直半视场（度，含畸变实算并缓存）
+
+    ⚠️ 不要用针孔公式 atan((H/2)/fy)：它给 26.49°，**低估 2.5°**。
+    本镜头桶形畸变很强（k1=−0.384），画幅边缘对应的真实角度更大，
+    实算为 29.02°（2026-09-25 纠正）。凡是"用针孔公式推能看见多远/
+    多近"的结论都不可信。
+    """
+    global _HALF_VFOV_DEG
+    if _HALF_VFOV_DEG is None:
+        if cv2 is None:
+            _HALF_VFOV_DEG = 29.02  # 无 cv2 时的实测缺省（见 docstring）
+        else:
+            cx = CAMERA_INTRINSIC[0, 2]
+            edge = np.array([[[cx, 0.0]]], dtype=np.float64)
+            un = cv2.undistortPoints(edge, CAMERA_INTRINSIC, CAMERA_DISTORTION)
+            _HALF_VFOV_DEG = float(math.degrees(math.atan(abs(float(un[0, 0, 1])))))
+    return _HALF_VFOV_DEG
+
+
+def min_visible_ground_cm(cam_height_cm, pitch_pulse,
+                          pitch_offset_deg=0.0) -> float:
     """固定俯仰下"地面线目标"的可见下界（cm）
 
-    视野下缘光线与光轴夹 vfov/2 = atan((H/2)/fy)；下缘俯角 = 俯角 + vfov/2，
-    地面最近可见距离 = cam_z / tan(下缘俯角)。触发阈值窗口必须设在此值之上，
-    否则"原地复测确认"会在盲区内失败（窗口宽度公式见关卡参数表）。
+    下缘俯角 = 名义俯角 + 安装偏移 + 半视场；地面最近可见距离 =
+    cam_z / tan(下缘俯角)。触发阈值窗口必须设在此值之上，否则"原地
+    复测确认"会在盲区内失败。
+
+    2026-09-25 纠正两处（旧版都让"最近能看见多近"偏大）：
+    - 漏掉安装偏移（相机装在头上时向下偏约 15~17°）；
+    - 用针孔公式算半视场（26.49°），实际含畸变为 29.02°。
+    修正后 1040 档、h=34.5cm 约 3cm，与现场实测可见带 2~70cm 一致。
+    下缘俯角已达或超过铅垂时返回 0（画面下缘就在脚下，再近的盲区是
+    机体自遮挡，与镜头无关），旧版此处返回 inf 是错的。
     """
-    fy = CAMERA_INTRINSIC[1, 1]
-    half = math.atan((CAMERA_HEIGHT / 2.0) / fy)
-    total = math.radians(pitch_down_deg(pitch_pulse)) + half
-    if total <= 1e-6 or total >= math.pi / 2:
+    total = math.radians(pitch_down_deg(pitch_pulse) + pitch_offset_deg
+                         + half_vfov_deg())
+    if total >= math.pi / 2:
+        return 0.0
+    if total <= 1e-6:
         return float("inf")
     return cam_height_cm / math.tan(total)
 
