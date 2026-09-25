@@ -53,7 +53,7 @@ SCENES = {
                          "step_h_cm": -2.0,
                          "max_tilt_deg": 15.0, "max_h_cm": 2.0}},
     "STEP_LEGACY": {"deform": {"sigma_tilt_deg": 0.0, "sigma_h_cm": 0.0,
-                               "step_after_actions": 60, "step_tilt_deg": 15.0,
+                               "step_after_actions": 60, "step_tilt_deg": 8.0,
                                "step_h_cm": -2.0,
                                "max_tilt_deg": 15.0, "max_h_cm": 2.0}},
 }
