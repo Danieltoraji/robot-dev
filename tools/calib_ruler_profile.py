@@ -79,10 +79,10 @@ from core.paths import RESULT_DIR
 
 DEFAULT_OUT = os.path.join(RESULT_DIR, "ruler_profile.json")
 #: 默认刻度序列：近段密（起跨点看的就是近段），远段疏
-DEFAULT_DISTS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 20,
-                 25, 30, 35, 40, 45, 50, 55, 60, 65, 70]
+DEFAULT_DISTS = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30]
 
 WIN_W, WIN_H = 1280, 900
+MAG_SIZE = 300            # 放大镜面板边长（显示像素），内部是 120x120 原生像素
 
 
 # =====================================================================
@@ -427,7 +427,25 @@ def report(d, y, x=None, lock_height=None, lock_ruler_h=0.0,
 # =====================================================================
 
 class RulerClicker:
-    """带缩放/平移的刻度点击器（缩放着实必要：刻度是细线，不放大点不准）"""
+    """带缩放/平移的刻度点击器（缩放着实必要：刻度是细线，不放大点不准）
+
+    2026-09-25 修四个 bug：
+    1. `elif event == MOUSEMOVE and self.drag` 写在 `if event == MOUSEMOVE`
+       之后 -> 右键拖动平移是**死代码**，根本不能用。现在合并进同一分支。
+    2. 视图矩形允许超出图像（clip 上限是 2 倍图宽），且不夹紧 -> 显示被拉伸
+       变形，坐标读出还能超出图像（实测出现过 y=2189 > 1944）。现在 clamp_view
+       保证矩形始终在图内、且与窗口同比例。
+    3. 窗口固定 1280x900 而图是 2592x1944（宽高比不同）-> 一开局画面就已经
+       横向拉伸 6.7%。现在显示高度按图的比例算。
+    4. docstring 写了"方向键平移"但没实现 -> 现在补上（含 Windows/Linux 两种
+       扩展键码），并加 +/- 缩放与 0 复位。
+    """
+
+    #: 方向键的扩展键码（Windows 与 Linux 两套都收）
+    _ARROWS = {
+        2424832: (-1, 0), 2490368: (0, 1), 2555904: (1, 0), 2621440: (0, -1),
+        0xFF51: (-1, 0), 0xFF52: (0, -1), 0xFF53: (1, 0), 0xFF54: (0, 1),
+    }
 
     def __init__(self, frame, dists, out_path, image_path=None, pitch=None,
                  lock_height=None, ruler_thickness=None):
@@ -442,47 +460,70 @@ class RulerClicker:
         self.points = []          # [(d_cm, x_px, y_px)]
         self.skipped = []
         self.i = 0
-        # 视图矩形（原生坐标）
-        s = min(WIN_W / self.w, WIN_H / self.h)
-        vw, vh = self.w * s, self.h * s
-        self.x0 = (self.w - vw) / 2.0
-        self.y0 = (self.h - vh) / 2.0
-        self.vw, self.vh = vw, vh
+        # 显示高度跟着图的比例走，避免拉伸变形
+        self.aspect = self.w / float(self.h)
+        self.win_h = int(round(WIN_W / self.aspect))
         self.win = "calib_ruler_profile"
         self.cursor = None
         self.drag = None
+        self.reset_view()
 
-    # ---- 坐标变换 ----
+    # ---- 视口 ----
+    def reset_view(self):
+        self.vw = float(self.w)
+        self.vh = float(self.h)
+        self.x0 = 0.0
+        self.y0 = 0.0
+        self.clamp_view()
+
+    def clamp_view(self):
+        """视口必须留在图内，且与窗口同比例（否则 resize 会拉伸变形）"""
+        self.vw = float(np.clip(self.vw, 24.0, float(self.w)))
+        self.vh = self.vw / self.aspect
+        if self.vh > self.h:
+            self.vh = float(self.h)
+            self.vw = self.vh * self.aspect
+        self.x0 = float(np.clip(self.x0, 0.0, self.w - self.vw))
+        self.y0 = float(np.clip(self.y0, 0.0, self.h - self.vh))
+
     def to_native(self, u, v):
-        return self.x0 + u * self.vw / WIN_W, self.y0 + v * self.vh / WIN_H
+        return (self.x0 + u * self.vw / WIN_W,
+                self.y0 + v * self.vh / self.win_h)
 
     def to_disp(self, x, y):
-        return ((x - self.x0) * WIN_W / self.vw, (y - self.y0) * WIN_H / self.vh)
+        return ((x - self.x0) * WIN_W / self.vw,
+                (y - self.y0) * self.win_h / self.vh)
 
     def zoom(self, factor, u, v):
+        """以光标处为锚点缩放；锚点原生坐标缩放前后不变"""
         nx, ny = self.to_native(u, v)
-        self.vw = float(np.clip(self.vw / factor, 30.0, self.w * 2.0))
-        self.vh = float(np.clip(self.vh / factor, 20.0, self.h * 2.0))
+        self.vw /= factor
+        self.clamp_view()
         self.x0 = nx - (u / WIN_W) * self.vw
-        self.y0 = ny - (v / WIN_H) * self.vh
+        self.y0 = ny - (v / self.win_h) * self.vh
+        self.clamp_view()
 
-    def pan(self, dx, dy):
-        self.x0 += dx * self.vw / WIN_W
-        self.y0 += dy * self.vh / WIN_H
+    def pan(self, du, dv):
+        self.x0 += du * self.vw / WIN_W
+        self.y0 += dv * self.vh / self.win_h
+        self.clamp_view()
 
     # ---- 事件 ----
     def on_mouse(self, event, u, v, flags, param):
         if event == cv2.EVENT_MOUSEMOVE:
             self.cursor = (u, v)
+            if self.drag is not None:            # 右键拖动平移（原先这段是死代码）
+                self.pan(u - self.drag[0], v - self.drag[1])
+                self.drag = (u, v)
         elif event == cv2.EVENT_MOUSEWHEEL:
-            self.zoom(1.25 if flags > 0 else 1 / 1.25, u, v)
+            delta = (cv2.getMouseWheelDelta(flags)
+                     if hasattr(cv2, "getMouseWheelDelta")
+                     else (1 if flags > 0 else -1))
+            self.zoom(1.25 if delta > 0 else 1 / 1.25, u, v)
         elif event == cv2.EVENT_RBUTTONDOWN:
             self.drag = (u, v)
         elif event == cv2.EVENT_RBUTTONUP:
             self.drag = None
-        elif event == cv2.EVENT_MOUSEMOVE and self.drag:
-            self.pan(u - self.drag[0], v - self.drag[1])
-            self.drag = (u, v)
         elif event == cv2.EVENT_LBUTTONDOWN:
             self.record(*self.to_native(u, v))
 
@@ -497,21 +538,18 @@ class RulerClicker:
 
     # ---- 绘制 ----
     def render(self):
-        # 取视图矩形并在原生图上裁切+缩放（保证放大后仍是原生像素）
-        x0, y0 = int(round(self.x0)), int(round(self.y0))
-        x1, y1 = int(round(self.x0 + self.vw)), int(round(self.y0 + self.vh))
-        cx0, cy0 = max(0, x0), max(0, y0)
-        cx1, cy1 = min(self.w, x1), min(self.h, y1)
+        cx0, cy0 = int(round(self.x0)), int(round(self.y0))
+        cx1 = min(self.w, int(round(self.x0 + self.vw)))
+        cy1 = min(self.h, int(round(self.y0 + self.vh)))
         if cx1 <= cx0 or cy1 <= cy0:
             return False
         crop = self.img[cy0:cy1, cx0:cx1]
-        vis = cv2.resize(crop, (WIN_W, WIN_H), interpolation=cv2.INTER_NEAREST)
-        sx = WIN_W / self.vw
-        sy = WIN_H / self.vh
+        # 视口与窗口同比例，所以这一步不会拉伸
+        vis = cv2.resize(crop, (WIN_W, self.win_h),
+                         interpolation=cv2.INTER_NEAREST)
 
-        for i, (d, px, py) in enumerate(self.points):
-            u = (px - self.x0) * sx
-            v = (py - self.y0) * sy
+        for d, px, py in self.points:
+            u, v = self.to_disp(px, py)
             cv2.drawMarker(vis, (int(u), int(v)), (0, 255, 0),
                            cv2.MARKER_CROSS, 26, 2)
             cv2.putText(vis, f"{d:.0f}", (int(u) + 12, int(v) - 10),
@@ -520,26 +558,47 @@ class RulerClicker:
         if self.cursor:
             u, v = self.cursor
             nx, ny = self.to_native(u, v)
-            cv2.line(vis, (u, 0), (u, WIN_H), (0, 200, 255), 1)
+            cv2.line(vis, (u, 0), (u, self.win_h), (0, 200, 255), 1)
             cv2.line(vis, (0, v), (WIN_W, v), (0, 200, 255), 1)
-            cv2.putText(vis, f"({nx:.0f},{ny:.0f})  放大 {self.w / self.vw:.2f}x",
-                        (12, WIN_H - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+            cv2.putText(vis, f"({nx:.0f},{ny:.0f})  显示 {WIN_W / self.vw:.2f}x"
+                             f"  [+/- 缩放  右键拖 0 复位]",
+                        (12, self.win_h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                         (0, 200, 255), 2)
+            # 放大镜：光标处的原生像素常驻放大，缩放不到位也能点准
+            M = 60          # 原生半径
+            S = MAG_SIZE    # 面板边长（显示像素）
+            gx0 = int(np.clip(nx - M, 0, max(0, self.w - 2 * M)))
+            gy0 = int(np.clip(ny - M, 0, max(0, self.h - 2 * M)))
+            patch = self.img[gy0:gy0 + 2 * M, gx0:gx0 + 2 * M]
+            if patch.size:
+                mag = cv2.resize(patch, (S, S), interpolation=cv2.INTER_NEAREST)
+                # 光标在该 patch 里的位置（不是永远正中，边缘时不撒谎）
+                cu = int((nx - gx0) / (2 * M) * S)
+                cv_disp = int((ny - gy0) / (2 * M) * S)
+                cv2.line(mag, (cu, 0), (cu, S), (0, 200, 255), 1)
+                cv2.line(mag, (0, cv_disp), (S, cv_disp), (0, 200, 255), 1)
+                ox, oy = WIN_W - S - 10, self.win_h - S - 10
+                vis[oy:oy + S, ox:ox + S] = mag
+                cv2.rectangle(vis, (ox, oy), (ox + S, oy + S), (0, 200, 255), 2)
 
         if self.i < len(self.dists):
-            tip = (f"click #{self.i + 1}: d = {self.dists[self.i]:.0f} cm   "
-                   f"| wheel zoom  n skip  u undo  f fit  s save  q quit")
+            tip = (f"click #{self.i + 1}: d = {self.dists[self.i]:.0f} cm  |  "
+                   f"wheel or +/- zoom   right-drag pan   0 reset")
         else:
-            tip = "all ticks clicked  |  f fit  s save  u undo  q quit"
-        cv2.putText(vis, tip, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+            tip = "all ticks clicked  |  f fit  s save  u undo  0 reset"
+        cv2.putText(vis, tip, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62,
                     (0, 255, 255), 2)
+        cv2.putText(vis, f"n skip  u undo  r reset  f fit  s save  q quit "
+                         f"({len(self.points)} pts)",
+                    (12, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
         cv2.imshow(self.win, vis)
         return True
 
     def run(self):
-        print(f"\n标尺刻度点击标定：按提示顺序点击刻度")
+        print("\n标尺刻度点击标定：按提示顺序点击刻度")
         print(f"待点刻度（cm）：{self.dists}")
-        print("放大后再点（刻度是细线）；点完按 f 看拟合，s 保存")
+        print("放大后再点（刻度是细线）：滚轮或 +/- 缩放，右键拖动平移，0 复位；"
+              "点完按 f 看拟合，s 保存")
         cv2.namedWindow(self.win, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(self.win, self.on_mouse)
         if not self.render():
@@ -547,24 +606,35 @@ class RulerClicker:
             return None
         res = None
         while True:
-            k = cv2.waitKey(20) & 0xFF
-            if k in (27, ord("q")):
+            k = cv2.waitKeyEx(20)
+            kc = k & 0xFF
+            if kc in (27, ord("q")):
                 break
-            if k == ord("u") and self.points:
+            if k in self._ARROWS:
+                dx, dy = self._ARROWS[k]
+                self.pan(dx * 40, dy * 40)
+            elif kc in (ord("+"), ord("=")):
+                self.zoom(1.4, WIN_W // 2, self.win_h // 2)
+            elif kc in (ord("-"), ord("_")):
+                self.zoom(1 / 1.4, WIN_W // 2, self.win_h // 2)
+            elif kc == ord("0"):
+                self.reset_view()
+                print("  视口复位")
+            elif kc == ord("u") and self.points:
                 d, _, _ = self.points.pop()
                 self.i = max(0, self.i - 1)
                 print(f"  撤销 d={d:.0f}cm")
-            elif k == ord("n"):
+            elif kc == ord("n"):
                 if self.i < len(self.dists):
                     self.skipped.append(self.dists[self.i])
                     print(f"  跳过 d={self.dists[self.i]:.0f}cm")
                     self.i += 1
-            elif k == ord("r"):
+            elif kc == ord("r"):
                 self.points, self.skipped, self.i = [], [], 0
                 print("  已重置")
-            elif k == ord("f"):
+            elif kc == ord("f"):
                 res = self.fit_and_report()
-            elif k == ord("s"):
+            elif kc == ord("s"):
                 res = self.fit_and_report(save=True)
             self.render()
         cv2.destroyAllWindows()
