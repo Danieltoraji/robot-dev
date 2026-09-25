@@ -20,11 +20,15 @@
 用法
 ------------------------------------------------
     python tools/ab_ninegrid.py --list
-    python tools/ab_ninegrid.py --arms zone_off zone_on
-    python tools/ab_ninegrid.py --arms zone_off zone_on --primitives real
-    python tools/ab_ninegrid.py --arms zone_off zone_on --layout random \
-        --seeds 3 7 11 21 42 100 202 303 --json archive/result/ab_zone.json
-    python tools/ab_ninegrid.py --arms anchor_report anchor_use --deform 1.5
+    python tools/ab_ninegrid.py --arms unified three_stage --seeds 3 7 11 21
+    python tools/ab_ninegrid.py --arms unified three_stage --primitives real
+    python tools/ab_ninegrid.py --arms unified three_stage --layout random \
+        --seeds 3 7 11 21 42 100 202 303 --json archive/result/ab.json
+    python tools/ab_ninegrid.py --arms unified --deform 1.5
+    # 临时改常量对照（内存内，不改仓库默认值）；
+    # `--set` 自己会追加一根独立的臂，臂名形如 set:shared.XXX=0.75
+    python tools/ab_ninegrid.py --arms unified \
+        --set shared.VIS_COLOR_DROP_FRAC=0.75
 
 设计约束
 ------------------------------------------------
@@ -33,6 +37,8 @@
 - 一臂 = (setup, teardown)。setup 返回一个"期望两臂不同的计数器名"。
 - 逐种子跑 `sim.nine_grid_sim.run_simulation`，统计到达格数 / 拍照 / 动作 /
   布局是否正确 / 离场护栏是否触发。
+- 选算法只走 `run_simulation(three_stage=)`：两条路线已是两个模块，
+  臂的名字就是路线名。
 """
 from __future__ import annotations
 
@@ -51,7 +57,9 @@ if _ROOT not in sys.path:
 
 import numpy as np  # noqa: E402
 
-import levels.nine_grid as NG  # noqa: E402
+import levels.nine_grid as NG  # noqa: E402  统一决策（默认路线）
+import levels.nine_grid_shared as SH  # noqa: E402  两条路线共用
+import levels.nine_grid_three_stage as THREE  # noqa: E402  三段式
 import sim.nine_grid_sim as SIM  # noqa: E402
 
 DEFAULT_SEEDS = [3, 7, 11, 21, 42, 100, 202, 303]
@@ -112,31 +120,30 @@ def set_level_real():
     本工具只在 `--primitives real` 下成对调用，供"实测口径"对照用，
     **不改仓库里的任何默认值**。
     """
-    names = ["FORWARD_ONE_STEP_CM", "LEFT_MOVE_CM", "RIGHT_MOVE_CM",
-             "FIELD_SMALL_TURN_STEP_DEG_LEFT", "FIELD_SMALL_TURN_STEP_DEG_RIGHT",
-             "FIELD_SMALL_TURN_STEP_DEG", "ACTION_MODEL"]
-    # 某些常量在历史版本里不存在（例如 *_LEFT/_RIGHT 是后来加的）——只还原存在的，
-    # 否则 A/B 会在 setup 阶段就崩（曾真的崩过：FIELD_SMALL_TURN_STEP_DEG_LEFT）。
-    old = {n: getattr(NG, n) for n in names if hasattr(NG, n)}
-    names = list(old)
-    old_model = dict(NG.ACTION_MODEL)
-    NG.FORWARD_ONE_STEP_CM = REAL["fwd"]
-    NG.LEFT_MOVE_CM = REAL["left"]
-    NG.RIGHT_MOVE_CM = REAL["right"]
-    NG.FIELD_SMALL_TURN_STEP_DEG_LEFT = REAL["tls"]
-    NG.FIELD_SMALL_TURN_STEP_DEG_RIGHT = REAL["trs"]
-    NG.FIELD_SMALL_TURN_STEP_DEG = REAL["tls"]
-    NG.ACTION_MODEL["go_forward_one_step"] = ("fwd", REAL["fwd"])
-    NG.ACTION_MODEL["left_move"] = ("lat", -REAL["left"])
-    NG.ACTION_MODEL["right_move"] = ("lat", REAL["right"])
-    NG.ACTION_MODEL["turn_left_small_step"] = ("turn", -REAL["tls"])
-    NG.ACTION_MODEL["turn_right_small_step"] = ("turn", REAL["trs"])
+    # 常量按归属分开改：动作模型与步长在共用模块，对准死区那条不变量在三段式。
+    old_sh = {n: getattr(SH, n) for n in
+              ("FORWARD_ONE_STEP_CM", "LEFT_MOVE_CM", "RIGHT_MOVE_CM")}
+    old_three = {n: getattr(THREE, n) for n in
+                 ("FIELD_SMALL_TURN_STEP_DEG",) if hasattr(THREE, n)}
+    old_model = dict(SH.ACTION_MODEL)
+    SH.FORWARD_ONE_STEP_CM = REAL["fwd"]
+    SH.LEFT_MOVE_CM = REAL["left"]
+    SH.RIGHT_MOVE_CM = REAL["right"]
+    if hasattr(THREE, "FIELD_SMALL_TURN_STEP_DEG"):
+        THREE.FIELD_SMALL_TURN_STEP_DEG = REAL["tls"]
+    SH.ACTION_MODEL["go_forward_one_step"] = ("fwd", REAL["fwd"])
+    SH.ACTION_MODEL["left_move"] = ("lat", -REAL["left"])
+    SH.ACTION_MODEL["right_move"] = ("lat", REAL["right"])
+    SH.ACTION_MODEL["turn_left_small_step"] = ("turn", -REAL["tls"])
+    SH.ACTION_MODEL["turn_right_small_step"] = ("turn", REAL["trs"])
 
     def restore():
-        for n, v in old.items():
-            setattr(NG, n, v)
-        NG.ACTION_MODEL.clear()
-        NG.ACTION_MODEL.update(old_model)
+        for n, v in old_sh.items():
+            setattr(SH, n, v)
+        for n, v in old_three.items():
+            setattr(THREE, n, v)
+        SH.ACTION_MODEL.clear()
+        SH.ACTION_MODEL.update(old_model)
     return restore
 
 
@@ -145,27 +152,34 @@ def set_level_real():
 # =====================================================================
 
 class Probe:
-    """记录被测分支的"活性证据"：_zone_of 返回计数 + 真正下发的动作计数"""
+    """记录被测分支的"活性证据"：判档返回计数 + 真正下发的动作计数
+
+    两条路线现在是两个类，所以探针挂在**共用基类**上（一次覆盖两条路线）；
+    像素判档只有统一决策那条有，单独挂它。
+    """
 
     def __init__(self):
         self.zone = Counter()
         self.acts = Counter()
         self.anchor = Counter()
-        self._orig_zone = NG.NineGridLevel._zone_of
-        # 2026-09-24：分区判档改成"按示意图五参数、吃画面像素"后，真正被调用的是
-        # `_zone_of_px`（`_zone_of_h` 内部转发）。两个都包，计数才反映实际路径。
+        self._orig_act = SH.NineGridShared._act
+        self._orig_anchor = SH.NineGridShared._map_anchor
         self._orig_zone_px = getattr(NG.NineGridLevel, "_zone_of_px", None)
-        self._orig_act = NG.NineGridLevel._act
-        self._orig_anchor = getattr(NG.NineGridLevel, "_map_anchor", None)
 
     def install(self):
         probe = self
 
-        def zone(self_, yaw, off_cm=0.0, near=1.0):
-            r = probe._orig_zone(self_, yaw, off_cm, near)
-            probe.zone[r[0] if isinstance(r, tuple) else r] += 1
-            return r
+        def act(self_, action, times=1):
+            probe.acts[action] += 1
+            return probe._orig_act(self_, action, times)
 
+        def anc(self_, *a, **kw):
+            out = probe._orig_anchor(self_, *a, **kw)
+            probe.anchor["ok" if out is not None else "none"] += 1
+            return out
+
+        SH.NineGridShared._act = act
+        SH.NineGridShared._map_anchor = anc
         if probe._orig_zone_px is not None:
             def zone_px(self_, px, py, w, h, prev=None):
                 r = probe._orig_zone_px(self_, px, py, w, h, prev)
@@ -174,26 +188,11 @@ class Probe:
 
             NG.NineGridLevel._zone_of_px = zone_px
 
-        def act(self_, action, times=1):
-            probe.acts[action] += 1
-            return probe._orig_act(self_, action, times)
-
-        NG.NineGridLevel._zone_of = zone
-        NG.NineGridLevel._act = act
-        if probe._orig_anchor is not None:
-            def anc(self_, *a, **kw):
-                out = probe._orig_anchor(self_, *a, **kw)
-                probe.anchor["ok" if out is not None else "none"] += 1
-                return out
-            NG.NineGridLevel._map_anchor = anc
-
     def remove(self):
-        NG.NineGridLevel._zone_of = self._orig_zone
+        SH.NineGridShared._act = self._orig_act
+        SH.NineGridShared._map_anchor = self._orig_anchor
         if self._orig_zone_px is not None:
             NG.NineGridLevel._zone_of_px = self._orig_zone_px
-        NG.NineGridLevel._act = self._orig_act
-        if self._orig_anchor is not None:
-            NG.NineGridLevel._map_anchor = self._orig_anchor
 
     def snapshot(self):
         return {"zone": dict(self.zone), "acts": dict(self.acts),
@@ -206,125 +205,63 @@ class Probe:
 
 
 # =====================================================================
-# 臂定义：一臂 = setup() -> restore()
+# 臂定义：一根臂 = 一条决策路线（或 `--set` 现场改常量）
 # =====================================================================
+# 两条路线拆成两个模块之后，"选哪条"不再靠改开关，而是 run_simulation(three_stage=)
+# ⇒ 路线臂不需要 setup/restore，只需要一个名字。
+#
+# 已经答过的问题（旧臂的结论留档，别再重问一遍）：
+#   · 三档分区律 vs 二值死区：16 种子统计上不可区分（78.6% vs 78.4%），且多花
+#     约 5% 拍照 ⇒ 分区律没有可测增益（旧臂 zone_off/zone_on/zone_near_*/
+#     zone_tail/zone_nohyst/zone_nohyst_tail/tail_only 的结论）。
+#   · 迟滞：名义口径有益、实测口径有害，差异都在 ±3 格（≈1σ）⇒ 不足以定论。
+#   · 收尾禁转：与"无迟滞"逐项完全相同（工具当时正确判 INVALID）⇒ 恒等操作。
+#   · 地图锚：只算不用时指标逐位相同，可用率仅 5~16% ⇒ 现在只作核验与遥测。
+
+
+def _noop_setup(**_kw):
+    return lambda: None
+
+
+ARMS = {
+    "unified": (_noop_setup, "统一决策（三档分区＋一个循环，默认路线）",
+                "acts", True),
+    "three_stage": (_noop_setup, "三段式（现场发货的稳定实现）", "acts", True),
+}
+
 
 def arm_generic(sets):
-    """通用臂：把 `--set NAME=VALUE` 的常量存进 levels.nine_grid（内存内）"""
-    def setup(**kw):
-        old = {}
-        for k, v in sets.items():
-            if hasattr(NG, k):
-                old[k] = getattr(NG, k)
-            setattr(NG, k, v)
+    """通用臂：把 `--set 模块.常量=VALUE` 的值存进对应模块（内存内）
 
-        def restore():
-            for k, v in old.items():
-                setattr(NG, k, v)
-        return restore
+    模块名：shared（两条路线共用）/ level（统一决策）/ three_stage（三段式）。
+    不带模块名时三个模块都试，命中多处直接报错——避免"改了但没生效"。
+    """
+    mods = {"shared": SH, "level": NG, "three_stage": THREE}
+    resolved = []
+    for key, val in sets.items():
+        if "." in key:
+            mname, cname = key.split(".", 1)
+            if mname not in mods:
+                raise KeyError(f"未知模块 {mname!r}（可用：{sorted(mods)}）")
+            resolved.append((mods[mname], cname, val))
+            continue
+        hits = [m for m in mods.values() if hasattr(m, key)]
+        if not hits:
+            raise KeyError(f"三个模块里都没有常量 {key!r}")
+        resolved.append((hits[-1], key, val))
+
+    def setup(**_kw):
+        old = [(m, n, getattr(m, n)) for m, n, _v in resolved]
+        for m, n, v in resolved:
+            setattr(m, n, v)
+        return lambda: [setattr(m, n, v) for m, n, v in old]
     return setup
 
 
 def make_generic_arm(name, sets):
-    # 通用臂的活性判据用**动作流**（`acts`）：改任何控制常量都必须体现在动作上，
-    # 否则就是"改了但没生效"。比只比分区计数更严格。
+    # 通用臂的活性判据用**动作流**（acts）：改任何控制常量都必须体现在动作上，
+    # 否则就是"改了但没生效"。
     ARMS[name] = (arm_generic(sets), f"自定义: {sets}", "acts", True)
-
-
-def _zone_common(move=None, rot=None, near=None, enabled=True,
-                 hyst=None, no_rot_tail=None):
-    old = {n: getattr(NG, n) for n in
-           ("VIS_ZONE_ENABLED", "VIS_ZONE_MOVE_DEG", "VIS_ZONE_ROT_DEG",
-            "VIS_ZONE_ROT_NEAR")}
-    old_extra = {}
-    for n, v in (("VIS_ZONE_HYST_DEG", hyst),
-                 ("VIS_ZONE_NO_ROT_TAIL", no_rot_tail)):
-        if hasattr(NG, n):
-            old_extra[n] = getattr(NG, n)
-        if v is not None:
-            setattr(NG, n, v)
-    NG.VIS_ZONE_ENABLED = enabled
-    if move is not None:
-        NG.VIS_ZONE_MOVE_DEG = move
-    if rot is not None:
-        NG.VIS_ZONE_ROT_DEG = rot
-    if near is not None:
-        NG.VIS_ZONE_ROT_NEAR = near
-
-    def restore():
-        for n, v in old.items():
-            setattr(NG, n, v)
-        for n, v in old_extra.items():
-            setattr(NG, n, v)
-    return restore
-
-
-def arm_zone_off(**kw):
-    """二值死区基线（VIS_ZONE_ENABLED=False）"""
-    return _zone_common(enabled=False)
-
-
-def arm_zone_on(**kw):
-    """三档分区律（阈值取代码现值）"""
-    return _zone_common(enabled=True)
-
-
-def arm_anchor_report(**kw):
-    """MAP-ANCHOR 报告模式（只算不用；只动 VIS_ZONE_ENABLED 保持一致）"""
-    old = getattr(NG, "MAP_ANCHOR_ENABLED", None)
-    old_ro = getattr(NG, "MAP_ANCHOR_REPORT_ONLY", None)
-    had = hasattr(NG, "MAP_ANCHOR_ENABLED")
-    if had:
-        NG.MAP_ANCHOR_ENABLED = True
-        NG.MAP_ANCHOR_REPORT_ONLY = True
-
-    def restore():
-        if had:
-            NG.MAP_ANCHOR_ENABLED = old
-            NG.MAP_ANCHOR_REPORT_ONLY = old_ro
-    return restore
-
-
-def arm_anchor_use(**kw):
-    """MAP-ANCHOR 接进控制回路"""
-    old = getattr(NG, "MAP_ANCHOR_ENABLED", None)
-    old_ro = getattr(NG, "MAP_ANCHOR_REPORT_ONLY", None)
-    had = hasattr(NG, "MAP_ANCHOR_ENABLED")
-    if had:
-        NG.MAP_ANCHOR_ENABLED = True
-        NG.MAP_ANCHOR_REPORT_ONLY = False
-
-    def restore():
-        if had:
-            NG.MAP_ANCHOR_ENABLED = old
-            NG.MAP_ANCHOR_REPORT_ONLY = old_ro
-    return restore
-
-
-ARMS = {
-    "zone_off": (arm_zone_off, "二值死区基线（zone 关）", "zone", False),
-    "zone_on": (arm_zone_on, "三档分区律（zone 开，代码现值阈值）", "zone", True),
-    "anchor_report": (arm_anchor_report, "MAP-ANCHOR 报告模式（只算不用）",
-                      "anchor", False),
-    "anchor_use": (arm_anchor_use, "MAP-ANCHOR 接控制回路", "anchor", True),
-    # 活性自检臂：两个**故意不同**的阈值。它们只用来证明"装置能测出分区差异"，
-    # 不声称行为改变（near=0.0 与 near=9.0 都会改变 'lat' 计数）。
-    "zone_near_lo": (lambda **k: _zone_common(enabled=True, near=0.0),
-                     "分区律 near=0.0（活性自检）", "zone", True),
-    "zone_near_hi": (lambda **k: _zone_common(enabled=True, near=9.0),
-                     "分区律 near=9.0 ⇒ 蓝档禁用（活性自检）", "zone", True),
-    "zone_tail": (lambda **k: _zone_common(enabled=True, no_rot_tail=True),
-                  "分区律 + 收尾段禁用旋转（VIS_ZONE_NO_ROT_TAIL）",
-                  "zone", True),
-    "zone_nohyst_tail": (lambda **k: _zone_common(enabled=True, hyst=0.0,
-                                                  no_rot_tail=True),
-                         "分区律（无迟滞）+ 收尾禁转", "zone", True),
-    "tail_only": (lambda **k: _zone_common(enabled=False, no_rot_tail=True),
-                  "**二值基线 + 收尾禁转**（与分区律解耦的独立变量）",
-                  "zone", True),
-    "zone_nohyst": (lambda **k: _zone_common(enabled=True, hyst=0.0),
-                    "分区律但无迟滞（对照）", "zone", True),
-}
 
 
 # =====================================================================
@@ -346,7 +283,8 @@ def run_arm(name, seeds, layout_mode, deform, primitives):
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
                     r = SIM.run_simulation(layout=layout, seed=sd, quiet=True,
-                                           deform=deform)
+                                           deform=deform,
+                                           three_stage=(name == "three_stage"))
                 st = r.stats
                 arrived = sum(1 for _, ok in st["results"] if ok)
                 ncell = len(st["results"])
@@ -448,7 +386,7 @@ def summarize(rows):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="nine_grid 多种子 A/B（带活性断言）")
-    ap.add_argument("--arms", nargs="+", default=["zone_off", "zone_on"],
+    ap.add_argument("--arms", nargs="+", default=["unified", "three_stage"],
                     choices=sorted(ARMS))
     ap.add_argument("--seeds", type=int, nargs="+", default=DEFAULT_SEEDS)
     ap.add_argument("--layout", choices=("fixed", "random"), default="random",
@@ -458,10 +396,12 @@ def main(argv=None):
                     default="nominal")
     ap.add_argument("--deform", type=float, default=0.0, metavar="SIGMA_DEG")
     ap.add_argument("--json", default=None, help="把结果写成 JSON")
-    ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
-                    help="把 levels.nine_grid 的模块常量改成 VALUE（内存内），"
-                         "可重复；每次出现会生成一个独立的臂，名字形如 "
-                         "'set:VIS_COLOR_DROP_FRAC=0.75'")
+    ap.add_argument("--set", action="append", default=[],
+                    metavar="[模块.]NAME=VALUE",
+                    help="把某个模块的常量改成 VALUE（内存内），可重复；模块 ∈ "
+                         "shared / level / three_stage，省略则三个都找。"
+                         "每次出现生成一根独立的臂，名字形如 "
+                         "'set:shared.VIS_COLOR_DROP_FRAC=0.75'")
     ap.add_argument("--list", action="store_true", help="列出可用臂")
     args = ap.parse_args(argv)
 
@@ -591,16 +531,6 @@ def main(argv=None):
             else:
                 print(f"    {names[i]} vs {names[j]}: "
                       f"{'相同（均为对照臂，可接受）' if same else '不同'}")
-    # 分区律专有断言：开了分区却一次 'lat' 都没有 = 中间档不可达
-    for name in args.arms:
-        if name.startswith("zone") and name != "zone_off":
-            lat = results[name]["sum"]["zone"].get("lat", 0)
-            if lat == 0 and name != "zone_near_hi":
-                print(f"  {name:14s} ⚠ 分区开启但 'lat' 返回 0 次"
-                      " ⇒ 中间档不可达（查 _align_visual 的入口判据）")
-                ok_all = False
-            else:
-                print(f"  {name:14s} 'lat' 返回 {lat} 次")
     print("=" * 68)
 
     if args.json:
@@ -617,10 +547,10 @@ def fmt_cm(v):
 
 
 def parse_value(v):
-    """把 `--set NAME=VALUE` 的右值转成 Python 值
+    """把 `--set [模块.]NAME=VALUE` 的右值转成 Python 值
 
     ⚠️ 必须显式处理 true/false：`bool("False")` 是 **True**，所以 `--set
-    VIS_ZONE_ENABLED=False` 会**悄悄打开**分区律——这正是本工具最该防的那种
+    shared.某开关=False` 会**悄悄打开**它——这正是本工具最该防的那种
     "看起来改了其实没改（或改反了）"的坑。
     """
     s = v.strip()

@@ -645,24 +645,32 @@ def _print_summary(stats):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="数字宫格关卡仿真")
+    ap = argparse.ArgumentParser(
+        description="数字宫格关卡仿真（**默认开窗**；--no-ui 只跑无头）")
     ap.add_argument("--seed", type=int, default=3,
                     help="动作噪声/随机布局种子（默认 3）")
     ap.add_argument("--random-layout", action="store_true",
                     help="由 seed 生成合法随机布局（默认用固定 SIM_LAYOUT）")
     ap.add_argument("--quiet", action="store_true",
                     help="不打印关卡逐行日志，只打印摘要")
-    ap.add_argument("--deform", type=float, default=0.0, metavar="SIGMA_TILT_DEG",
+    ap.add_argument("--deform", type=float, default=0.0,
+                    metavar="SIGMA_TILT_DEG",
                     help="地板形变：每动作俯仰随机游走步长（度），"
                          "幅度上限 ±15°、高度 ±2cm（0=无形变）")
     ap.add_argument("--three-stage", action="store_true",
                     help="跑**三段式**（现场发货的稳定实现，"
                          "levels/nine_grid_three_stage.py）。不加则跑统一决策"
                          "（三档分区＋一个循环，levels/nine_grid.py）。")
+    ap.add_argument("--no-ui", action="store_true",
+                    help="不开窗（脚本 / CI 用）；默认开窗可视化")
+    ap.add_argument("--delay", type=int, default=30,
+                    help="开窗时每帧等待 ms（0=最快，映射为 waitKey(1)）")
+    ap.add_argument("--detect", action="store_true",
+                    help="开窗时也跑检测器叠加（慢，整轮约 +25s）")
     args = ap.parse_args(argv)
 
-    layout = random_layout(args.seed) if args.random_layout else SIM_LAYOUT
     print(f"[仿真] 决策方式: {'三段式' if args.three_stage else '统一决策'}")
+    layout = random_layout(args.seed) if args.random_layout else SIM_LAYOUT
     print(f"[仿真] 布局: {layout}")
     deform = None
     if args.deform:
@@ -673,14 +681,69 @@ def main(argv=None):
               f"{deform['sigma_h_cm']:.1f}cm（俯仰上限 ±"
               f"{deform['max_tilt_deg']:.0f}°、高度上限 ±"
               f"{deform['max_h_cm']:.0f}cm）")
-    try:
-        run = run_simulation(layout=layout, seed=args.seed, quiet=args.quiet,
-                             deform=deform, three_stage=args.three_stage)
-    except Exception as e:  # 布局扫失败等：CLI 友好退出，便于脚本判断
-        print(f"[仿真] 关卡异常: {type(e).__name__}: {e}")
-        return 1
-    _print_summary(run.stats)
-    return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
+
+    show_window = not args.no_ui
+    if show_window:
+        try:
+            from sim.nine_grid_view import (
+                NineGridView, ViewerQuit, ViewerRestart, _gui_available, HELP,
+            )
+        except Exception as e:            # 缺 cv2 高层面板等
+            print(f"[仿真] 图形界面不可用（{type(e).__name__}: {e}）"
+                  "——改为无窗口运行")
+            show_window = False
+        else:
+            if not _gui_available():
+                print("[仿真] 未检测到图形界面（DISPLAY 不可用？）"
+                      "——改为无窗口运行")
+                print("[仿真] 远程 SSH 场景请加 --no-ui；也可参考 "
+                      "tools/camera_preview.py --stream 的网页流方案")
+                show_window = False
+
+    if not show_window:
+        try:
+            run = run_simulation(layout=layout, seed=args.seed,
+                                 quiet=args.quiet, deform=deform,
+                                 three_stage=args.three_stage)
+        except Exception as e:            # 布局扫失败等：CLI 友好退出
+            print(f"[仿真] 关卡异常: {type(e).__name__}: {e}")
+            return 1
+        _print_summary(run.stats)
+        return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
+
+    # ---- 开窗模式：按键 与 换 seed 重开 ----
+    print("[仿真] 按键：SPACE 暂停／继续｜S 单步放行一帧｜R 换 seed 重开"
+          "｜Q 或 ESC 退出｜D 检出框叠加开关｜+／- 调慢／调快｜H 本说明")
+    print(f"[仿真] 按键说明: {HELP}")
+    seed = args.seed
+    while True:
+        layout = random_layout(seed) if args.random_layout else SIM_LAYOUT
+        viewer = NineGridView(delay_ms=args.delay, show_detect=args.detect)
+        try:
+            run = run_simulation(layout=layout, seed=seed, viewer=viewer,
+                                 quiet=args.quiet, deform=deform,
+                                 three_stage=args.three_stage)
+        except ViewerRestart:
+            viewer.close()
+            seed += 1
+            print(f"[仿真] 重新开始，seed 改为 {seed}")
+            continue
+        except ViewerQuit:
+            viewer.close()
+            print("[仿真] 用户已退出")
+            return 0
+        try:
+            viewer.finish(run.stats)
+            viewer.close()
+            return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
+        except ViewerRestart:
+            viewer.close()
+            seed += 1
+            print(f"[仿真] 重新开始，seed 改为 {seed}")
+        except ViewerQuit:
+            viewer.close()
+            print("[仿真] 用户已退出")
+            return 0
 
 
 if __name__ == "__main__":

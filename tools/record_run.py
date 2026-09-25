@@ -12,13 +12,10 @@
     python tools/record_run.py --seed 3 --out archive/result/rec_base
 
     # 一边录一边开窗（SPACE 暂停 / S 单步 / D 检出叠加 / +/- 调速 / Q 退出）
-    python tools/record_run.py --seed 3 --live --out archive/result/rec_unified \
-        --unified
+    python tools/record_run.py --seed 3 --live --out archive/result/rec_unified
 
-    # 选算法（默认 = 真机默认的三段式）
-    --baseline            三段式（默认开关）
-    --unified             三档分区 + 统一决策
-    --no-region           统一决策用旧的"占比回落"到达判据
+    # 选算法（不写就是统一决策）
+    --three-stage         走三段式（现场发货的稳定实现）
     --tune                绿走廊×0.6 + 蓝区高 0.60
     --primitives real     运动原语用现场实测值（与 AB 同口径）
 
@@ -42,7 +39,8 @@ for p in (_ROOT, _HERE):
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-import levels.nine_grid as NG  # noqa: E402
+import levels.nine_grid as NG  # noqa: E402  统一决策（不写 --three-stage 时用它）
+import levels.nine_grid_three_stage as THREE  # noqa: E402  三段式
 import sim.nine_grid_view as VIEW  # noqa: E402
 import sim.nine_grid_sim as SIM  # noqa: E402
 import ab_ninegrid as AB  # noqa: E402
@@ -54,11 +52,9 @@ class Recorder(VIEW.NineGridView):
     录像画面顶部那行字（banner）用 ASCII：cv2.putText 画不了中文。
     文案约定：
       `SIM seed=3 layout=fixed primitives=real` —— 本局配置（种子/布局/运动原语）；
-      `NAV unitary | arrive by region` / `NAV unitary | arrive by color drop`
-      / `NAV staged (default)` —— 本局导航算法与到达判据；
-      `arrive: underfoot purple >= 0.35, far orange <= 0.10`
-      —— 区域判据的两个门槛（脚下紫区占比、远处橙区占比，见 levels/nine_grid 的
-      VIS_ARRIVE_PURPLE_MIN / VIS_ARRIVE_ORANGE_MAX），录像时按实际常量填写。
+      `NAV unified | arrive region` / `NAV three-stage` —— 本局用的是哪套算法；
+      `arrive: underfoot purple >= 0.35 | far orange <= 0.10`
+      —— 统一决策的到达门槛（脚下紫区占比、远处橙区占比），录像时按实际常量填写。
     """
 
     def __init__(self, out_dir, live=False, every=10, fps=12, show_detect=True,
@@ -146,13 +142,10 @@ def main(argv=None):
     ap.add_argument("--fps", type=int, default=12)
     ap.add_argument("--delay", type=int, default=30,
                     help="--live 时每帧等待 ms（与 sim.nine_grid_view 同默认）")
-    ap.add_argument("--baseline", action="store_true", help="三段式（默认开关）")
-    ap.add_argument("--unified", action="store_true",
-                    help="连续导航（不分搜索/对准/接近三段，逐帧分区决策）")
-    ap.add_argument("--no-region", action="store_true",
-                    help="连续导航下改用旧的“颜色占比回落”到达判据")
+    ap.add_argument("--three-stage", action="store_true",
+                    help="录三段式（现场发货的稳定实现）；不加则录统一决策")
     ap.add_argument("--tune", action="store_true",
-                    help="绿走廊×0.6 + 蓝区高 0.60")
+                    help="绿走廊×0.6 + 蓝区高 0.60（统一决策的画面分档参数）")
     ap.add_argument("--primitives", choices=("nominal", "real"), default="real")
     args = ap.parse_args(argv)
 
@@ -160,34 +153,23 @@ def main(argv=None):
     if args.primitives == "real":
         restores.append(AB.install_real_kinematics())
         restores.append(AB.set_level_real())
-    # 算法开关必须**在起跑之前**设好（下方循环里每一局都按当前开关值跑）
-    if args.unified:
-        NG.UNIFIED_NAV_ENABLED = True
-        NG.VIS_ZONE_ENABLED = True
-    if args.no_region:
-        NG.VIS_ARRIVE_REGION_ENABLED = False
+    # 画面分档参数只在**统一决策**里有用；三段式不看它。
     if args.tune:
         NG.VIS_ZONE_GREEN_TOP = 0.0329
         NG.VIS_ZONE_GREEN_BOT = 0.0719
         NG.VIS_ZONE_BLUE_HEIGHT = 0.60
     # 终端打印用的完整中文说明（录像顶栏用 ASCII 简写 + 第二行阈值）
-    algo = ("分段导航（默认：搜索→对准→接近→到达）"
-            if args.baseline or not args.unified
-            else ("连续导航＋颜色占比回落到达判据" if args.no_region
-                  else "连续导航＋区域到达判据"))
-    banner_nav = ("NAV staged (default)" if args.baseline or not args.unified
-                  else ("NAV unitary | arrive color-drop" if args.no_region
-                        else "NAV unitary | arrive region"))
-    if not args.baseline and args.unified:
-        if args.no_region:
-            hint = (f"arrive: peak color {NG.VIS_COLOR_SEEN_MIN:.2f} then "
-                    f"drop below {NG.VIS_COLOR_DROP_FRAC:.2f} of peak")
-        else:
-            hint = (f"arrive: underfoot purple >= {NG.VIS_ARRIVE_PURPLE_MIN:.2f}"
-                    f" | far orange <= {NG.VIS_ARRIVE_ORANGE_MAX:.2f}"
-                    f" | L/R imbalance <= {NG.VIS_ARRIVE_ASYM_MAX:.2f}")
+    algo = ("三段式（搜索→对准→接近→到达）" if args.three_stage
+            else "统一决策（三档分区＋一个循环）")
+    banner_nav = ("NAV three-stage" if args.three_stage
+                  else "NAV unified | arrive region")
+    if args.three_stage:
+        hint = (f"arrive: peak color {THREE.VIS_COLOR_SEEN_MIN:.2f} then "
+                f"drop below {THREE.VIS_COLOR_DROP_FRAC:.2f} of peak")
     else:
-        hint = ""
+        hint = (f"arrive: underfoot purple >= {NG.VIS_ARRIVE_PURPLE_MIN:.2f}"
+                f" | far orange <= {NG.VIS_ARRIVE_ORANGE_MAX:.2f}"
+                f" | L/R imbalance <= {NG.VIS_ARRIVE_ASYM_MAX:.2f}")
     layout = SIM.random_layout(args.seed) if args.layout == "random" \
         else SIM.SIM_LAYOUT
     seed = args.seed
@@ -205,7 +187,8 @@ def main(argv=None):
             #   遥测都在里面）。第一版这里用 redirect_stdout 吞掉了 —— 用户就是
             #   要看这个，吞掉纯属多此一举。
             run = SIM.run_simulation(layout=layout, seed=seed, quiet=False,
-                                     viewer=rec)
+                                     viewer=rec,
+                                     three_stage=args.three_stage)
             rec.finish(run.stats)
         except VIEW.ViewerRestart:
             print("[rec] 用户按 R：换 seed 重开")
