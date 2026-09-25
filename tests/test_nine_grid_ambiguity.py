@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(_HERE))
 import numpy as np
 
 from core.ground_homography import grid_cell_center
-from levels.nine_grid import ambiguity_repair, GRID_CELL_CM
+from levels.nine_grid_shared import ambiguity_repair, GRID_CELL_CM
 
 
 def _scene(swap=True, jitter=0.0):

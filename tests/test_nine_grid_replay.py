@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(_HERE))   # 仓库根
 
 import numpy as np
 
-from levels.nine_grid import NineGridLevel, PITCH_NAV
+from levels.nine_grid_shared import NineGridShared, PITCH_NAV
 from tools.replay_ninegrid import (
     PHOTO_TRUTH, ReplayRobot, build_schedule, find_photos,
 )
@@ -39,7 +39,7 @@ def _scan():
     if not photos:
         return None, None, None
     robot = ReplayRobot(build_schedule(photos, "schedule"))
-    level = NineGridLevel(robot)
+    level = NineGridShared(robot)
     level.layout_scan()
     return level, robot, photos
 

@@ -53,7 +53,9 @@ from core.camera_config import (
 )
 from core.ground_homography import grid_cell_center
 from core.robot_core import RobotState
-from levels.nine_grid import NineGridLevel, DISABLED_ACTIONS, _action_cn
+from levels.nine_grid import NineGridLevel
+from levels.nine_grid_shared import DISABLED_ACTIONS, _action_cn
+from levels.nine_grid_three_stage import NineGridThreeStageLevel
 from vision.nine_grid_detector import COLOR_TO_ID
 
 # =====================================================================
@@ -564,12 +566,17 @@ def random_layout(seed):
 
 
 def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
-                   deform=None):
+                   deform=None, three_stage=False):
     """跑一遍完整关卡（布局扫→1..7），不做断言；返回 SimRun(robot, level, stats)
 
-    stats 键：ok_all / results / layout_ok / digit_cell / truth / captures /
-              actions / action_counts / small_turn_deg / small_turn_usable /
-              banned_used / deform_tilt_deg / deform_height_cm
+    两条决策路线各是一个模块，这里按 `three_stage` 选：
+      · False（默认）= levels/nine_grid.py 统一决策（三档分区 + 一个循环）；
+      · True         = levels/nine_grid_three_stage.py 三段式（现场发货的稳定版）。
+
+    stats 键：decision / ok_all / results / layout_ok / digit_cell / truth /
+              captures / actions / action_counts / small_turn_deg /
+              small_turn_usable / banned_used / cell_trips / panel_landing /
+              deform_tilt_deg / deform_height_cm
     quiet=True 时吞掉关卡逐行日志（只留返回值供调用方打印摘要）。
     viewer：可选图形化 viewer（需有 attach(robot, level) 与 on_action/on_frame）；
             传入后由 viewer 决定节奏（暂停/单步），None = 纯无头。
@@ -577,7 +584,8 @@ def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
     """
     robot = SimNineGridRobot(layout=layout, seed=seed, viewer=viewer,
                              deform=deform)
-    level = NineGridLevel(robot)
+    level_cls = NineGridThreeStageLevel if three_stage else NineGridLevel
+    level = level_cls(robot)
     if viewer is not None:
         viewer.attach(robot, level)
     if quiet:
@@ -589,6 +597,7 @@ def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
     truth = {d: c for c, d in layout.items() if d is not None}
     used = {a for a, _ in robot.action_log}
     stats = {
+        "decision": "三段式" if three_stage else "统一决策",
         "ok_all": bool(ok_all),
         "results": list(level.results),
         "layout_ok": level.digit_cell == truth,
@@ -620,6 +629,7 @@ def _action_counts_cn(counts):
 
 def _print_summary(stats):
     ok_n = sum(1 for _, ok in stats["results"] if ok)
+    print(f"[仿真] 决策方式: {stats.get('decision', '?')}")
     print(f"[仿真] 布局识别: {'成功' if stats['layout_ok'] else '失败'}"
           f"｜数字→格位: {stats['digit_cell']}")
     print(f"[仿真] 到位: {ok_n}/{len(stats['results'])}"
@@ -645,27 +655,14 @@ def main(argv=None):
     ap.add_argument("--deform", type=float, default=0.0, metavar="SIGMA_TILT_DEG",
                     help="地板形变：每动作俯仰随机游走步长（度），"
                          "幅度上限 ±15°、高度 ±2cm（0=无形变）")
-    ap.add_argument("--unified", action="store_true",
-                    help="走**统一决策新循环**（三档分区＋一个循环；2026-09-25 "
-                         "重写版）。默认仍是旧三段式链路。此开关只改本次运行的"
-                         "算法选择，**不改任何默认常量**，跑完自动还原。")
+    ap.add_argument("--three-stage", action="store_true",
+                    help="跑**三段式**（现场发货的稳定实现，"
+                         "levels/nine_grid_three_stage.py）。不加则跑统一决策"
+                         "（三档分区＋一个循环，levels/nine_grid.py）。")
     args = ap.parse_args(argv)
 
-    # 只在本进程内切换算法，跑完还原 —— 绝不把默认值改掉
-    restores = []
-    if args.unified:
-        import levels.nine_grid as _ng
-        _old = (_ng.UNIFIED_NAV_ENABLED, _ng.VIS_ZONE_ENABLED,
-                _ng.VIS_REANCHOR_BY_ANCHOR)
-        _ng.UNIFIED_NAV_ENABLED = True
-        _ng.VIS_ZONE_ENABLED = True
-        _ng.VIS_REANCHOR_BY_ANCHOR = True
-        restores.append(lambda: setattr(_ng, "UNIFIED_NAV_ENABLED", _old[0]))
-        restores.append(lambda: setattr(_ng, "VIS_ZONE_ENABLED", _old[1]))
-        restores.append(lambda: setattr(_ng, "VIS_REANCHOR_BY_ANCHOR", _old[2]))
-        print("[仿真] ★ 统一决策新循环（三档分区＋一个循环，2026-09-25 重写版）")
-
     layout = random_layout(args.seed) if args.random_layout else SIM_LAYOUT
+    print(f"[仿真] 决策方式: {'三段式' if args.three_stage else '统一决策'}")
     print(f"[仿真] 布局: {layout}")
     deform = None
     if args.deform:
@@ -678,13 +675,10 @@ def main(argv=None):
               f"{deform['max_h_cm']:.0f}cm）")
     try:
         run = run_simulation(layout=layout, seed=args.seed, quiet=args.quiet,
-                             deform=deform)
+                             deform=deform, three_stage=args.three_stage)
     except Exception as e:  # 布局扫失败等：CLI 友好退出，便于脚本判断
         print(f"[仿真] 关卡异常: {type(e).__name__}: {e}")
         return 1
-    finally:
-        for f in reversed(restores):
-            f()
     _print_summary(run.stats)
     return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
 

@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(_HERE))
 from core.robot_core import (RobotState, lock_camera_controls,
                                 auto_calibrate_exposure,
                                 CAM_AUTO_EXPOSURE_ENABLED)
-from levels.nine_grid import NineGridLevel, PITCH_NAV, TOTAL_TIME_BUDGET_S
+from levels.nine_grid_shared import NineGridShared, PITCH_NAV, TOTAL_TIME_BUDGET_S
 
 
 def main(argv=None):
@@ -51,7 +51,7 @@ def main(argv=None):
         calib = auto_calibrate_exposure(state)
         lock_info["auto_exposure"] = {k: calib[k] for k in
                                       ("ok", "exposure", "gain", "mean", "clip")}
-    level = NineGridLevel(state)
+    level = NineGridShared(state)
     level.deadline = time.time() + args.budget
     # 拍照计数 + **逐帧光照记录**：layout_scan 不走 _count_frame，故在
     # capture_frame 上挂钩子。光照记录是"换灯后还能不能认色"的直接证据

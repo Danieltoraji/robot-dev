@@ -26,8 +26,8 @@ sys.path.insert(0, os.path.dirname(_HERE))   # 仓库根
 import numpy as np
 
 from core.camera_config import HEAD_RIGHT
-from levels.nine_grid import (
-    NineGridLevel, PITCH_NAV, clipped_quad_centroid,
+from levels.nine_grid_shared import (
+    NineGridShared, PITCH_NAV, clipped_quad_centroid,
     project_ground_to_pixel,
 )
 from sim.nine_grid_sim import SimNineGridRobot, SIM_LAYOUT
@@ -59,7 +59,7 @@ def _frame_observations(level, robot, pitch):
 def _scene():
     """复现根因的位姿：一帧内多块面板被裁切"""
     robot = SimNineGridRobot()
-    level = NineGridLevel(robot)
+    level = NineGridShared(robot)
     level.digit_cell = {d: c for c, d in SIM_LAYOUT.items() if d is not None}
     robot.pos = np.array([SCENE_POSE[0], SCENE_POSE[1]])
     robot.heading = SCENE_POSE[2]
@@ -107,7 +107,7 @@ def test_unclipped_center_model_exact():
     裁切模型分开，又不把检测噪声误判成模型缺陷。
     """
     robot = SimNineGridRobot()
-    level = NineGridLevel(robot)
+    level = NineGridShared(robot)
     level.digit_cell = {d: c for c, d in SIM_LAYOUT.items() if d is not None}
     robot.pos = np.array([50.0, -20.0])
     robot.heading = 0.0

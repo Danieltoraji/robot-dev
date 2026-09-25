@@ -19,6 +19,7 @@ from core.paths import RESULT_DIR
 from core.robot_core import RobotState
 from levels import goodluck as level_goodluck
 from levels import nine_grid as level_nine_grid
+from levels import nine_grid_three_stage as level_nine_grid_three_stage
 from levels import stairs_hurdle as level_stairs_hurdle
 
 
@@ -46,10 +47,16 @@ LEVELS = {
         "run_level": level_goodluck.run_level,
     },
     # 数字宫格：无 AprilTag，用地面单应定位（tag_poses 留空即可）
+    # 两条决策路线各是一个模块，入口名分开，现场跑哪条一眼可辨。
     "nine_grid": {
         "module": level_nine_grid,
         "tag_poses": {},
         "run_level": level_nine_grid.run_level,
+    },
+    "nine_grid_three_stage": {
+        "module": level_nine_grid_three_stage,
+        "tag_poses": {},
+        "run_level": level_nine_grid_three_stage.run_level,
     },
     # 上下楼梯与识别跨障：无 AprilTag，红色带 + 本地系地面单应
     "stairs_hurdle": {

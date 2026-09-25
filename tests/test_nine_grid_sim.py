@@ -24,7 +24,7 @@ import numpy as np
 from core.camera_config import (
     HEAD_CENTER, HEAD_WIDE_LEFT, HEAD_WIDE_RIGHT,
 )
-from levels.nine_grid import NineGridLevel, PITCH_NAV, PITCH_DOWN
+from levels.nine_grid_shared import NineGridShared, PITCH_NAV, PITCH_DOWN
 from sim.nine_grid_sim import SimNineGridRobot, run_simulation
 
 # 拍照数护栏（真机时间预算的代理指标；超限说明 FSM 在空转）
@@ -35,7 +35,7 @@ CAPTURE_GUARD = 350
 def test_banned_actions_rejected():
     """动作白名单硬门：本场地禁用的大步幅动作必须被拒绝（防误用摔倒）"""
     robot = SimNineGridRobot()
-    level = NineGridLevel(robot)
+    level = NineGridShared(robot)
     for action in ("go_forward", "go_forward_fast", "climb_stairs"):
         try:
             level._act(action, 1)
@@ -74,7 +74,7 @@ def test_render_guard_fast():
 
 def test_sim_full_run():
     """端到端：默认布局 + 默认种子必须布局正确、7/7 到达、不越护栏"""
-    run = run_simulation()
+    run = run_simulation(three_stage=True)
     s = run.stats
 
     assert s["layout_ok"], \

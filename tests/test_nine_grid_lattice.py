@@ -33,8 +33,8 @@ from core.camera_config import (
     CAMERA_WIDTH, CAMERA_HEIGHT, HEAD_CENTER,
 )
 from core.ground_homography import grid_cell_center, cell_index, GRID_CELL_CM
-from levels.nine_grid import (
-    NineGridLevel, lattice_assign, PITCH_NAV, PITCH_DOWN,
+from levels.nine_grid_shared import (
+    NineGridShared, lattice_assign, PITCH_NAV, PITCH_DOWN,
     LATTICE_RMS_MAX_CM,
 )
 from sim.nine_grid_sim import SIM_LAYOUT
@@ -133,7 +133,7 @@ def _synth_pix_obs(x, y, bearing_deg, layout=TRUTH, off_deg=22.0, h_cm=50.0,
     bias_cm/bias_digit：把该数字的面板中心在地面平移 bias_cm（模拟裁切质心
     偏差），并把该数字全部观测标为 clipped（走降权路径）。
     """
-    from levels.nine_grid import project_ground_to_pixel
+    from levels.nine_grid_shared import project_ground_to_pixel
     th = np.radians(bearing_deg)
     shift = np.array([0.0, bias_cm or 0.0])
     obs = []
@@ -155,7 +155,7 @@ def _synth_pix_obs(x, y, bearing_deg, layout=TRUTH, off_deg=22.0, h_cm=50.0,
 
 def test_self_calibration_and_pose_bootstrap():
     """合成像素观测：自标定出布局 + (偏移, 高度)，位姿自举回到真值"""
-    level = NineGridLevel(None)
+    level = NineGridShared(None)
     x, y, brg = 50.0, -20.0, 0.0
     obs = _synth_pix_obs(x, y, brg)
     assert len({e[2] for e in obs}) == 7, "合成观测应覆盖 7 个数字"
@@ -177,7 +177,7 @@ def test_self_calibration_and_pose_bootstrap():
 
 def test_coverage_requires_all_digits():
     """只有 6 个数字的观测：整函数判失败（不允许返回残缺布局）"""
-    level = NineGridLevel(None)
+    level = NineGridShared(None)
     obs = [e for e in _synth_pix_obs(50.0, -20.0, 0.0) if e[2] != 4]
     fit = level._lattice_grid_fit(obs)
     assert fit.cells is None, f"缺 1 个数字竟给出布局 {fit.cells}"
@@ -187,7 +187,7 @@ def test_coverage_requires_all_digits():
 
 def test_clipped_bias_downweighted():
     """单块板只有带 ~6cm 偏差的裁切观测：降权后布局仍正确"""
-    level = NineGridLevel(None)
+    level = NineGridShared(None)
     obs = _synth_pix_obs(50.0, -20.0, 0.0)
     biased = [(p, h, 4, px, True) for (p, h, d, px, _c) in obs if d == 4]
     others = [e for e in obs if e[2] != 4]
@@ -214,9 +214,9 @@ def test_outlier_never_yields_wrong_layout():
     真值——好处是鲁棒，代价是自标定常数被带偏几度/几厘米；≥0.9 格距（30cm）
     时覆盖门/RMS 门直接拒绝（cells=None）。
     """
-    level = NineGridLevel(None)
+    level = NineGridShared(None)
     obs = _synth_pix_obs(50.0, -20.0, 0.0)
-    from levels.nine_grid import project_ground_to_pixel
+    from levels.nine_grid_shared import project_ground_to_pixel
     for bias in (10.0, 20.0, 30.0, 40.0, 50.0):
         fake = []
         for (pitch, head, d, _px, _c) in obs:

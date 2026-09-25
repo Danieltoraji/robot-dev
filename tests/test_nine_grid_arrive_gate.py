@@ -17,7 +17,7 @@
 把这两个数一起改掉（例如只把 DROP_FRAC 放宽到 0.70）会**提前停**、牺牲落点
 （名义口径面板 3/4/5 的落点从 2.2/0.7/3.4cm 推到 6.8/5.5/5.2cm）⇒ 踩不到开关。
 """
-import levels.nine_grid as NG
+import levels.nine_grid_three_stage as NG
 
 
 def test_arrival_gate_constants_pinned():

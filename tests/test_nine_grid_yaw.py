@@ -22,11 +22,12 @@ import math
 import numpy as np
 import pytest
 
-import levels.nine_grid as NG
+from core.camera_config import CAMERA_WIDTH
+import levels.nine_grid_three_stage as NG
 from core.camera_config import (
     CAMERA_INTRINSIC, CAM_HEIGHT_STANDING_CM, CAM_PITCH_MOUNT_OFFSET_DEG)
 
-W = float(NG.CAMERA_WIDTH)
+W = float(CAMERA_WIDTH)
 FX = float(CAMERA_INTRINSIC[0, 0])
 CX = float(CAMERA_INTRINSIC[0, 2])
 

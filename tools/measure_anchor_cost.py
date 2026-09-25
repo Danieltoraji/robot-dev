@@ -86,7 +86,7 @@ def main(argv=None):
 
     from core.robot_core import RobotState
     from vision.nine_grid_detector import NineGridDetector
-    import levels.nine_grid as NG
+    import levels.nine_grid_shared as NG
 
     st = RobotState(tag_poses={})
     det = NineGridDetector()
@@ -112,7 +112,7 @@ def main(argv=None):
 
     # ---------------- 真实观测 → 基对应点 ----------------
     obs = det.detect_panels(frame, arbitrate=False, drop_border=False)
-    lv = NG.NineGridLevel(st)
+    lv = NG.NineGridShared(st)
     lv.digit_cell = {d: d - 1 for d in range(1, 8)}   # 合成映射，仅用于计时
     corr, _keep = lv._anchor_corr(obs, frame)
     base = [(np.asarray(c[0], float), np.asarray(c[1], float)) for c in corr]

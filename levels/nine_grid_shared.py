@@ -791,6 +791,12 @@ def _wrap_angle(a):
 # =====================================================================
 # 两条路线共用的机制（动作、预算、布局扫、地图像核验、投影）
 # =====================================================================
+# 两条路线都要用的动作步长与在线估计常量（两条路线拆开时从路线文件移入）
+# =====================================================================
+
+VIS_REANCHOR_MAX_POSE_JUMP_CM = 40.0  # 实测位置距"目标格心"超过此值判为误解、弃用
+
+# =====================================================================
 
 class NineGridShared:
     """数字宫格两条路线共用的部分：逐格主流程、护栏、布局扫、投影、位置核对
@@ -1825,3 +1831,27 @@ class NineGridShared:
             self._last_turn = None
             self._last_big_turn = None
         self._field_guard()
+
+    def _anchor_stat(self, verdict, n, why="", n_in=0, h=None, drift=None):
+        """锚的诚实遥测（默认只在真的开锚时打印，避免默认路径多出日志）
+
+        `_anchor_quiet`：角点逆序那一遍是"补试"，不重复计数也不打印——
+        `_anchor_calls` 是**可用率的分母**，一次调用只能算一次。
+        """
+        if self._anchor_quiet:
+            return
+        self._anchor_calls += 1
+        if self._anchor_ok is None:
+            self._anchor_ok = 0
+        if verdict == "OK":
+            self._anchor_ok += 1
+            if drift is not None:
+                self._anchor_drift.append(float(drift))
+        msg = (f"[几何锚] {verdict}｜对应 {n} 个数字，有效点 {n_in} 个"
+               f"{'' if h is None else f'，相机离地 {h:.0f}cm'}"
+               f"{'' if drift is None else f'，与按动作推算的位置相差 {drift:.1f}cm'}"
+               f"{'' if not why else f'（{why}）'}")
+        self._anchor_log.append(msg)
+        if len(self._anchor_log) > 40:
+            del self._anchor_log[:-40]
+        print(msg)

@@ -39,7 +39,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 
 import levels.nine_grid as ng                      # noqa: E402
-from levels.nine_grid import GRID_CELL_CM, grid_cell_center   # noqa: E402
+from levels.nine_grid_shared import GRID_CELL_CM, grid_cell_center   # noqa: E402
 from vision.nine_grid_detector import NineGridDetector        # noqa: E402
 from sim.nine_grid_sim import run_simulation                 # noqa: E402
 

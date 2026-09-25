@@ -32,7 +32,7 @@ from vision.nine_grid_detector import (NineGridDetector, COLOR_TO_ID,
                                        normalize_illumination)
 
 try:
-    from levels.nine_grid import PITCH_NAV, PITCH_DOWN
+    from levels.nine_grid_shared import PITCH_NAV, PITCH_DOWN
 except ImportError:      # 关卡层改动时不要阻断探针
     PITCH_NAV, PITCH_DOWN = 1200, 1040
 

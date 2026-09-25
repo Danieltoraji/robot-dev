@@ -93,7 +93,7 @@ def main(argv=None):
 
     from core.robot_core import RobotState
     from vision.nine_grid_detector import NineGridDetector
-    import levels.nine_grid as NG
+    import levels.nine_grid_shared as NG
 
     st = RobotState(tag_poses={})
     det = NineGridDetector()
@@ -149,7 +149,7 @@ def main(argv=None):
 
     # ⑤ 锚解算（需要 level 实例；digit_cell 用"数字 d → 格 d-1"的合成映射，
     #    这里只量**耗时**，映射内容不影响 RANSAC 的计算量级）
-    lv = NG.NineGridLevel(st)
+    lv = NG.NineGridShared(st)
     lv.digit_cell = {d: d - 1 for d in range(1, 8)}
     obs = det.detect_panels(frame, arbitrate=False, drop_border=False)
     corr, _keep = lv._anchor_corr(obs, frame)

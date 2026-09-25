@@ -11,7 +11,7 @@
 import numpy as np
 import pytest
 
-import levels.nine_grid as NG
+import levels.nine_grid_shared as NG
 from core.camera_config import CAM_HEIGHT_STANDING_CM
 from core.ground_homography import (
     GroundHomography, grid_cell_center, cell_index)
@@ -54,7 +54,7 @@ FRAME = _Frame()
 
 
 def _make_level(cells_by_digit):
-    lv = NG.NineGridLevel(_StubState())
+    lv = NG.NineGridShared(_StubState())
     lv.digit_cell = dict(cells_by_digit)
     return lv
 

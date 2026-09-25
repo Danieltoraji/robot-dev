@@ -21,7 +21,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.camera_config import HEAD_CENTER  # noqa: E402
-from levels.nine_grid import PITCH_DOWN  # noqa: E402
+from levels.nine_grid_shared import PITCH_DOWN  # noqa: E402
 import sim.nine_grid_sim as SIM  # noqa: E402
 
 

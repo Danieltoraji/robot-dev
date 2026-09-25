@@ -24,6 +24,7 @@ from core.camera_config import (  # noqa: E402
     HEAD_CENTER, HEAD_LEFT, HEAD_RIGHT, SERVO_DEG_PER_US,
 )
 import levels.nine_grid as NG  # noqa: E402
+from levels.nine_grid_shared import ACTION_MODEL  # noqa: E402
 
 W, H = 2592.0, 1944.0
 
@@ -168,7 +169,7 @@ def test_action_names_are_in_action_model():
     for zone in ("move", "lat", "rot"):
         for side in (-1, 1):
             a = lv._action_for_zone(zone, W / 2.0 + side * 10, W)
-            assert a in NG.ACTION_MODEL, a
+            assert a in ACTION_MODEL, a
 
 
 # =====================================================================

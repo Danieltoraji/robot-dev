@@ -42,7 +42,7 @@ for p in (_ROOT, _HERE):
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-import levels.nine_grid as NG  # noqa: E402
+import levels.nine_grid_shared as NG  # noqa: E402
 import sim.nine_grid_sim as SIM  # noqa: E402
 
 # 判定"真值里这个面板算可见"的门：可见面积占比 / 被遮挡比例

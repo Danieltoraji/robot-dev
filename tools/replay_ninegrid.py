@@ -40,8 +40,8 @@ sys.path.insert(0, str(_REPO))
 import cv2
 
 from core.camera_config import HEAD_CENTER
-from levels.nine_grid import (
-    NineGridLevel, PITCH_NAV, PITCH_DOWN,
+from levels.nine_grid_shared import (
+    NineGridShared, PITCH_NAV, PITCH_DOWN,
 )
 
 # 现场照片读图真值（板南侧机位；见模块 docstring）
@@ -218,7 +218,7 @@ def main(argv=None):
         print(f"         pitch={pitch} head={head:4d}  {path.name}")
 
     robot = ReplayRobot(schedule)
-    level = NineGridLevel(robot)
+    level = NineGridShared(robot)
 
     if args.diag:
         run_diag(robot, level)

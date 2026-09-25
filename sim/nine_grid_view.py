@@ -47,7 +47,7 @@ import cv2
 import numpy as np
 
 from core.ground_homography import grid_cell_center
-from levels.nine_grid import project_ground_to_pixel
+from levels.nine_grid_shared import project_ground_to_pixel
 from sim.nine_grid_sim import (
     FRAME_H, FRAME_W, PANEL_BGR, PANEL_HALF_CM, SIM_LAYOUT,
     random_layout, run_simulation, _print_summary,
