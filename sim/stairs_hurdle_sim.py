@@ -15,14 +15,30 @@
   y=30/45    下行两级立面
   y∈[30,45]  踏面 z=2.5/0
   y>45       平地，红色横杆在 y=45+bar_dist（25~40 随机）
+相机模型（2026-09-25 重制）
+--------------------------
+站立光心离地 CAM_HEIGHT=34.5cm（卷尺实测）；相机装在头上时相对俯仰舵机
+另有 CAM_PITCH_OFFSET_DEG≈15° 的下俯偏移，**必须计入**，否则渲染出的可见
+地面带与现场完全对不上（旧版漏掉偏移且用 39cm，实际渲染成 [13.9, 177.7]cm，
+而现场实测是 [2, 70]cm——远近两头都反着）。
+
+动作"真值"（噪声仿 nine_grid_sim）
+----------------------------------
+位移与转角取自 core/motion_calib（实测单一真源），并叠加实测散布。
+
+⚠️ **不要在这里写与关卡共享的"猜测值"。** 历史事故：仿真把
+turn_left_small_step 写成 N(2.0, 1.5)°，与关卡共享同一个错数（真值
+8.625°），于是端到端 20/20 全绿，而真机对正阶段必然来回过冲。
+仿真读实测真源，关卡把同一份数值当预测值——两者角色不同，数值同源。
+
+动作组净位移（CLIMB/DOWN/HURDLE_FWD_CM）**仍是名义值，尚未实测**，
+取值使场景自洽：两次上楼落在顶部平台（y 15~30），两次下楼落在平地
+（y≥45）。上楼/下楼的航向偏置同理（参考实现在顶部固定"右转 2 小步"
+补偿，按实测右转 5.2°/步折合约 10.4°，即两次上楼累计左偏约 10°）。
+
 未建模：楼梯木结构的遮挡与外观（合成帧只渲染红色目标+纯色背景；
 遮挡已在方案里几何论证过：接近段横杆越过台阶沿可见）、拍照耗时、
-光照/白平衡、相机-机体偏移（CAM_BODY_OFFSET=0）。
-
-动作名义位移（"真值"，与关卡参数表无关；打滑噪声仿 nine_grid_sim）
-------------------------------------------------------------------
-climb_stairs: 前进 18cm 且 z+2.5；down_floor: 前进 13cm 且 z-2.5；
-hurdles: 前进 10cm。跳变建模为动作组的净位移。
+光照/白平衡、相机-机体偏移（CAM_BODY_OFFSET=0）、三楼以上的机体自遮挡。
 
 运行
 ----
@@ -40,6 +56,7 @@ if __package__ in (None, ""):
 import numpy as np
 import cv2
 
+from core import motion_calib as mc
 from core.camera_config import (
     CAMERA_INTRINSIC, CAMERA_DISTORTION, HEAD_CENTER, SERVO_DEG_PER_US,
 )
@@ -149,10 +166,36 @@ class StairsScene:
 
 
 class SimStairsRobot(RobotState):
-    """场景系位姿 + 打滑噪声动作 + 合成相机（红带渲染）"""
+    """场景系位姿 + 打滑噪声动作 + 合成相机（红带渲染）
 
-    CAM_HEIGHT = 39.0
+    动作真值取自 core/motion_calib（实测单一真源），噪声按其散布给。
+    动作组的净位移与航向偏置是**名义值**，见模块 docstring。
+    """
+
+    #: 站立时相机光心离地高度（cm）——卷尺实测
+    CAM_HEIGHT = 34.5
+    #: 相机相对俯仰舵机的安装下俯偏移（度）——漏掉它可见带会整体失真
+    CAM_PITCH_OFFSET_DEG = 15.0
+    #: 相机-机体水平偏移（未建模）
     CAM_BODY_OFFSET = 0.0
+
+    #: 动作组净位移（cm，名义值）：两次上楼落在顶部平台、两次下楼落在平地
+    #: 取 12cm 而不是踏面深度 15cm，是给 ±10% 的打滑噪声留余量——旧版 18cm
+    #: 两次上楼会冲到 y≈36（平台只到 30），测出来的"通过"在一个不存在的世界里
+    CLIMB_FWD_CM = 12.0
+    DOWN_FWD_CM = 12.0
+    HURDLE_FWD_CM = 10.0
+
+    #: 上楼/下楼造成的航向偏置与散布（度，名义值）
+    CLIMB_YAW_BIAS_DEG = -5.0
+    CLIMB_YAW_SIGMA_DEG = 2.0
+    DOWN_YAW_BIAS_DEG = -1.5
+    DOWN_YAW_SIGMA_DEG = 1.5
+
+    #: 未实测动作的名义值（仅仿真用；关卡不得当真值）
+    FWD_SMALL_CM_NOMINAL = 1.5
+    BACK_STEP_CM_NOMINAL = 3.2
+    RIGHT_MOVE_CM_NOMINAL = 2.5
 
     def __init__(self, scene: StairsScene, seed=0, start=(0.0, -60.0),
                  heading_deg=0.0, wobble_sigma_deg=0.3):
@@ -167,6 +210,13 @@ class SimStairsRobot(RobotState):
         self.wobble_sigma_deg = wobble_sigma_deg
         self.n_captures = 0
         self.action_log = []
+        # 组间漂移：整局内转角整体偏移（实测左转组间极差 25°/20步 =
+        # 单步 ±7%；右转仅 ±1%）。建模成每局一次的缩放，逼关卡
+        # "转一步、复测一次"，而不是把实测值当冻结常数。
+        self._turn_scale = {
+            "left": 1.0 + float(self.rng.normal(0.0, 0.030)),
+            "right": 1.0 + float(self.rng.normal(0.0, 0.005)),
+        }
 
     # ---- I/O 接缝 ----
 
@@ -175,7 +225,10 @@ class SimStairsRobot(RobotState):
         self.current_head_pulse = pulse
 
     def set_pitch(self, pulse, move_time_ms=500):
+        # 必须同步 current_pitch_pulse：关卡的变档重试靠它恢复原档，
+        # 旧版只改 self.pitch，一次重试之后机器人就被永久留在错误档位
         self.pitch = pulse
+        self.current_pitch_pulse = pulse
 
     def run_action(self, name, times=1):
         for _ in range(max(1, times)):
@@ -188,19 +241,25 @@ class SimStairsRobot(RobotState):
         right = np.array([np.cos(th), -np.sin(th)])
         slip = self.rng.normal
         if name == "go_forward_one_step":
-            self.pos += fwd * 2.0 * (1 + slip(0, 0.15))
+            self.pos += fwd * mc.FWD_STEP_CM * (1 + slip(0, 0.15))
         elif name == "go_forward_one_small_step":
-            self.pos += fwd * 1.5 * (1 + slip(0, 0.15))
+            self.pos += fwd * self.FWD_SMALL_CM_NOMINAL * (1 + slip(0, 0.15))
         elif name == "back_one_step":
-            self.pos -= fwd * 3.2 * (1 + slip(0, 0.15))
+            self.pos -= fwd * self.BACK_STEP_CM_NOMINAL * (1 + slip(0, 0.15))
         elif name == "left_move":
-            self.pos -= right * 1.9 * (1 + slip(0, 0.20))
+            self.pos -= right * mc.LEFT_MOVE_CM * (1 + slip(0, 0.20))
         elif name == "right_move":
-            self.pos += right * 2.2 * (1 + slip(0, 0.20))
+            self.pos += right * self.RIGHT_MOVE_CM_NOMINAL * (1 + slip(0, 0.20))
         elif name == "turn_left_small_step":
-            self.heading -= max(0.0, self.rng.normal(2.0, 1.5))
+            # 实测 8.625°/步（±3σ 1.875），每局还有整体缩放漂移
+            self.heading -= max(0.0, self.rng.normal(
+                mc.TURN_LEFT_DEG * self._turn_scale["left"],
+                mc.TURN_LEFT_3SIGMA_DEG / 3.0))
         elif name == "turn_right_small_step":
-            self.heading += max(0.0, self.rng.normal(2.0, 1.5))
+            # 实测 5.200°/步（±3σ 0.150），比左转稳得多
+            self.heading += max(0.0, self.rng.normal(
+                mc.TURN_RIGHT_DEG * self._turn_scale["right"],
+                mc.TURN_RIGHT_3SIGMA_DEG / 3.0))
         elif name == "turn_left":
             self.heading -= 22.0 * (1 + slip(0, 0.10))
         elif name == "turn_right":
@@ -208,13 +267,17 @@ class SimStairsRobot(RobotState):
         elif name == "stand":
             pass
         elif name == "climb_stairs":
-            self.pos += fwd * 18.0 * (1 + slip(0, 0.10))
+            self.pos += fwd * self.CLIMB_FWD_CM * (1 + slip(0, 0.10))
             self.z += self.scene.step_rise
+            self.heading += float(self.rng.normal(self.CLIMB_YAW_BIAS_DEG,
+                                                  self.CLIMB_YAW_SIGMA_DEG))
         elif name == "down_floor":
-            self.pos += fwd * 13.0 * (1 + slip(0, 0.10))
+            self.pos += fwd * self.DOWN_FWD_CM * (1 + slip(0, 0.10))
             self.z -= self.scene.step_rise
+            self.heading += float(self.rng.normal(self.DOWN_YAW_BIAS_DEG,
+                                                  self.DOWN_YAW_SIGMA_DEG))
         elif name == "hurdles":
-            self.pos += fwd * 10.0 * (1 + slip(0, 0.10))
+            self.pos += fwd * self.HURDLE_FWD_CM * (1 + slip(0, 0.10))
         else:
             raise ValueError(f"仿真未实现动作: {name}")
 
@@ -224,7 +287,9 @@ class SimStairsRobot(RobotState):
         wobble = 0.0
         if self.wobble_sigma_deg > 0:
             wobble = float(self.rng.normal(0.0, self.wobble_sigma_deg))
-        pitch_deg = (1500 - self.pitch) * SERVO_DEG_PER_US + wobble
+        # 有效俯角 = 名义舵机角 + 安装下俯偏移（漏掉偏移可见带会整体失真）
+        pitch_deg = ((1500 - self.pitch) * SERVO_DEG_PER_US
+                     + self.CAM_PITCH_OFFSET_DEG + wobble)
         R = camera_rotation(bearing, pitch_deg)
         C = np.array([self.pos[0], self.pos[1], self.CAM_HEIGHT + self.z])
         frame = np.full((FRAME_H, FRAME_W, 3), 90, np.uint8)
@@ -270,8 +335,9 @@ def main(argv=None):
 
     from levels.stairs_hurdle import StairsHurdleLevel
     scene = StairsScene(bar_dist=float(np.random.RandomState(args.seed).choice([25.0, 32.0, 40.0])))
+    # 起点：入口光束在楼梯下沿 30cm 以内，机器人摆在光束之外
     robot = SimStairsRobot(scene, seed=args.seed,
-                           start=(0.0, -60.0), heading_deg=0.0)
+                           start=(0.0, -45.0), heading_deg=0.0)
     level = StairsHurdleLevel(robot)
     ok = level.run_level()
     print(f"[sim] ok={ok} 到达 y={robot.pos[1]:.1f} 拍照 {robot.n_captures} 张 "
