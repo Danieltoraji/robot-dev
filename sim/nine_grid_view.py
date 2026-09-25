@@ -20,7 +20,8 @@
 运行
 ----
     python -m sim.nine_grid_view [--seed N] [--random-layout] [--delay MS]
-                                 [--detect] [--headless]
+                                 [--detect] [--deform SIGMA] [--unified]
+                                 [--headless] [--quiet]
 无图形环境（DISPLAY 不可用 / opencv-headless 构建）时自动退回无头运行，
 等价于 `python -m sim.nine_grid_sim`；也可显式 `--headless`。
 
@@ -416,6 +417,14 @@ def main(argv=None):
                     help="不开窗，等价 python -m sim.nine_grid_sim")
     ap.add_argument("--quiet", action="store_true",
                     help="吞掉关卡逐行日志（无头/脚本场景）")
+    # 与 `python -m sim.nine_grid_sim` 的同名开关**同义**（2026-09-25 补齐：
+    # 图形界面此前看不了新循环，只能无头或录像，导致"新循环到底长什么样"没法看）。
+    ap.add_argument("--unified", action="store_true",
+                    help="走**统一决策新循环**（三档分区＋一个循环）。只改本次运行"
+                         "的算法选择，**不改任何默认常量**，退出时自动还原")
+    ap.add_argument("--deform", type=float, default=0.0, metavar="SIGMA_TILT_DEG",
+                    help="地板形变：每动作俯仰随机游走步长（度），"
+                         "幅度上限 ±15°、高度 ±2cm（0=无形变）")
     args = ap.parse_args(argv)
 
     headless = args.headless or not _gui_available()
@@ -428,40 +437,68 @@ def main(argv=None):
         print("[view] 按键：SPACE 暂停／继续｜S 单步放行一帧｜R 换 seed 重开"
               "｜Q 或 ESC 退出｜D 检出框叠加开关｜+／- 调慢／调快｜H 本说明")
 
-    seed = args.seed
-    while True:
-        layout = random_layout(seed) if args.random_layout else SIM_LAYOUT
-        if headless:
-            run = run_simulation(layout=layout, seed=seed, quiet=args.quiet)
-            _print_summary(run.stats)
-            return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
+    # ---- 算法/场景开关：只在**本进程**内改、退出时还原（与 nine_grid_sim 一致）----
+    restores = []
+    if args.unified:
+        import levels.nine_grid as _ng
+        _old = (_ng.UNIFIED_NAV_ENABLED, _ng.VIS_ZONE_ENABLED,
+                _ng.VIS_REANCHOR_BY_ANCHOR)
+        _ng.UNIFIED_NAV_ENABLED = True
+        _ng.VIS_ZONE_ENABLED = True
+        _ng.VIS_REANCHOR_BY_ANCHOR = True
+        restores.append(lambda: setattr(_ng, "UNIFIED_NAV_ENABLED", _old[0]))
+        restores.append(lambda: setattr(_ng, "VIS_ZONE_ENABLED", _old[1]))
+        restores.append(lambda: setattr(_ng, "VIS_REANCHOR_BY_ANCHOR", _old[2]))
+        print("[view] ★ 统一决策新循环（三档分区＋一个循环，2026-09-25 重写版）")
+    deform = None
+    if args.deform:
+        deform = {"sigma_tilt_deg": args.deform, "sigma_h_cm": 0.5,
+                  "max_tilt_deg": 15.0, "max_h_cm": 2.0}
+        print(f"[view] 注入地板形变：每动作俯仰随机游走 "
+              f"{deform['sigma_tilt_deg']:.1f}°、高度 {deform['sigma_h_cm']:.1f}cm"
+              f"（上限 ±{deform['max_tilt_deg']:.0f}° / "
+              f"±{deform['max_h_cm']:.0f}cm）")
 
-        print(f"[view] 按键说明: {HELP}")
-        viewer = NineGridView(delay_ms=args.delay, show_detect=args.detect)
-        try:
-            run = run_simulation(layout=layout, seed=seed, viewer=viewer,
-                                 quiet=args.quiet)
-        except ViewerRestart:
-            viewer.close()
-            seed += 1
-            print(f"[view] 重新开始，seed 改为 {seed}")
-            continue
-        except ViewerQuit:
-            viewer.close()
-            print("[view] 用户已退出")
-            return 0
-        try:
-            viewer.finish(run.stats)
-            viewer.close()
-            return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
-        except ViewerRestart:
-            viewer.close()
-            seed += 1
-            print(f"[view] 重新开始，seed 改为 {seed}")
-        except ViewerQuit:
-            viewer.close()
-            print("[view] 用户已退出")
-            return 0
+    try:
+        seed = args.seed
+        while True:
+            layout = random_layout(seed) if args.random_layout else SIM_LAYOUT
+            if headless:
+                run = run_simulation(layout=layout, seed=seed, quiet=args.quiet,
+                                     deform=deform)
+                _print_summary(run.stats)
+                return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
+
+            print(f"[view] 按键说明: {HELP}")
+            viewer = NineGridView(delay_ms=args.delay, show_detect=args.detect)
+            try:
+                run = run_simulation(layout=layout, seed=seed, viewer=viewer,
+                                     quiet=args.quiet, deform=deform)
+            except ViewerRestart:
+                viewer.close()
+                seed += 1
+                print(f"[view] 重新开始，seed 改为 {seed}")
+                continue
+            except ViewerQuit:
+                viewer.close()
+                print("[view] 用户已退出")
+                return 0
+            try:
+                viewer.finish(run.stats)
+                viewer.close()
+                return 0 if (run.stats["ok_all"]
+                             and run.stats["layout_ok"]) else 1
+            except ViewerRestart:
+                viewer.close()
+                seed += 1
+                print(f"[view] 重新开始，seed 改为 {seed}")
+            except ViewerQuit:
+                viewer.close()
+                print("[view] 用户已退出")
+                return 0
+    finally:
+        for f in reversed(restores):
+            f()
 
 
 if __name__ == "__main__":
