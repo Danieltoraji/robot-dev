@@ -1,8 +1,20 @@
 # -*- coding: utf-8 -*-
 """上下楼梯与识别跨障关卡：机器人本地系地面单应标定（tools/calib_stairs_hurdle.py）
 
-为什么需要它
-------------
+⚠ 2026-09-25：**本工具现场不可执行，已放弃，不要用。**
+--------------------------------------------------------------------
+它要求把红色目标摆在"以**光心地面投影**为原点"的已知本地系坐标上，
+而那个原点现场根本找不到（卷尺/吊线都定不准，相机在机体内部）。
+摆不出已知坐标，就解不了 H。
+
+**不需要它**：相机几何已由 tools/calib_ruler_profile.py 的卷尺标定给出
+（光心离地 33.9cm、安装下俯偏移 19.1°），关卡直接用这两个常数建解析模型，
+实测测距是准的。全 H 只是再精修一层，放弃后没有损失。
+
+保留本文件仅供：已经有已知坐标点阵（例如将来做了机器人定位工装）时使用。
+
+为什么需要它（原始设计意图）
+----------------------------
 关卡的测距/对正依赖"机器人本地系"地面单应（原点=光心地面投影、y=前、
 x=右）。缺省用 GroundHomography.from_pose 解析自举（±3cm 级）；现场用
 本工具做 solve() 全 H 标定，一次性吸收相机高度/俯仰/偏航/横滚零偏。
@@ -58,8 +70,8 @@ SUGGESTED_LAYOUT = [
 
 def parse_args():
     ap = argparse.ArgumentParser(description="上下楼梯跨障关卡本地系单应标定")
-    ap.add_argument("--pitch", type=int, default=1000,
-                    help="俯仰舵机脉宽（须与关卡 PITCH_OBS 一致），默认 1000")
+    ap.add_argument("--pitch", type=int, default=1100,
+                    help="俯仰舵机脉宽（须与关卡 PITCH_OBS 一致），默认 1100")
     ap.add_argument("--head", type=int, default=HEAD_CENTER,
                     help="头部脉宽（标定档），默认 1500（中位）")
     ap.add_argument("--image", default=None,
