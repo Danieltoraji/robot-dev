@@ -460,6 +460,17 @@ VIS_ARRIVE_LATERAL_MAX_CM = 0.0
 #    且这些帧的**真值都在半格内**（不是假到达），所以多解出几次锚也无从否决。
 #    ⇒ 保留实现与常量以便复现/A-B，但**不进默认**。
 VIS_ARRIVE_ONCELL_HEAD_SWEEP = ()
+# ---- ★ 到达后"视觉+地图反推位姿"（用户澄清的地图启发；2026-09-25）----
+# 用户原话："我构想中的地图启发，指的是**根据当前视觉粗略反推自身位置**。
+#           我们早就已经完全放弃了死推。"
+# 旧行为：位置写格心、**航向保持死推值** ⇒ 航向误差逐格累积
+#         （seed21 实测 d1 −0.0° → d3 −7.7° → d7 **−105.7°**）⇒ 方位指反、搜索乱转。
+# 新行为：到达时用 `_map_anchor`（地图已知格心 ↔ 画面色块，RANSAC 共识）解出实测位姿，
+#         成功就**位置与航向一起采纳**（锚自带 ≥5 对 / 内点 ≥5 的共识门与诚实弃权）。
+VIS_REANCHOR_BY_ANCHOR = True       # False = 退回旧行为（格心 + 死推航向）
+VIS_REANCHOR_MAX_POSE_JUMP_CM = 40.0  # 实测位置距"目标格心"超过此值判为误解、弃用
+#   依据：正常到达时实测位置应在格心附近（半格 16.7cm 内）；40cm 已超过一整格，
+#   说明 RANSAC 把观测配错了格 ⇒ 宁可退回旧行为，也不采纳一个离谱的位姿。
 VIS_ARRIVE_ONCELL_TOL_CM = 16.7     # 距格心容差（= 半格；压感区半宽 5.5cm，
 #                                     但锚本身有位姿误差，取半格更稳）
 VIS_ARRIVE_ONCELL_REQUIRE = False   # 锚**不可用**时是否也拒绝
@@ -2531,6 +2542,19 @@ class NineGridLevel:
                                else f"；格的核验: 弃权（{_why}）"))
                         print(f"[行进] 面板{digit} 区域判据成立（紫 {pur:.3f}、"
                               f"橙 {org:.3f}、不对称 {asym:+.3f}）→ 判定到达")
+                        # ★★ 到达后**重建位姿**（P1 重写此前漏掉的一步，后果严重）：
+                        # 统一循环原来只设 `_arrive_evidence` 就返回 True，
+                        # `_reanchor_pose` 只被旧链路调用 ⇒ 新循环里位姿**从不重建**、
+                        # 一直靠死推漂移。实测（seed21 逐格 pose_θ−真值航向）：
+                        #   d1 −0.0° → d3 −7.7° → d5 −49.2° → d7 **−105.7°**
+                        # ⇒ "地图方位"到后面方向都指反、搜索朝错方向连转 140°+，
+                        #   也就是用户看到的"异常的多次旋转"。
+                        # 现在调用 `_reanchor_pose`：它按用户澄清改用
+                        # **视觉+地图反推的实测位姿**（`_map_anchor`），
+                        # 解不出才退回"格心 + 原航向"。
+                        self._reanchor_pose(digit)
+                        if USE_MAP_CORRECTION:
+                            self._map_correction()
                         return True
                 o = p["obs"]
                 if o is None:
@@ -2886,13 +2910,25 @@ class NineGridLevel:
         if lost % VIS_REACQ_STRIDE != 0:
             return turns, 0.0
         # ★ 转向方向**一次定死、中途不改**（见上：反复翻向会退化成原地摆动）
+        # ★★ 2026-09-25 实测更正：**不再用地图方位决定首转方向**。
+        #   理由（seed21 逐格实测死推航向误差 pose_θ − true_heading）：
+        #       d1 −0.0° → d2 −1.4° → d3 **−7.7°** → d4 −38.7° → d5 −49.2°
+        #       → d6 −70.0° → d7 **−105.7°**
+        #   航向误差**逐格累积且不修**（`_reanchor_pose` 只锚位置、航向保持死推值），
+        #   到 d3（首次失败）已 7.7°、d7 已 105.7° ⇒ 地图方位**方向都会指反**。
+        #   实测证据：digit3 前 26 帧**全是 `turn_left_small_step`**（整格转 107 次 /
+        #   走 15 次）—— 朝错方向连转 140°+，而相机横向视场本身就有 ±46°
+        #   ⇒ 朝对方向时最多转 (360°−92°)=268°、朝错时也只需多转 92°，
+        #   **根本不该出现"反复转"**。
+        #   ⇒ 方向改为：① 有"最后看到它的一侧"就用它；② 否则固定**左转**单向扫；
+        #      ③ 扫满约一圈仍未见到才反向（见 `_reacq_flipped`）。
+        #   这样搜索**完全不依赖 pose 航向**，"异常的多次旋转"从根上消失。
         if self._reacq_dir is None:
-            bearing = self._bearing_to_target_deg(digit)
-            if bearing is not None:
-                self._reacq_dir = 1.0 if bearing > 0.0 else -1.0
+            side = getattr(self, "_last_seen_side", None)
+            if side is not None:
+                self._reacq_dir = 1.0 if float(side) >= 0.0 else -1.0
             else:
-                self._reacq_dir = (1.0 if float(getattr(
-                    self, "_last_seen_side", 1.0)) >= 0.0 else -1.0)
+                self._reacq_dir = 1.0        # 无先验：固定左转单向扫
         if self._reacq_deg >= VIS_REACQ_SWEEP_CAP_DEG \
                 and not self._reacq_flipped:
             # 单向扫够额度还没看到 ⇒ 反向再扫（错方向的代价从"转满一圈"降到
@@ -4571,22 +4607,66 @@ class NineGridLevel:
         return True
 
     def _reanchor_pose(self, digit):
-        """到达后把死推位姿锚到该格格心（消除逐格漂移，保搜索提示可用）
+        """到达后重置位姿：**优先用地图锚的实测位姿**，退而用格心+死推航向
 
-        航向保持死推值（视觉对准已把目标对正，残余误差只影响粗提示）。
-        位置断言来自"到达判定成立"（机器人压在该色块上），同时打印**残差**
-        （到达时的死推距离）——它是"这次锚定有多可信"的唯一现场证据。
-        试过"残差超半格就不锚定"：标称场景直接打挂（面板6 未确认）——因为标称
-        场景里残差大恰恰是**死推漂移**造成的，而锚定正是修它的手段。所以锚定
-        照旧，但把残差写进遥测，让现场一眼看出哪一格的"到达"不可信。
+        ★ 2026-09-25 按用户澄清改动（用户原话）：
+          "我构想中的地图启发，指的是**根据当前视觉粗略反推自身位置**。
+           我们早就已经完全放弃了死推。"
+
+        改动前：位置写格心、**航向保持死推进位姿的值**（旧 docstring 明说
+        "航向保持死推值"）。实测后果（seed21 逐格，pose_θ − 真值航向）：
+            d1 −0.0° → d2 −1.4° → d3 **−7.7°** → d4 −38.7° → d5 −49.2°
+            → d6 −70.0° → d7 **−105.7°**
+        航向误差逐格累积且从不修正 ⇒ 到后面"地图方位"**方向都会指反**
+        ⇒ 搜索朝错方向连转 140°+（实测 digit3 整格转 107 次 / 只走 15 次）。
+
+        改动后：到达时先用**视觉 + 地图**反推自身位姿（`_map_anchor`：把"地图里
+        已知格心的面板"与"画面里看到的色块"配对，RANSAC 求共识后解出场地系位姿），
+        成功就整体采纳（**位置与航向都换成实测值**）；失败则退回"格心 + 原航向"。
+        锚自带共识门（≥5 对、内点 ≥5）与弃权，所以"解出来了"本身就是可信证据。
+
+        ⚠️ 方向性：这条改的是**位姿来源**（死推 → 视觉反推），
+        不是"用死推提示导航"——后者仍是禁止的。
         """
         if digit not in self.digit_cell:
             return
         resid = self._cell_arrive_resid_cm
         c = grid_cell_center(self.digit_cell[digit])
+        # ---- ① 先试"视觉 + 地图"反推位姿 ----
+        # ⚠️ 只在**新循环**下启用：旧链路（当前默认）的基线是"7/7、拍照 191"，
+        #    在这里多拍一帧会变成 198 ⇒ **默认路径必须逐位不变**（项目铁律）。
+        anc = None
+        if UNIFIED_NAV_ENABLED and (MAP_ANCHOR_ENABLED
+                                    or VIS_REANCHOR_BY_ANCHOR):
+            frame = self._capture()
+            if frame is not None:
+                try:
+                    full = self.detector.detect_panels(frame, drop_border=False)
+                    anc = self._map_anchor(full, frame, why=f"REANCHOR{digit}")
+                except Exception:
+                    anc = None
+        if anc is not None and VIS_REANCHOR_MAX_POSE_JUMP_CM > 0.0:
+            meas = np.asarray(anc["pose"], float)
+            jump = float(np.linalg.norm(meas[:2] - np.asarray(c, float)))
+            if jump > VIS_REANCHOR_MAX_POSE_JUMP_CM:
+                print(f"[锚定] 地图锚解出的位置距格心 {jump:.0f}cm "
+                      f"（>{VIS_REANCHOR_MAX_POSE_JUMP_CM:.0f}cm）→ 判为误解，弃用")
+                anc = None
+        if anc is not None:
+            self.pose = np.asarray(anc["pose"], float).copy()
+            self._pose_from_anchor = True
+            print(f"[锚定] **视觉+地图反推位姿**：位置 "
+                  f"({self.pose[0]:.1f},{self.pose[1]:.1f})、航向 "
+                  f"{np.degrees(self.pose[2]):.1f}°"
+                  f"（内点 {anc['n_inliers']}，反解相机高 "
+                  f"{anc.get('cam_height_cm', float('nan')):.0f}cm）"
+                  f"｜对照格心 {c[0]:.0f},{c[1]:.0f}")
+            return
+        # ---- ② 退回：格心 + 原航向（死推）----
         self.pose = np.array([c[0], c[1], self.pose[2]])
-        print(f"[锚定] 按动作推算的位置重置到格 {self.digit_cell[digit]}"
-              f"（格心场地坐标 {c[0]:.0f},{c[1]:.0f}"
+        self._pose_from_anchor = False
+        print(f"[锚定] 地图锚不可用 → 退回'格心 + 原航向'"
+              f"（格心 {c[0]:.0f},{c[1]:.0f}"
               f"{'' if resid is None else f'，距格心 {resid:.1f}cm'}）")
 
     def _map_correction(self):
