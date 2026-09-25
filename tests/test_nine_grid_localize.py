@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
-"""数字宫格裁切感知定位单元测试（tests/test_nine_grid_localize.py）
+"""数字宫格裁切感知观测单元测试（tests/test_nine_grid_localize.py）
 
 背景（2026-09-08 根因诊断）：面板被画幅裁切后，轮廓"对角线交点中心"失去
-几何意义（实测偏差 150~826px），把它当观测送进最小二乘会把解拖走，随后
-的事后离群剔除又把点剔到 <2 个 → 定位返回 None（仿真 7/7 全败的直接原因）。
-修复：裁切面板改用"颜色掩膜凸包面积质心"观测，预测端用"四角投影与画幅
-求交的面积质心"配对，两者同定义、裁切不变。
+几何意义（实测偏差 150~826px）。修复：裁切面板改用"颜色掩膜凸包面积质心"
+观测，预测端用"四角投影与画幅求交的面积质心"配对，两者同定义、裁切不变。
 
-本测试用仿真相机在"多块面板被裁切"的位姿上验证：
+本测试用仿真相机在"多块面板被裁切"的位姿上钉住**投影/观测模型**：
 1. 裁切观测模型：预测裁切质心 ↔ 检出凸包质心 的残差 <5px，
-   而"预测面板中心 ↔ 凸包质心"残差 >50px（证明旧观测不可用）；
-2. 端到端：从 ±8cm/±7° 扰动先验出发，GN 收敛到真值 <1cm/<1°。
+   而"预测面板中心 ↔ 凸包质心"残差 >20px（证明旧观测不可用）；
+2. 未裁切面板：中心模型仍精确（残差 <20px）；
+3. 裁切预测的边界条件：脚下的贴底细条、完全出画时的钳位、远距画内点。
+
+注：地图 GN 定位（`_gn_localize` / `_capture_corr`）已随"删用不上的代码"
+一步移除，本文件因此只保留投影侧的三条。
 
 运行：python tests/test_nine_grid_localize.py
 """
@@ -26,17 +28,36 @@ import numpy as np
 from core.camera_config import HEAD_RIGHT
 from levels.nine_grid import (
     NineGridLevel, PITCH_NAV, clipped_quad_centroid,
-    project_ground_to_pixel, _wrap_angle,
+    project_ground_to_pixel,
 )
 from sim.nine_grid_sim import SimNineGridRobot, SIM_LAYOUT
 
 # 复现根因的位姿：导航档 + 头部右转 40.5°，一帧内 3 块面板被裁切
 SCENE_POSE = (50.0, -20.0, -18.69)
 SCENE_HEAD = HEAD_RIGHT
-PRIOR = np.array([49.43, -20.31, np.radians(-25.71)])  # 比真值差 ~7° 的动作预测
+
+
+def _frame_observations(level, robot, pitch):
+    """拍一帧并检测 → [(格心, 观测, 头部脉宽, 是否裁切), ...]
+
+    与已删的 `_capture_corr` 同一口径：只保留地图里已知的数字，
+    观测点取"未裁切用对角线交点、裁切用凸包质心"。
+    """
+    frame = robot.capture_frame()
+    obs = level.detector.detect_panels(frame, drop_border=False)
+    head = robot.current_head_pulse
+    from core.ground_homography import grid_cell_center
+    out = []
+    for o in obs:
+        if o.digit not in level.digit_cell:
+            continue
+        out.append((grid_cell_center(level.digit_cell[o.digit]), o, head,
+                    bool(o.clipped)))
+    return out
 
 
 def _scene():
+    """复现根因的位姿：一帧内多块面板被裁切"""
     robot = SimNineGridRobot()
     level = NineGridLevel(robot)
     level.digit_cell = {d: c for c, d in SIM_LAYOUT.items() if d is not None}
@@ -46,18 +67,18 @@ def _scene():
     robot.set_head(SCENE_HEAD)
     truth = np.array([SCENE_POSE[0], SCENE_POSE[1],
                       np.radians(SCENE_POSE[2])])
-    corr, obs, _frame = level._capture_corr(PITCH_NAV)
-    return level, truth, corr, obs
+    pairs = _frame_observations(level, robot, PITCH_NAV)
+    return level, truth, pairs
 
 
 def test_clipped_observation_model():
     """裁切观测配对：预测裁切质心必须贴合检出凸包质心，中心模型必须偏差巨大"""
-    _level, truth, corr, obs = _scene()
-    clipped = [(c, o) for c, o in zip(corr, obs) if c[3]]
+    _level, truth, pairs = _scene()
+    clipped = [(c, o, h) for c, o, h, cl in pairs if cl]
     assert len(clipped) >= 2, f"本用例应有 >=2 块裁切面板，实际 {len(clipped)}"
 
     max_clip_err, min_center_err = 0.0, 1e9
-    for (cell_xy, _obs_px, head, _clipped), o in clipped:
+    for cell_xy, o, head in clipped:
         pred_clip = clipped_quad_centroid(
             cell_xy, truth[0], truth[1], truth[2], PITCH_NAV, head)
         pred_center = project_ground_to_pixel(
@@ -77,26 +98,13 @@ def test_clipped_observation_model():
           f"中心模型最小偏差 {min_center_err:.0f}px ✓")
 
 
-def test_localize_converges_from_perturbed_prior():
-    """端到端：含裁切面板的对应集从扰动先验收敛到真值"""
-    level, truth, corr, _obs = _scene()
-    p = level._gn_localize(PRIOR.copy(), corr, PITCH_NAV)
-    assert p is not None, "含裁切面板的对应集定位失败（曾直接发散）"
-    err_xy = float(np.hypot(p[0] - truth[0], p[1] - truth[1]))
-    err_th = abs(np.degrees(_wrap_angle(p[2] - truth[2])))
-    assert err_xy < 1.0, f"位置误差 {err_xy:.2f}cm 超 1cm"
-    assert err_th < 1.0, f"航向误差 {err_th:.2f}° 超 1°"
-    print(f"  裁切感知定位：扰动先验 → 误差 {err_xy:.2f}cm / {err_th:.2f}° ✓")
-
-
 def test_unclipped_center_model_exact():
     """未裁切面板：中心模型仍精确（残差 <20px），保证近距外精度不退步
 
-    阈值依据（2026-09-11 更新为"安装偏移 + 高度 56cm"后的新几何）：本场景
-    实测 关卡投影 ↔ 仿真渲染 误差 **0.00px**（两侧模型严格一致），残差全部
-    来自检测端 quad_center 对栅格化四边形的 approxPolyDP 近似（4~15px ≈
-    0.2~0.8cm）；而裁切面板的"中心模型"偏差在本场景为 76~140px。故 20px
-    既能把中心模型与裁切模型分开，又不把检测噪声误判成模型缺陷。
+    阈值依据：本场景实测"关卡投影 ↔ 仿真渲染"误差 0.00px（两侧模型严格一致），
+    残差全部来自检测端 quad_center 对栅格化四边形的近似（4~15px ≈ 0.2~0.8cm）；
+    而裁切面板的"中心模型"偏差在本场景为 76~140px。故 20px 既能把中心模型与
+    裁切模型分开，又不把检测噪声误判成模型缺陷。
     """
     robot = SimNineGridRobot()
     level = NineGridLevel(robot)
@@ -106,11 +114,11 @@ def test_unclipped_center_model_exact():
     robot.pitch = PITCH_NAV
     robot.set_head(1500)
     truth = np.array([50.0, -20.0, 0.0])
-    corr, obs, _ = level._capture_corr(PITCH_NAV)
-    clean = [(c, o) for c, o in zip(corr, obs) if not c[3]]
+    pairs = _frame_observations(level, robot, PITCH_NAV)
+    clean = [(c, o, h) for c, o, h, cl in pairs if not cl]
     assert len(clean) >= 4, f"入口帧应有 >=4 块完整面板，实际 {len(clean)}"
     errs = []
-    for (cell_xy, _obs_px, head, _c), o in clean:
+    for cell_xy, o, head in clean:
         pred = project_ground_to_pixel(
             cell_xy, truth[0], truth[1], truth[2], PITCH_NAV, head)[0]
         errs.append(float(np.linalg.norm(pred - np.asarray(o.center_px))))
@@ -122,8 +130,7 @@ def test_unclipped_center_model_exact():
 def test_clipped_prediction_inside_image():
     """裁切预测边界条件：脚下只余贴底细条/贴边极限，远距为画内点
 
-    阈值按"安装偏移 + 高度 56cm"的新几何重推（2026-09-11；旧几何 39cm/41.4°
-    下站在面板中心时面板整个在视野外，现在是"近端一小条可见"）：
+    阈值按"安装偏移 + 高度 56cm"的几何：
       - 站在面板中心 pitch1040：可见地面带起点 ≈3.3cm，面板前缘 14cm 可见
         → 裁切质心预测 (1283, 1734) 在画内靠底；面板中心投影 y=2004 已出画；
       - 站在面板中心 pitch1200：面板完全在可见带之下 → 预测点被钳到画幅底边
@@ -157,7 +164,6 @@ def test_clipped_prediction_inside_image():
 
 if __name__ == "__main__":
     test_clipped_observation_model()
-    test_localize_converges_from_perturbed_prior()
     test_unclipped_center_model_exact()
     test_clipped_prediction_inside_image()
-    print("全部 nine_grid 定位测试通过 ✓")
+    print("全部 nine_grid 定位/投影测试通过 ✓")

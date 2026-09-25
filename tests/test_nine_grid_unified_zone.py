@@ -249,18 +249,6 @@ def test_on_target_cell_abstains_honestly_without_anchor():
     assert "锚" in why
 
 
-def test_on_target_cell_disabled_switch():
-    """总开关关闭 ⇒ 一律 "unknown"（不影响老判据）"""
-    lv, frame = _lv_with_anchor((999.0, 999.0, 0.0))
-    old = NG.VIS_ARRIVE_ONCELL_ENABLED
-    try:
-        NG.VIS_ARRIVE_ONCELL_ENABLED = False
-        v, _why = lv._on_target_cell(frame, 1)
-        assert v == "unknown"
-    finally:
-        NG.VIS_ARRIVE_ONCELL_ENABLED = old
-
-
 def test_anchor_corr_returns_a_two_tuple():
     """★ 契约闸：`_anchor_corr` 返回 **(对应点列表, 观测列表) 二元组**
 

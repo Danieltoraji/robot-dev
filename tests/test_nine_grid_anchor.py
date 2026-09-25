@@ -259,44 +259,5 @@ def test_anchor_skips_clipped_without_hull_poly():
     assert lv._anchor_corr([o], FRAME)[0] == []
 
 
-def test_zone_hysteresis_is_noop_when_disabled():
-    """VIS_ZONE_ENABLED=False 时 `_zone_of_h` 必须与 `_zone_of` 逐位一致"""
-    lv = _make_level({})
-    old = NG.VIS_ZONE_ENABLED
-    NG.VIS_ZONE_ENABLED = False
-    try:
-        lv._zone_last = None
-        for yaw in (0.0, 5.9, 6.0, 6.1, 11.9, 12.0, 12.1, -30.0):
-            for near in (0.0, 0.35, 0.9):
-                z1, o1 = lv._zone_of(yaw, 0.0, near)
-                z2, o2 = lv._zone_of_h(yaw, 0.0, near)
-                assert z1 == z2 and o1 == o2, (yaw, near, z1, z2)
-    finally:
-        NG.VIS_ZONE_ENABLED = old
-
-
-def test_zone_hysteresis_only_relaxes_exit():
-    """迟滞只能放宽"离开"条件，不能放宽"进入"条件"""
-    lv = _make_level({})
-    old = (NG.VIS_ZONE_ENABLED, NG.VIS_ZONE_HYST_DEG)
-    NG.VIS_ZONE_ENABLED = True
-    NG.VIS_ZONE_HYST_DEG = 2.0
-    try:
-        # 进入条件不放宽：上一次不是 move 时，6.5° 仍必须是 lat
-        lv._zone_last = "lat"
-        assert lv._zone_of_h(6.5, 0.0, 0.9)[0] == "lat"
-        # 已在 move：7.0°（>6 但 ≤8）应保持 move
-        lv._zone_last = "move"
-        assert lv._zone_of_h(7.0, 0.0, 0.9)[0] == "move"
-        # 超过 MOVE+HYST 才离开
-        lv._zone_last = "move"
-        assert lv._zone_of_h(8.5, 0.0, 0.9)[0] != "move"
-        # near 条件不放宽：太远时必须回到 rot
-        lv._zone_last = "lat"
-        assert lv._zone_of_h(8.0, 0.0, 0.1)[0] == "rot"
-    finally:
-        NG.VIS_ZONE_ENABLED, NG.VIS_ZONE_HYST_DEG = old
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

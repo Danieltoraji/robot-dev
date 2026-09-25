@@ -14,8 +14,7 @@
 3. 用户指出的病：**"又远又偏"必须落到旋转**。旧规则的边界是竖直线
    （等方位角射线），远处放得太宽，才会"还很远就横移"。
 
-注：`tests/test_nine_grid_anchor.py::test_zone_hysteresis_*` 测的是**旧三阈值**
-路径（不传 px），两条路径并存：`VIS_ZONE_PX_ENABLED=False` 才走旧的。
+判档只有这一条路径（旧三阈值与两个开关已随"删用不上的代码"一步移除）。
 """
 import numpy as np
 import pytest
@@ -51,7 +50,6 @@ def test_diagram_parameters_are_pinned():
     assert (NG.VIS_ZONE_BLUE_TOP, NG.VIS_ZONE_BLUE_BOT) == \
         pytest.approx((0.2746, 0.3623))
     assert NG.VIS_ZONE_BLUE_HEIGHT == pytest.approx(0.2445)
-    assert NG.VIS_ZONE_PX_ENABLED is True
 
 
 def test_green_is_narrow_at_top_wide_at_bottom():
@@ -105,41 +103,7 @@ def test_hysteresis_widens_only_exit():
 
 
 # =====================================================================
-# 2. 两条路径的开关语义
-# =====================================================================
-
-def test_px_rule_is_used_when_enabled_and_ignored_when_zone_disabled():
-    """VIS_ZONE_ENABLED=False ⇒ 完全走原二值死区（像素参数被无视）"""
-    lv = _level()
-    old = NG.VIS_ZONE_ENABLED
-    try:
-        NG.VIS_ZONE_ENABLED = False
-        lv._zone_last = None
-        # 又远又偏：像素规则给 rot；二值规则只要 |yaw|≤12° 就给 move
-        px, py = W / 2.0 + 0.05 * W, 0.99 * H
-        zv, _ = lv._zone_of_h(3.0, 0.0, 0.9, px=px, py=py, w=W, h=H)
-        assert zv == "move"
-    finally:
-        NG.VIS_ZONE_ENABLED = old
-
-
-def test_old_rule_still_reachable_for_ab():
-    """VIS_ZONE_PX_ENABLED=False ⇒ 退回旧三阈值（保留做对照）"""
-    lv = _level()
-    old = (NG.VIS_ZONE_ENABLED, NG.VIS_ZONE_PX_ENABLED)
-    try:
-        NG.VIS_ZONE_ENABLED = True
-        NG.VIS_ZONE_PX_ENABLED = False
-        lv._zone_last = None
-        # 近处、偏 8°、够近 ⇒ 旧规则给 lat（即便像素位置在很远的地方也无所谓）
-        z, _ = lv._zone_of_h(8.0, 0.0, 0.9, px=W / 2.0, py=0.01 * H, w=W, h=H)
-        assert z == "lat"
-    finally:
-        NG.VIS_ZONE_ENABLED, NG.VIS_ZONE_PX_ENABLED = old
-
-
-# =====================================================================
-# 3. 紫区（只看当前状态的到达判据）
+# 2. 紫区（只看当前状态的到达判据）
 # =====================================================================
 
 def test_purple_and_arrival_thresholds_are_pinned():
@@ -163,7 +127,6 @@ def test_purple_and_arrival_thresholds_are_pinned():
     # 0.55→20/21；落地精度复核（3 种子）为 6.1~10.1cm，未因放门而压偏。
     assert NG.VIS_ARRIVE_ASYM_MAX == pytest.approx(0.55)
     assert NG.VIS_ARRIVE_CENTER_MAX == pytest.approx(0.12)
-    assert NG.VIS_ARRIVE_REGION_ENABLED is True
 
 
 def test_regions_are_disjoint_and_cover_frame():
