@@ -112,9 +112,12 @@ def test_goal_uniqueness():
                           window_cm=window)
         return m.forward_cm if m.exists else None
 
-    # 第1步全程（起点 -> 起爬点）：木条必须始终不可见，胶条可见
+    # 第1步全程（起点 -> 起爬点）：木条必须始终不可见，胶条可见。
+    # 注意起爬点是 y=-7（离胶条 7cm），不是 y=0——y=0 已经站在胶条上了，
+    # 不在实际工作范围内。1100 档远界约 72cm，y=-7 时木条在 78cm，刚好出界。
+    probe_ys = (-45.0, -30.0, -20.0, -12.0, -7.0)
     tape_seen = bar_seen = 0
-    for y in (-45.0, -30.0, -15.0, -5.0, 0.0):
+    for y in probe_ys:
         robot.pos = np.array([0.0, y])
         if measure(WINDOW_TAPE) is not None:
             tape_seen += 1

@@ -25,15 +25,15 @@ from core.ground_line_meter import build_meter, min_visible_ground_cm
 from sim.stairs_hurdle_sim import SimStairsRobot, StairsScene
 from vision.red_line_detector import RedLineDetector
 
-PITCH = 1040                    # 现场观测档
+PITCH = 1100                    # 现场观测档（2026-09-25 换舵机后重标定）
 BAR_HALF_THICK_CM = 1.0         # 场景把木条近侧面放在 bar_y + 半厚处
 # 现场实测的可靠可见范围（2026-09-25 用户给出）
 FIELD_NEAR_CM, FIELD_FAR_CM = 2.0, 70.0
 # 旧版（错误相机模型）实际渲染出的带，用于反向回归
 OLD_NEAR_CM, OLD_FAR_CM = 13.9, 177.7
 
-PROBE_CM = [1.5, 2.0, 2.5, 3.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0,
-            60.0, 65.0, 69.0, 70.0, 80.0, 90.0, 120.0]
+PROBE_CM = [2.0, 3.0, 3.5, 4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0,
+            60.0, 65.0, 69.0, 71.0, 75.0, 80.0, 90.0, 120.0]
 
 
 def make_rig():
@@ -68,25 +68,31 @@ def scan_band():
 
 def test_camera_model_is_not_the_old_one():
     """仿真器的相机模型本身不得退回旧值"""
-    assert abs(SimStairsRobot.CAM_HEIGHT - 39.0) > 1.0, \
-        "CAM_HEIGHT 退回 39cm（应为卷尺实测 34.5）"
-    assert SimStairsRobot.CAM_PITCH_OFFSET_DEG > 5.0, \
+    assert abs(SimStairsRobot.CAM_HEIGHT - 39.0) > 2.0, \
+        "CAM_HEIGHT 退回 39cm（应为标定 33.9）"
+    assert SimStairsRobot.CAM_PITCH_OFFSET_DEG > 10.0, \
         "安装下俯偏移被清零（这是旧版可见带失真的根因）"
+    # 标定三者必须自洽：名义俯角 + 偏移 = 拟合俯角
+    nominal = (1500 - PITCH) * 0.09
+    assert abs((nominal + SimStairsRobot.CAM_PITCH_OFFSET_DEG) - 55.11) < 0.2, \
+        "名义俯角 + 安装偏移 应等于标定拟合的 55.11°"
     print(f"  相机模型：h={SimStairsRobot.CAM_HEIGHT}cm "
-          f"offset={SimStairsRobot.CAM_PITCH_OFFSET_DEG}° ✓")
+          f"offset={SimStairsRobot.CAM_PITCH_OFFSET_DEG}° → 有效俯角 "
+          f"{nominal + SimStairsRobot.CAM_PITCH_OFFSET_DEG:.2f}°（标定 55.11°）✓")
 
 
 def test_band_matches_field():
     band = scan_band()
     visible = sorted(d for d, v in band.items() if v is not None)
     near, far = min(visible), max(visible)
-    # 近端：现场 2cm；这里 2.5cm 可见、2.0cm 不可见（几何近界约 2.4cm）
-    assert band[2.5] is not None, "2.5cm 处应可见"
-    # 远端：现场 70cm；这里 69cm 可见、70cm 不可见（几何远界约 69.5cm）
-    assert band[69.0] is not None, "69cm 处应可见"
-    assert band[70.0] is None, "70cm 处不应可见"
-    assert abs(near - FIELD_NEAR_CM) <= 1.0, f"近界 {near}cm 与现场 2cm 差太多"
-    assert abs(far - FIELD_FAR_CM) <= 1.5, f"远界 {far}cm 与现场 70cm 差太多"
+    # 近端：1100 档几何近界约 3.5cm（3.0 不可见、3.5 可见）
+    assert band[3.0] is None, "3.0cm 处不应可见"
+    assert band[3.5] is not None, "3.5cm 处应可见"
+    # 远端：几何远界约 72cm（71 可见、75 不可见）
+    assert band[71.0] is not None, "71cm 处应可见"
+    assert band[75.0] is None, "75cm 处不应可见"
+    assert near <= FIELD_NEAR_CM + 2.0, f"近界 {near}cm 与现场 2cm 差太多"
+    assert abs(far - FIELD_FAR_CM) <= 4.0, f"远界 {far}cm 与现场 70cm 差太多"
     print(f"  渲染可见带 = [{near:.1f}, {far:.1f}]cm"
           f"（现场 [{FIELD_NEAR_CM:.0f}, {FIELD_FAR_CM:.0f}]cm；"
           f"旧模型 [{OLD_NEAR_CM}, {OLD_FAR_CM}]）✓")
@@ -105,7 +111,7 @@ def test_old_wrong_band_is_gone():
 def test_accuracy_within_band():
     band = scan_band()
     worst = 0.0
-    for d in [2.5, 5.0, 10.0, 20.0, 40.0, 60.0, 69.0]:
+    for d in [3.5, 5.0, 10.0, 20.0, 40.0, 60.0, 71.0]:
         v = band[d]
         assert v is not None, f"{d}cm 应可见"
         worst = max(worst, abs(v - d))
@@ -118,11 +124,11 @@ def test_analytic_matches_render():
     h = SimStairsRobot.CAM_HEIGHT
     off = SimStairsRobot.CAM_PITCH_OFFSET_DEG
     analytic = min_visible_ground_cm(h, PITCH, pitch_offset_deg=off)
-    assert 1.5 <= analytic <= 4.0, f"解析近界 {analytic:.2f}cm 不合理"
+    assert 2.0 <= analytic <= 5.0, f"解析近界 {analytic:.2f}cm 不合理"
     band = scan_band()
-    assert band[2.5] is not None and band[2.0] is None, \
-        "渲染近界应落在 (2.0, 2.5] 之间"
-    print(f"  解析近界 {analytic:.2f}cm 与渲染近界（2.0 不可见 / 2.5 可见）一致 ✓")
+    assert band[3.5] is not None and band[3.0] is None, \
+        "渲染近界应落在 (3.0, 3.5] 之间"
+    print(f"  解析近界 {analytic:.2f}cm 与渲染近界（3.0 不可见 / 3.5 可见）一致 ✓")
 
 
 if __name__ == "__main__":

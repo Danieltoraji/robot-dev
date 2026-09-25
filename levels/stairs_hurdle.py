@@ -48,14 +48,20 @@ from core.robot_core import RobotState
 from vision.red_line_detector import RedLineDetector
 
 # =====================================================================
-# 相机与观测位（现场实测，勿凭公式改）
+# 相机与观测位（2026-09-25 现场卷尺标定，勿凭公式改）
 # =====================================================================
-PITCH_OBS = 1040          # 观测俯仰档：可见地面带 2~70cm
-CAM_HEIGHT_CM = 34.5      # 站立光心离地（卷尺实测）
-PITCH_OFFSET_DEG = 15.0   # 相机相对俯仰舵机的安装下俯偏移
+# 标定来源：14 个卷尺刻度（读数 3~60cm），含畸变物理模型 RMS=2.72px。
+#   h_eff（光心离刻度平面）= 32.73cm，卷尺厚 λ=1.20cm
+#     ⇒ 光心离地 = 32.73 + 1.20 = 33.93cm
+#   拟合俯角 55.11°，本档名义 (1500-1100)*0.09 = 36.0°
+#     ⇒ 安装下俯偏移 = 55.11 - 36.0 = 19.11°
+# 这个 19.11° 与 camera_config 的 18.5°、九宫格自标定的 19.0° 三者吻合。
+PITCH_OBS = 1100          # 观测俯仰档（换舵机后重新标定的档位）
+CAM_HEIGHT_CM = 33.9      # 光心离地：标定 h_eff 32.73 + 卷尺厚 1.20
+PITCH_OFFSET_DEG = 19.1   # 相机相对俯仰舵机的安装下俯偏移（标定值）
 HEAD_PULSE = HEAD_CENTER
-#: 1040 档找不到目标时的重试档（几何随档位重建，精度降级）
-FALLBACK_PITCHES = (1000, 1080)
+#: 观测档找不到目标时的重试档（几何随档位重建，精度降级）
+FALLBACK_PITCHES = (1050, 1150)
 
 # =====================================================================
 # 动作名
@@ -88,8 +94,9 @@ FALLBACK_APPROACH_STEPS = 5
 # ⚠️ 真正的判别手段是**步骤顺序**（第1步时木条还远在可见带之外；下楼后胶条
 # 已在身后），窗口是第二道保险：把明显不属于本步的读数挡掉，避免机器人一旦
 # 冲过头、木条进入视野时被当成胶条继续往里走。
+# 窗口上界不要超过可见带远界（1100 档由标定参数算出约 69cm），否则等于没挡。
 WINDOW_TAPE = (0.0, 55.0)        # 第1步：红胶条（楼梯根部）
-WINDOW_BAR_TOP = (25.0, 80.0)    # 第3步：站在顶部平台看木条
+WINDOW_BAR_TOP = (25.0, 70.0)    # 第3步：站在顶部平台看木条
 WINDOW_BAR_FLAT = (0.0, 50.0)    # 第5步：下楼后在平地看木条
 
 # =====================================================================
@@ -465,10 +472,32 @@ class StairsHurdleLevel:
     # 入口
     # ------------------------------------------------------------------
 
+    def _servo(self, fn_name, pulse):
+        """优先强制下发舵机脉冲；宿主没有 force 参数时退回普通调用
+
+        为什么要强制：RobotState.__init__ 把 current_head_pulse /
+        current_pitch_pulse 预设成 1500，**并不代表舵机真的在那里**。
+        刚上电、刚换过舵机、被手掰过时，普通 set_* 会因为"已在目标位"直接
+        return，一次脉冲都发不出去——后面所有几何全错，而且看不出来。
+        """
+        fn = getattr(self.state, fn_name, None)
+        if fn is None:
+            return
+        try:
+            fn(pulse, force=True)
+        except TypeError:
+            fn(pulse)
+
     def _init_pose(self):
+        """开场初始化：站直 → 头部 yaw 回中位 → 俯仰到观测档
+
+        顺序不能反：先回中位再定俯仰，两者都强制下发（见 _servo）。
+        换舵机之后这一步尤其不能省。
+        """
         self.state.act(A_STAND)
-        self.state.set_head(HEAD_PULSE)
-        self.state.set_pitch(PITCH_OBS)
+        self._servo("set_head", HEAD_PULSE)
+        self._servo("set_pitch", PITCH_OBS)
+        self._log(f"头部初始化：yaw={HEAD_PULSE}（中位）pitch={PITCH_OBS}（观测档）")
         self._build_meter(PITCH_OBS)
         self._sleep(0.5)
 

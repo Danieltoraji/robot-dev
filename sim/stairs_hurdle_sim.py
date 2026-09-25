@@ -172,10 +172,12 @@ class SimStairsRobot(RobotState):
     动作组的净位移与航向偏置是**名义值**，见模块 docstring。
     """
 
-    #: 站立时相机光心离地高度（cm）——卷尺实测
-    CAM_HEIGHT = 34.5
-    #: 相机相对俯仰舵机的安装下俯偏移（度）——漏掉它可见带会整体失真
-    CAM_PITCH_OFFSET_DEG = 15.0
+    #: 站立时相机光心离地高度（cm）——2026-09-25 卷尺标定：
+    #: h_eff（光心离刻度平面）32.73 + 卷尺厚 1.20 = 33.93
+    CAM_HEIGHT = 33.9
+    #: 相机相对俯仰舵机的安装下俯偏移（度）——标定值：
+    #: 1100 档拟合俯角 55.11° − 名义 (1500-1100)*0.09=36.0° = 19.11°
+    CAM_PITCH_OFFSET_DEG = 19.1
     #: 相机-机体水平偏移（未建模）
     CAM_BODY_OFFSET = 0.0
 
@@ -220,11 +222,11 @@ class SimStairsRobot(RobotState):
 
     # ---- I/O 接缝 ----
 
-    def set_head(self, pulse, move_time_ms=500):
+    def set_head(self, pulse, move_time_ms=500, force=False):
         self.head = pulse
         self.current_head_pulse = pulse
 
-    def set_pitch(self, pulse, move_time_ms=500):
+    def set_pitch(self, pulse, move_time_ms=500, force=False):
         # 必须同步 current_pitch_pulse：关卡的变档重试靠它恢复原档，
         # 旧版只改 self.pitch，一次重试之后机器人就被永久留在错误档位
         self.pitch = pulse
