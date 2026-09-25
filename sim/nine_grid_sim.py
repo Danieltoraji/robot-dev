@@ -645,7 +645,25 @@ def main(argv=None):
     ap.add_argument("--deform", type=float, default=0.0, metavar="SIGMA_TILT_DEG",
                     help="地板形变：每动作俯仰随机游走步长（度），"
                          "幅度上限 ±15°、高度 ±2cm（0=无形变）")
+    ap.add_argument("--unified", action="store_true",
+                    help="走**统一决策新循环**（三档分区＋一个循环；2026-09-25 "
+                         "重写版）。默认仍是旧三段式链路。此开关只改本次运行的"
+                         "算法选择，**不改任何默认常量**，跑完自动还原。")
     args = ap.parse_args(argv)
+
+    # 只在本进程内切换算法，跑完还原 —— 绝不把默认值改掉
+    restores = []
+    if args.unified:
+        import levels.nine_grid as _ng
+        _old = (_ng.UNIFIED_NAV_ENABLED, _ng.VIS_ZONE_ENABLED,
+                _ng.VIS_REANCHOR_BY_ANCHOR)
+        _ng.UNIFIED_NAV_ENABLED = True
+        _ng.VIS_ZONE_ENABLED = True
+        _ng.VIS_REANCHOR_BY_ANCHOR = True
+        restores.append(lambda: setattr(_ng, "UNIFIED_NAV_ENABLED", _old[0]))
+        restores.append(lambda: setattr(_ng, "VIS_ZONE_ENABLED", _old[1]))
+        restores.append(lambda: setattr(_ng, "VIS_REANCHOR_BY_ANCHOR", _old[2]))
+        print("[仿真] ★ 统一决策新循环（三档分区＋一个循环，2026-09-25 重写版）")
 
     layout = random_layout(args.seed) if args.random_layout else SIM_LAYOUT
     print(f"[仿真] 布局: {layout}")
@@ -664,6 +682,9 @@ def main(argv=None):
     except Exception as e:  # 布局扫失败等：CLI 友好退出，便于脚本判断
         print(f"[仿真] 关卡异常: {type(e).__name__}: {e}")
         return 1
+    finally:
+        for f in reversed(restores):
+            f()
     _print_summary(run.stats)
     return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
 
