@@ -26,9 +26,16 @@
     # 只关心近段（起跨点要的是近距零点精度）
     python tools/calib_ruler_profile.py --image photo.jpg --dists 2,3,4,5,6,8,10,15,20
 
+    # 卷尺零点不在光心地面投影点上时，用 --offset 补（正=卷尺零点在原点前方）
+    python tools/calib_ruler_profile.py --image photo.jpg --dists 5,10,15,20 --offset 12
+
     # 已有像素点，只重算拟合
     python tools/calib_ruler_profile.py --image photo.jpg --px "1200,1819;1210,1401" \
         --dists 2,10 --fit-only
+
+⚠ 距离口径：工具要的是"离**光心地面投影点**的地面距离"，不是卷尺自己的读数。
+   卷尺零点没对准那个点时，用 --offset 平移（或用吊线/卷尺量出偏移）。
+   这点错了，整条曲线会有个常数平移，而近距零点恰恰是最要命的。
 
 交互
 ----
@@ -399,6 +406,9 @@ def parse_args():
     ap.add_argument("--image", required=True, help="标尺照片（原生分辨率）")
     ap.add_argument("--dists", default=None,
                     help="按点击顺序对应的距离(cm)，逗号分隔；缺省用内置序列")
+    ap.add_argument("--offset", type=float, default=0.0,
+                    help="卷尺零点相对光心地面投影点的偏移(cm)，正=零点在原点前方；"
+                         "会加到所有刻度读数上")
     ap.add_argument("--px", default=None, help="脚本模式：像素点 'x,y;x,y;...'")
     ap.add_argument("--fit-only", action="store_true", help="只算拟合，不开窗口")
     ap.add_argument("--pitch", type=int, default=None, help="记录用：俯仰脉宽")
@@ -414,6 +424,9 @@ def main():
         sys.exit(1)
     print(f"读入: {args.image}  {frame.shape[1]}x{frame.shape[0]}")
     dists = _parse_floats(args.dists) if args.dists else list(DEFAULT_DISTS)
+    if args.offset:
+        print(f"刻度读数统一加偏移 {args.offset:+.1f}cm（卷尺零点 -> 光心地面投影点）")
+        dists = [d + args.offset for d in dists]
 
     if args.px:
         pts = _parse_px(args.px)
