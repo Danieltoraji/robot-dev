@@ -20,34 +20,38 @@
 
 用法
 ----
-    # 交互点击（推荐）：按提示顺序点标尺刻度
+    # 交互点击（推荐）：按提示顺序点标尺刻度。**不需要任何已知参数。**
     python tools/calib_ruler_profile.py --image photo.jpg
 
     # 只关心近段（起跨点要的是近距零点精度）
     python tools/calib_ruler_profile.py --image photo.jpg --dists 2,3,4,5,6,8,10,15,20
 
-    # 卷尺零点不在光心地面投影点上时，用 --offset 补（正=卷尺零点在原点前方）
-    python tools/calib_ruler_profile.py --image photo.jpg --dists 5,10,15,20 --offset 12
-
     # 已有像素点，只重算拟合
     python tools/calib_ruler_profile.py --image photo.jpg --px "1200,1819;1210,1401" \
         --dists 2,10 --fit-only
 
-两条现场口径（都不知道就别猜，第一条工具能自己解）
+不需要猜任何东西
+----------------
+**刻度平面高度、俯角、零点偏移三个量全部由拟合解出**，不要再传"高度大概
+34.5、卷尺大概厚 1cm"这类猜测值当默认——那只会给出一个看着确定、其实建立
+在猜测上的数。实测（合成数据 + 2px 点击噪声）：三个量都解得出来，
+零点偏移只飘 ±0.16cm。
+
+两条现场口径（工具已自动处理，写在这里免得再踩）
 ------------------------------------------------
 **① 卷尺零点压在机器人脚尖上。** 光心的地面投影点现场根本找不到，不要让人
-去测它。用 `--fit-offset` 把「脚尖 → 光心地面投影」的纵向距离解出来。
+去测它——解出来的"零点偏移"就是「脚尖 → 光心地面投影」的纵向距离。
 
 ⚠ `core/ground_homography.py` 的 `CAMERA_TO_BODY_FORWARD_CM = 4.0` 是**仿真参数**，
 不是实测值，不能拿它当这个偏移的真值对照。
 
-**② 刻度印在卷尺上表面，比地面高约 1cm。** 这是已知的测量缺陷——刻度点不是
-地面点。用 `--ruler-height`（默认 1.0）补偿：几何上"目标抬升 λ"严格等价于
-"相机降低 λ"，不补会引入约 λ/h ≈ 3% 的比例误差（40cm 处就是 1.2cm）。
+**② 刻度印在卷尺上表面，比地面高约 1cm**，所以刻度点**不是地面点**。
+工具解出的是「光心离**刻度平面**的高度」——卷尺厚度与相机高度在模型里只以
+差值出现，**永远分不开**，所以不必也不能分开给。要量**地面**目标时还得把
+卷尺厚度加回去，影响约 λ/h 的比例（40cm 约 1cm，2cm 仅 0.06cm，对起跨点无所谓）。
 
 ⚠ 零点偏移在自由射影模型下**不可辨识**（`y=(a+bd)/(c+d)` 对 d 平移不变，
-实测偏移 ±10cm 残差一字不变），只有物理模型解得出来，且**必须带畸变**
-（不带会偏 1.5cm）。
+实测偏移 ±10cm 残差一字不变），只有物理模型解得出来。
 
 交互
 ----
@@ -170,20 +174,52 @@ def fit_phys(d, y, h_lock=None, use_dist=True, ruler_h=0.0):
     return h, float(r.x[0]), fy0, cy0, k1, k2
 
 
-def solve_zero_offset(d_read, y, h, use_dist=True, ruler_h=0.0):
-    """锁死高度与真实内参，拟合 (俯角, 零点偏移)
+def fit_all(d_read, y, use_dist=True):
+    """三参全自由：刻度平面高度、俯角、零点偏移
 
-    刻度读数是"离卷尺零点"的距离，真实地面距离 = 读数 + 偏移。
-    **偏移在自由射影模型下不可辨识**（y=(a+bd)/(c+d) 对 d 平移不变），
-    所以只能靠物理模型解出来，或直接量。
+    **默认就用这个，任何参数都不需要猜。**
 
-    本项目现场约定：卷尺零点压在**机器人脚尖**上。光心的地面投影点现场
-    根本找不到，所以别让用户去测它——让这里解出来。输出的"零点偏移"就是
-    **脚尖到光心地面投影的纵向距离**。
+    已实测这三个量都能从"刻度-像素"数据本身定出来：合成数据（真值
+    h_eff=33.5cm / 俯角 58.0° / 零点偏移 12.0cm）在 2px 点击噪声下反复
+    拟合，零点偏移只飘 ±0.16cm。所以不要再拿"高度大概 34.5、卷尺大概厚
+    1cm"这种猜测值当默认——那只会给出一个看着确定、其实建立在猜测上的数。
 
-    ⚠ 注意：`core/ground_homography.py` 的 `CAMERA_TO_BODY_FORWARD_CM = 4.0`
-    是**仿真参数**，不是实测值，不能拿来当这个偏移的真值对照。
+    刻度读数是"离卷尺零点"的距离，**真实地面距离 = 读数 + 零点偏移**。
+    偏移在自由射影模型下不可辨识（y=(a+bd)/(c+d) 对 d 平移不变），
+    只有物理模型解得出来。
+
+    本项目现场约定：卷尺零点压在**机器人脚尖**上（光心的地面投影点现场
+    根本找不到），所以解出的偏移就是**脚尖 → 光心地面投影**的纵向距离。
+
+    ⚠ 能定出来的只是 **h_eff = 光心离「刻度平面」的高度 = h − λ**：
+    卷尺厚度 λ 与相机高度 h 在模型里只以 h−λ 的形式出现，**两者永远分不开**。
+    要量**地面**目标时还得把 λ 加回去（λ 只有大概值），影响是约 λ/h 的
+    比例误差——40cm 处约 1cm，2cm 处只有 0.06cm，所以对起跨点无所谓。
+
+    ⚠ `core/ground_homography.py` 的 `CAMERA_TO_BODY_FORWARD_CM = 4.0` 是
+    **仿真参数**，不是实测值，不能拿来当这个偏移的真值对照。
     """
+    fy0, cy0 = float(CAMERA_INTRINSIC[1, 1]), float(CAMERA_INTRINSIC[1, 2])
+    k1, k2 = float(CAMERA_DISTORTION[0]), float(CAMERA_DISTORTION[1])
+    best = None
+    for t0 in (0., 5., 10., 15., 20., 30.):
+        for th0 in (35., 45., 52., 58., 65., 72., 80.):
+            for h0 in (20., 27., 33.5, 42., 55., 75.):
+                f = lambda q: phys_y(d_read + q[2], q[0], np.radians(q[1]),
+                                     fy0, cy0, use_dist, k1, k2) - y
+                try:
+                    r = _ls(f, [h0, th0, t0],
+                            bounds=([8.0, 15.0, -40.0], [150.0, 89.0, 80.0]),
+                            max_nfev=400000)
+                except Exception:
+                    continue
+                if best is None or r.cost < best.cost:
+                    best = r
+    return best
+
+
+def solve_zero_offset(d_read, y, h, use_dist=True, ruler_h=0.0):
+    """锁死高度，只拟合 (俯角, 零点偏移)。作为 fit_all 的交叉校验用"""
     fy0, cy0 = float(CAMERA_INTRINSIC[1, 1]), float(CAMERA_INTRINSIC[1, 2])
     k1, k2 = float(CAMERA_DISTORTION[0]), float(CAMERA_DISTORTION[1])
     best = None
@@ -201,17 +237,15 @@ def solve_zero_offset(d_read, y, h, use_dist=True, ruler_h=0.0):
     return best
 
 
-def report(d, y, x=None, fit_offset=False, height=34.5, ruler_h=1.0):
+def report(d, y, x=None, lock_height=None, lock_ruler_h=0.0):
     """跑全部拟合并打印。返回结果字典
 
-    height ：相机光心离地高度（cm），卷尺实测
-    ruler_h：刻度点离地高度（cm），默认 1.0 —— 刻度印在卷尺上表面，
-             卷尺比地面高约 1cm，这是已知的测量缺陷，必须补偿
+    lock_height：可选的交叉校验——先锁死"光心离刻度平面的高度"再拟合。
+                 缺省 None = 不锁，三个参数全自由（**推荐**）。
     """
     d = np.asarray(d, float)
     y = np.asarray(y, float)
-    out = {"n_points": int(len(d)), "dists_cm": d.tolist(), "y_px": y.tolist(),
-           "height_cm": height, "ruler_h_cm": ruler_h}
+    out = {"n_points": int(len(d)), "dists_cm": d.tolist(), "y_px": y.tolist()}
     if x is not None:
         cx = float(CAMERA_INTRINSIC[0, 2])
         out["x_px"] = list(map(float, x))
@@ -219,9 +253,6 @@ def report(d, y, x=None, fit_offset=False, height=34.5, ruler_h=1.0):
         out["x_offset_from_cx_px"] = float(np.mean(np.abs(np.asarray(x) - cx)))
 
     print(f"\n===== 拟合（{len(d)} 个刻度点）=====")
-    print(f"  高度假设 {height:.1f}cm；刻度点离地 {ruler_h:.1f}cm"
-          f"（卷尺厚，已按『等效降低相机』补偿；不补会差约 "
-          f"{100 * ruler_h / max(height - ruler_h, 1e-6):.1f}%）")
 
     # 走向自检：远处在上（y 小）是正常俯视；反了说明配对/顺序有问题
     slope_sign = np.sign(np.polyfit(d, y, 1)[0])
@@ -235,71 +266,75 @@ def report(d, y, x=None, fit_offset=False, height=34.5, ruler_h=1.0):
 
     if x is not None and out["x_offset_from_cx_px"] > 60:
         print(f"  ⚠ 刻度点偏离画面中心列 {out['x_offset_from_cx_px']:.0f}px："
-              "物理模型（h,θ）只在近光轴处严格成立，自由射影模型不受影响")
+              "物理模型只在近光轴处严格成立，自由射影模型不受影响")
 
     if len(d) < 4:
         print("  点太少（<4），不做拟合")
         return out
 
-    # --- 自由射影（能达到的上限）---
+    # --- 自由射影：与几何无关的上限 ---
     p = fit_mobius(d, y)
     if p is not None:
         rms = float(np.sqrt(np.mean(((p[0] + p[1] * d) / (p[2] + d) - y) ** 2)))
         dh = np.array([inv_mobius(p, yv) for yv in y])
         e = dh - d
-        print(f"  自由射影模型 (a,b,c 三参)      RMS={rms:6.2f}px | "
+        print(f"  自由射影模型（**针孔族**的上限）  RMS={rms:6.2f}px | "
               f"距离误差 worst={np.max(np.abs(e)):5.2f}cm  {np.round(e, 2)}")
         out["mobius"] = {"abc": list(map(float, p)), "rms_px": rms,
                          "dist_err_cm": e.tolist()}
 
-    # --- 物理模型：高度自由 / 高度锁死实测值 ---
-    for tag, h_lock in (("高度自由      ", None), ("高度锁死 34.5cm", 34.5)):
-        for use_dist in (True, False):
-            r = fit_phys(d, y, h_lock=h_lock, use_dist=use_dist, ruler_h=ruler_h)
-            if r is None:
-                continue
-            h, th, fy0, cy0, k1, k2 = r
-            pred = phys_y(d, h, np.radians(th), fy0, cy0, use_dist, k1, k2, ruler_h)
-            rms = float(np.sqrt(np.mean((pred - y) ** 2)))
-            dh = np.array([inv_phys(yv, h, np.radians(th), fy0, cy0,
-                                    use_dist, k1, k2, ruler_h) for yv in y])
-            e = dh - d
-            lbl = "含畸变" if use_dist else "无畸变"
-            print(f"  物理模型 {tag} {lbl}  h={h:5.1f}cm 俯角={th:4.1f}° | "
-                  f"RMS={rms:6.2f}px | 距离误差 worst={np.max(np.abs(e)):5.2f}cm  "
-                  f"{np.round(e, 2)}")
-            key = f"phys_{'free' if h_lock is None else 'h34.5'}_{'dist' if use_dist else 'nodist'}"
-            out[key] = {"h_cm": h, "theta_deg": th, "rms_px": rms,
-                        "dist_err_cm": e.tolist()}
+    fy0 = float(CAMERA_INTRINSIC[1, 1])
+    cy0 = float(CAMERA_INTRINSIC[1, 2])
+    k1 = float(CAMERA_DISTORTION[0])
+    k2 = float(CAMERA_DISTORTION[1])
 
-    print("\n  判读：")
-    print("   · 自由射影的 RMS 是这类数据的上限；物理模型明显更差说明刻度值/几何不自洽")
-    print("   · 「含畸变 vs 无畸变」的差就是桶形畸变帮了多少忙")
-    print("   · 最终要的是**近段距离误差**（起跨点靠的是近距零点），不是总 RMS")
+    # --- 主结果：三参全自由，不需要任何猜测值 ---
+    print("\n  --- 主结果：刻度平面高度 / 俯角 / 零点偏移（三参全自由）---")
+    for use_dist in (True, False):
+        r = fit_all(d, y, use_dist=use_dist)
+        if r is None:
+            continue
+        he, th, t = float(r.x[0]), float(r.x[1]), float(r.x[2])
+        rms = float(np.sqrt(np.mean(r.fun ** 2)))
+        dh = np.array([inv_phys(yv, he, np.radians(th), fy0, cy0,
+                                use_dist, k1, k2) for yv in y]) - t
+        e = dh - d
+        print(f"    {'含畸变' if use_dist else '无畸变'}  刻度平面高度={he:5.2f}cm  "
+              f"俯角={th:5.2f}°  零点偏移={t:+6.2f}cm | RMS={rms:6.2f}px | "
+              f"距离误差 worst={np.max(np.abs(e)):5.2f}cm  {np.round(e, 2)}")
+        out[f"free_{'dist' if use_dist else 'nodist'}"] = {
+            "h_eff_cm": he, "theta_deg": th, "zero_offset_cm": t,
+            "rms_px": rms, "dist_err_cm": e.tolist()}
+    print("    · 零点偏移 = 卷尺零点(脚尖) → 光心地面投影的纵向距离，应为正")
+    print("    · 刻度平面高度 = 光心离**刻度平面**的高度 = 相机离地高度 − 卷尺厚度；")
+    print("      这两者模型里只以差值出现，**永远分不开**，所以量地面目标时")
+    print("      还需把卷尺厚度加回去（影响约 λ/h 的比例，40cm 约 1cm、2cm 仅 0.06cm）")
 
-    # --- 零点偏移：现场卷尺压在脚尖上，这个数就是"脚尖到光心地面投影" ---
-    if fit_offset:
-        print(f"\n  --- 零点偏移拟合（高度锁死 {height:.1f}cm，fy/cy 锁死）---")
+    # --- 可选交叉校验：锁死高度 ---
+    if lock_height is not None:
+        print(f"\n  --- 交叉校验：锁死刻度平面高度 {lock_height:.2f}cm ---")
         for use_dist in (True, False):
-            r = solve_zero_offset(d, y, height, use_dist=use_dist, ruler_h=ruler_h)
+            r = solve_zero_offset(d, y, lock_height, use_dist=use_dist,
+                                  ruler_h=lock_ruler_h)
             if r is None:
                 continue
             th, t = float(r.x[0]), float(r.x[1])
-            fy0, cy0 = float(CAMERA_INTRINSIC[1, 1]), float(CAMERA_INTRINSIC[1, 2])
-            k1, k2 = float(CAMERA_DISTORTION[0]), float(CAMERA_DISTORTION[1])
             rms = float(np.sqrt(np.mean(r.fun ** 2)))
-            dh = np.array([inv_phys(yv, height, np.radians(th), fy0, cy0,
-                                    use_dist, k1, k2, ruler_h) for yv in y]) - t
+            dh = np.array([inv_phys(yv, lock_height, np.radians(th), fy0, cy0,
+                                    use_dist, k1, k2, lock_ruler_h)
+                           for yv in y]) - t
             e = dh - d
-            print(f"    {'含畸变' if use_dist else '无畸变'}  俯角={th:4.1f}°  "
+            print(f"    {'含畸变' if use_dist else '无畸变'}  俯角={th:5.2f}°  "
                   f"零点偏移={t:+6.2f}cm | RMS={rms:6.2f}px | "
                   f"距离误差 worst={np.max(np.abs(e)):5.2f}cm")
-            key = f"offset_{'dist' if use_dist else 'nodist'}"
-            out[key] = {"theta_deg": th, "zero_offset_cm": t, "rms_px": rms,
-                        "height_cm": height, "dist_err_cm": e.tolist()}
-        print("    · 零点偏移 = 卷尺零点(脚尖)到光心地面投影的纵向距离，应为正")
-        print("    · 刻度点离地高度已按 --ruler-height 补偿；它主要影响**比例**"
-              "（约 λ/h），对零点偏移本身只差零点几厘米")
+            out[f"locked_{'dist' if use_dist else 'nodist'}"] = {
+                "h_eff_cm": lock_height, "theta_deg": th, "zero_offset_cm": t,
+                "rms_px": rms, "dist_err_cm": e.tolist()}
+
+    print("\n  判读：")
+    print("   · 针孔族的上限是自由射影；含畸变的物理模型不属该族，**可以更好**")
+    print("   · 「含畸变 vs 无畸变」的差就是桶形畸变帮了多少忙")
+    print("   · 最终要的是**近段距离误差**（起跨点靠的是近距零点），不是总 RMS")
     return out
 
 
@@ -311,16 +346,14 @@ class RulerClicker:
     """带缩放/平移的刻度点击器（缩放着实必要：刻度是细线，不放大点不准）"""
 
     def __init__(self, frame, dists, out_path, image_path=None, pitch=None,
-                 fit_offset=False, height=34.5, ruler_h=1.0):
+                 lock_height=None):
         self.img = frame
         self.h, self.w = frame.shape[:2]
         self.dists = list(dists)
         self.out_path = out_path
         self.image_path = image_path
         self.pitch = pitch
-        self.fit_offset = fit_offset
-        self.height = height
-        self.ruler_h = ruler_h
+        self.lock_height = lock_height
         self.points = []          # [(d_cm, x_px, y_px)]
         self.skipped = []
         self.i = 0
@@ -459,10 +492,9 @@ class RulerClicker:
         d = [p[0] for p in self.points]
         x = [p[1] for p in self.points]
         y = [p[2] for p in self.points]
-        res = report(d, y, x=x, fit_offset=self.fit_offset,
-                      height=self.height, ruler_h=self.ruler_h)
+        res = report(d, y, x=x, lock_height=self.lock_height)
         res.update({"image": self.image_path, "pitch": self.pitch,
-                    "fit_offset": self.fit_offset, "height_cm": self.height,
+                    "lock_height": self.lock_height,
                     "skipped_cm": self.skipped,
                     "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "points": [{"d_cm": p[0], "x_px": p[1], "y_px": p[2]}
@@ -500,15 +532,10 @@ def parse_args():
     ap.add_argument("--dists", default=None,
                     help="按点击顺序对应的距离(cm)，逗号分隔；缺省用内置序列")
     ap.add_argument("--offset", type=float, default=0.0,
-                    help="卷尺零点相对光心地面投影点的偏移(cm)，正=零点在原点前方；"
-                         "会加到所有刻度读数上。**不知道这个值时不要猜，用 --fit-offset**")
-    ap.add_argument("--fit-offset", action="store_true",
-                    help="让工具用物理模型把零点偏移解出来（现场卷尺压在脚尖上时用这个）")
-    ap.add_argument("--height", type=float, default=34.5,
-                    help="相机光心离地高度(cm)，卷尺实测，默认 34.5")
-    ap.add_argument("--ruler-height", type=float, default=1.0,
-                    help="刻度点离地高度(cm)：刻度印在卷尺上表面，卷尺比地面高约 "
-                         "1cm，属已知测量缺陷，默认 1.0 并自动补偿")
+                    help="已知零点偏移(cm)时先加上；**不知道就别填**，缺省由拟合解出")
+    ap.add_argument("--lock-height", type=float, default=None,
+                    help="可选：锁死『光心离刻度平面的高度』(cm) 做交叉校验。"
+                         "缺省不锁——三个参数全自由，不需要任何猜测值")
     ap.add_argument("--px", default=None, help="脚本模式：像素点 'x,y;x,y;...'")
     ap.add_argument("--fit-only", action="store_true", help="只算拟合，不开窗口")
     ap.add_argument("--pitch", type=int, default=None, help="记录用：俯仰脉宽")
@@ -534,10 +561,9 @@ def main():
             print(f"点数不一致: px={len(pts)} dists={len(dists)}")
             sys.exit(1)
         res = report(dists, [p[1] for p in pts], x=[p[0] for p in pts],
-                     fit_offset=args.fit_offset, height=args.height,
-                     ruler_h=args.ruler_height)
+                     lock_height=args.lock_height)
         res.update({"image": args.image, "pitch": args.pitch,
-                    "fit_offset": args.fit_offset, "height_cm": args.height,
+                    "lock_height": args.lock_height,
                     "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "points": [{"d_cm": d, "x_px": p[0], "y_px": p[1]}
                                for d, p in zip(dists, pts)]})
@@ -549,8 +575,7 @@ def main():
         return
 
     RulerClicker(frame, dists, args.out, image_path=args.image,
-                 pitch=args.pitch, fit_offset=args.fit_offset,
-                 height=args.height, ruler_h=args.ruler_height).run()
+                 pitch=args.pitch, lock_height=args.lock_height).run()
 
 
 if __name__ == "__main__":
