@@ -1,0 +1,42 @@
+{
+  "_说明": "逐目标阈值覆盖表。放到机器人 archive/result/press_button_calib.json 即生效；缺字段回落 levels/press_button.py 里的 DEFAULT_TARGETS 并打印告警。跑一遍关卡，按每轮打印的『判定:』调这些数。",
+  "_字段含义": {
+    "psi_ratio": "τ_Ψ：|Ψ−1| 容差（比值）。0.03 ≈ 3°；取小了判据不收敛，取大了压不准",
+    "beta_px": "τ_β：横向像素容差。60px @30cm ≈ 1.25cm",
+    "gamma_px": "τ_γ：竖直像素容差。只告警、不阻塞动作（高度由摆位保证）",
+    "z_stop_cm": "z*：判定到位的纵深（到标签，不是到开关）",
+    "z_tol_cm": "τ_z：纵深容差",
+    "f_corr": "宽度修正因子。Ψ 达标时就是 1.00；斜视明显时可略降",
+    "turn_sign": "+1 正常；仅当实机转向装反（Ψ>1 转左反而更偏）才改 −1",
+    "max_turns": "单目标转向动作次数上限（护栏，超限抛 BudgetExceeded）",
+    "max_search_rounds": "单目标搜索轮数上限（每轮最多 4 张照片）"
+  },
+  "targets": [
+    {
+      "id": 102,
+      "name": "目标1",
+      "psi_ratio": 0.03,
+      "beta_px": 60,
+      "gamma_px": 100,
+      "z_stop_cm": 30.0,
+      "z_tol_cm": 3.0,
+      "f_corr": 1.0,
+      "turn_sign": 1,
+      "max_turns": 40,
+      "max_search_rounds": 10
+    },
+    {
+      "id": 101,
+      "name": "目标2",
+      "psi_ratio": 0.03,
+      "beta_px": 60,
+      "gamma_px": 100,
+      "z_stop_cm": 30.0,
+      "z_tol_cm": 3.0,
+      "f_corr": 1.0,
+      "turn_sign": 1,
+      "max_turns": 40,
+      "max_search_rounds": 10
+    }
+  ]
+}
