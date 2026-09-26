@@ -106,8 +106,27 @@ WINDOW_BAR_FLAT = (0.0, 50.0)    # 第3步：下完台阶后在平地看木条
 # =====================================================================
 #: 起爬点：机器人中心距胶条的距离（照参考实现；楼梯段整体开环写死）
 CLIMB_STOP_CM = 7.0
-#: 起跨点：**必须在栏杆前 1cm 以内**（现场要求）
-HURDLE_STOP_CM = 1.0
+
+# ⚠⚠ 起跨点必须**先换算口径**，否则会站在原地压着木条 ──────────────
+# 测距工具读的是「**光心地面投影** → 木条」，而"机器人在栏杆前几厘米"
+# 说的是「**脚尖** → 木条」。两者差一个常数：脚尖在光心投影**前方** 4.24cm
+# （2026-09-25 卷尺标定 + 现场复核 +4.55~+4.66 恒定）。
+#
+# 也就是说：**工具读数 1cm 时，脚尖已经越过木条 3.24cm**——脚正踩在杆上，
+# 一碰就是 −2 分（封顶 −6）。必须把"脚尖离杆 1cm"折成工具读数 5.24cm。
+#
+# 另一个好处：5.24cm 落在可见带（3.5~71cm）**里面**，最后一段不需要
+# 航位推算，起跨点的精度回到测量精度（约 0.4cm），不再受 1.8cm 步长量化。
+TOE_AHEAD_CM = 4.24          # 脚尖在光心地面投影前方的距离（标定实测）
+#: 起跨点：**机器人最前端（脚尖）离木条 1cm 以内**（现场要求）
+HURDLE_TOE_GAP_CM = 1.0
+#: 折成测距工具的读数口径（原点=光心地面投影）：1.0 + 4.24 = 5.24cm
+HURDLE_STOP_CM = HURDLE_TOE_GAP_CM + TOE_AHEAD_CM
+# ⚠ 停点精度受步长量化限制：一步 1.8cm，而容窗口只有 ±1cm 左右。代码一律
+#   "宁可少走"（_advance 在余量不足一个保守步长时不迈步），所以实际落点是
+#   脚尖离杆 1.0 ~ 2.98cm——**保证碰不到杆，但做不到"恰好 1cm"**。
+#   想要更准只能：把步长复量准（格点位置准了就能挑格点），或补一条准直性好
+#   的极短垫步动作。见方案 §5.3.1。
 
 # =====================================================================
 # 楼梯段：整段开环写死（现场结论）
@@ -295,22 +314,34 @@ class StairsHurdleLevel:
             return True
         return False
 
-    def _advance(self, forward_cm, stop_cm):
-        """前进一步或一批
+    def _advance(self, forward_cm, stop_cm, bias="short"):
+        """前进一步或一批；返回实际走的步数（0 = 到量化极限，走不动了）
 
         远距"保守批量"不是开环：步数由**实测读数**除以**步长上界**得到
         （用上界 => 宁可欠走），下一帧立刻复测兜底。近距（余量 < 8cm）
-        退回一步一测，避免一步跨过起跨点。
+        退回一步一测。
+
+        ⚠ **近距"余量不足一个保守步长就不迈步"**（bias='short'）。这条不是
+        保守过头，是必须的：一步是 1.8cm，而停点的容窗口只有 ±1cm 左右。
+        余量 1.5cm 时再迈一步，落点可能到 −0.5cm——起跨点负余量就是**脚尖
+        压上木条**（−2 分/次，封顶 −6）。少走最多 2cm 没有代价（跨栏动作组
+        净前进 18cm，差这点距离不影响跨越几何），走过头直接罚分。
 
         ⚠ 全程只用 go_forward_one_step：现场结论是 small_step 步长太短
         （1.5cm 级）且准直性极差，走几步就偏，反而害事。
         """
         room = forward_cm - stop_cm
+        if room <= 0:
+            return 0
+        step_bound = mc.FWD_STEP_CM * FWD_STEP_SAFETY
         if room <= FAR_BATCH_MIN_CM:
+            if bias == "short" and room < step_bound:
+                self._log(f"  余 {room:.2f}cm 不足一个保守步长 "
+                          f"{step_bound:.2f}cm，不再迈步（宁可少走）")
+                return 0
             self.state.act(A_FWD, times=1)
             self._sleep()
             return 1
-        step_bound = mc.FWD_STEP_CM * FWD_STEP_SAFETY
         steps = max(1, min(MAX_BATCH_STEPS, int(room / step_bound)))
         self.state.act(A_FWD, times=steps)
         self._sleep()
@@ -349,7 +380,10 @@ class StairsHurdleLevel:
         此时再去纠正横偏只会来回摆。
 
         目标连续丢失（多半是进入机体自遮挡盲区）时，用最后有效读数推算余量。
-        返回 True=到位/已按推算处理，False=始终未见目标。
+        走到"余量不足一个保守步长"（_advance 返回 0）时也就地接受——那是
+        1.8cm 步长的量化极限，再迈一步只会越过停点。
+
+        返回 True=到位/已按推算处理/到量化极限，False=始终未见目标。
         """
         last = None
         misses = 0
@@ -383,12 +417,16 @@ class StairsHurdleLevel:
                     self._log(f"{label}：到位（复测中位 {c:.1f}cm）")
                     return True
                 self._log(f"{label}：复测 {c:.1f}cm 未达，继续")
-                self._advance(c, stop_cm)
+                if self._advance(c, stop_cm, bias) == 0:
+                    self._log(f"{label}：余量不足一步，就此处停")
+                    return True
                 continue
             if self._correct(m):
                 self._sleep()
                 continue
-            self._advance(m.forward_cm, stop_cm)
+            if self._advance(m.forward_cm, stop_cm, bias) == 0:
+                self._log(f"{label}：余量不足一步（步长量化极限），就此处停")
+                return True
         self._log(f"{label}：轮数耗尽，按当前位置继续")
         return True
 
@@ -464,8 +502,13 @@ class StairsHurdleLevel:
         conf = self._measure_median(WINDOW_BAR_FLAT, n=2)
         self.hurdle_trigger_fwd = (conf[0] if conf is not None
                                    else HURDLE_STOP_CM)
-        self._log(f"起跨点就位（读数 {self.hurdle_trigger_fwd:.1f}cm，"
-                  f"要求 ≤{HURDLE_STOP_CM:.1f}cm）")
+        toe_gap = self.hurdle_trigger_fwd - TOE_AHEAD_CM
+        self._log(f"起跨点就位：读数 {self.hurdle_trigger_fwd:.1f}cm"
+                  f"（光心口径）⇒ 脚尖离木条 {toe_gap:.1f}cm，"
+                  f"要求 ≤{HURDLE_TOE_GAP_CM:.1f}cm")
+        if toe_gap < 0.0:
+            self._log("⚠ 脚尖已越过木条（负值）——读数口径可能搞反了，"
+                      "检查 TOE_AHEAD_CM 的符号")
 
     def _step4_hurdle(self):
         """第4步：跨栏（+ 可选离场）

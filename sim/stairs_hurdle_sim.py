@@ -160,10 +160,20 @@ class StairsScene:
                           for q in tessellate_x(base, n=12)]
         if self.bar_visible:
             L = self.bar_half_len
-            t = 2.0
-            bar = np.array([[-L, self.bar_y + t / 2, 0.0], [L, self.bar_y + t / 2, 0.0],
-                            [L, self.bar_y + t / 2, t], [-L, self.bar_y + t / 2, t]])
-            quads += [self._rot_x(q, self.bar_yaw) for q in tessellate_x(bar, n=24)]
+            t = 2.0                       # 截面 2×2cm（说明书）
+            y0 = self.bar_y               # 木条**近棱**的地面线 = bar_y
+            # ⚠ 必须渲染成"近立面 + 顶面"两片，不能只画中间一片。
+            # 检测器取的是红色区域的**下沿**，而木条下沿就是近立面底边
+            # （y = bar_y）。旧版只在 bar_y + t/2 画一片竖直面，等于把可检出的
+            # 地面线整体后移 1cm——"起跨点离杆多远"的断言会跟着错 1cm，
+            # 而 1cm 正是这里唯一在乎的尺度。
+            near = np.array([[-L, y0, 0.0], [L, y0, 0.0],
+                             [L, y0, t], [-L, y0, t]])
+            top = np.array([[-L, y0, t], [L, y0, t],
+                            [L, y0 + t, t], [-L, y0 + t, t]])
+            for base in (near, top):
+                quads += [self._rot_x(q, self.bar_yaw)
+                          for q in tessellate_x(base, n=24)]
         return quads
 
 
@@ -182,6 +192,15 @@ class SimStairsRobot(RobotState):
     CAM_PITCH_OFFSET_DEG = 19.1
     #: 相机-机体水平偏移（未建模）
     CAM_BODY_OFFSET = 0.0
+    #: 脚尖在光心地面投影**前方**的距离（cm）——2026-09-25 卷尺标定 +4.24，
+    #: 现场复核 +4.55~+4.66 恒定。相机装在头部，其地面投影大致落在脚踝上方，
+    #: 脚尖自然在前。
+    #:
+    #: ⚠ 这个数不是可有可无的细节：测距工具读的是"光心投影→目标"，而"机器人
+    #:   在栏杆前几厘米"说的是"脚尖→目标"。**工具读数 1cm 时脚尖已经越过木条
+    #:   3.24cm，等于站在杆上**。本仿真把它当真值建模，好让测试能验证
+    #:   "跨栏之前脚尖没有先越过木条"。
+    TOE_AHEAD_CM = 4.24
 
     #: 动作组净位移（cm，名义值）：两次上楼落在顶部平台、两次下楼落在平地
     #: 取 12cm 而不是踏面深度 15cm，是给 ±10% 的打滑噪声留余量——旧版 18cm

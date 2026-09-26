@@ -6,6 +6,7 @@
 
 覆盖：
 - N 个随机种子全流程走完，且真正跨过木条；
+- **起跨时脚尖还在木条前面**（碰撞 −2/次、封顶 −6 是唯一罚分来源）；
 - 起跨点落在门限内（末段推算的结果）；
 - 每步目标唯一性（第1步只有胶条、下楼后只有木条）；
 - 楼梯段确实是写死的 4 动作 + 4 右小转，且走完站在平地；
@@ -27,19 +28,29 @@ import numpy as np
 from core.ground_line_meter import build_meter
 from levels.stairs_hurdle import (
     StairsHurdleLevel, PITCH_OBS, WINDOW_TAPE, WINDOW_BAR_FLAT,
-    HURDLE_STOP_CM, CONFIRM_SLACK_CM, STAIR_SEQUENCE,
-    HURDLE_FWD_NOMINAL_CM, SKIP_EXIT, A_CLIMB, A_DOWN, A_TURN_R, A_STAND,
+    HURDLE_STOP_CM, HURDLE_TOE_GAP_CM, TOE_AHEAD_CM, FWD_STEP_SAFETY,
+    STAIR_SEQUENCE, HURDLE_FWD_NOMINAL_CM, SKIP_EXIT,
+    A_CLIMB, A_DOWN, A_TURN_R, A_STAND,
 )
+from core import motion_calib as mc
 from sim.stairs_hurdle_sim import SimStairsRobot, StairsScene
 from vision.red_line_detector import RedLineDetector
 
 CAPTURE_GUARD = 90          # 单局拍照上限（时间代理指标）
 N_SEEDS = 20
 FINISH_LINE_CM = 45.0 + 50.0    # 楼梯下沿出口 45 + 跨障区 50（说明书画定）
+#: 仿真里的脚尖偏移是独立真值，必须与关卡取值一致（不一致说明有一边写错了）
+SIM_TOE_AHEAD_CM = SimStairsRobot.TOE_AHEAD_CM
+#: 一个"保守步长"：近距末段走不动时，落点最远可以差这么多
+STEP_BOUND_CM = mc.FWD_STEP_CM * FWD_STEP_SAFETY
 
 
 def make_run(seed):
-    """按种子生成 (scene, robot, level)，模拟"自由摆位但摆得不错"的起点"""
+    """按种子生成 (scene, robot, level)，模拟"自由摆位但摆得不错"的起点
+
+    额外挂一个钩子：在跨栏**之前**记下机体位置，用来校验"脚尖没有先越过木条"
+    （碰撞 −2/次、封顶 −6，是全场唯一的罚分来源，见 test_toe_never_crosses_bar）。
+    """
     rng = np.random.RandomState(seed)
     scene = StairsScene(
         bar_dist=float(rng.choice([25.0, 32.0, 40.0])),
@@ -52,6 +63,15 @@ def make_run(seed):
         heading_deg=float(rng.uniform(-6, 6)),
     )
     level = StairsHurdleLevel(robot, settle_s=0.0, verbose=False)
+    level.trigger_pose = {}
+    orig_hurdle = level._step4_hurdle
+
+    def hooked():
+        level.trigger_pose["y"] = float(robot.pos[1])
+        level.trigger_pose["x"] = float(robot.pos[0])
+        return orig_hurdle()
+
+    level._step4_hurdle = hooked
     return scene, robot, level
 
 
@@ -62,17 +82,26 @@ def make_run(seed):
 def test_e2e_seeds():
     n_ok = 0
     worst_cap = 0
+    worst_toe = -99.0
     t0 = time.time()
     for seed in range(N_SEEDS):
         scene, robot, level = make_run(seed)
         ok = level.run_level()
         assert ok, f"seed={seed} 未完成"
         n_ok += 1
-        # 起跨点：末段推算应落在门限内（偏差偏"早"是安全方向）
+        # 起跨点读数落在门限内（光心口径）
         tf = level.hurdle_trigger_fwd
         assert tf is not None, f"seed={seed} 未记录起跨读数"
-        assert 0.0 <= tf <= HURDLE_STOP_CM + CONFIRM_SLACK_CM + 0.5, \
-            f"seed={seed} 起跨读数 {tf:.1f}cm 超门限"
+        assert HURDLE_STOP_CM - 0.5 <= tf <= HURDLE_STOP_CM + STEP_BOUND_CM + 0.5, \
+            f"seed={seed} 起跨读数 {tf:.2f}cm 偏离目标 {HURDLE_STOP_CM:.2f}cm 太多"
+        # 跨栏之前脚尖必须还在木条**前面**（这是 −2 分碰撞的唯一来源）
+        ty = level.trigger_pose["y"]
+        toe_gap = scene.bar_y - (ty + SIM_TOE_AHEAD_CM)
+        assert toe_gap > 0.0, \
+            f"seed={seed} 起跨时脚尖已越过木条 {(-toe_gap):.2f}cm（会撞杆）"
+        assert toe_gap <= HURDLE_TOE_GAP_CM + STEP_BOUND_CM + 0.5, \
+            f"seed={seed} 起跨时脚尖离木条 {toe_gap:.2f}cm，停得太远"
+        worst_toe = max(worst_toe, toe_gap)
         # 必须真正跨过木条（没有停在杆前或杆上）
         assert robot.pos[1] > scene.bar_y + 5.0, \
             f"seed={seed} 终了 y={robot.pos[1]:.1f} 未跨过木条 {scene.bar_y:.1f}"
@@ -92,8 +121,38 @@ def test_e2e_seeds():
             f"seed={seed} 拍照 {robot.n_captures} 张超护栏"
     tail = "全部跨过木条" + ("（SKIP_EXIT：落点=杆位+18cm）" if SKIP_EXIT
                             else "并越过终点线")
-    print(f"  端到端 {n_ok}/{N_SEEDS} 完成，起跨点全落门限，{tail} ✓"
+    print(f"  端到端 {n_ok}/{N_SEEDS} 完成，起跨点全落门限、脚尖全在杆前"
+          f"（最远 {worst_toe:.1f}cm），{tail} ✓"
           f"（最多拍照 {worst_cap} 张，耗时 {time.time() - t0:.0f}s）")
+
+
+def test_toe_frame_arithmetic():
+    """停点口径必须自洽：读数是"光心投影→杆"，不是"脚尖→杆"
+
+    这是最容易搞错、后果最重的一处：
+      - 工具读数 = 光心投影 → 木条（相机在头部，投影大致落在脚踝上方）
+      - "机器人在栏杆前几厘米" = 脚尖 → 木条
+      - 脚尖在光心投影**前方** TOE_AHEAD_CM，所以 读数 = 脚尖距 + TOE_AHEAD_CM
+
+    如果照字面把 HURDLE_STOP_CM 取成 1.0（工具读数），脚尖就已经越过木条
+    3.24cm——脚正踩在杆上，一碰 −2 分。
+    """
+    assert SIM_TOE_AHEAD_CM == TOE_AHEAD_CM, \
+        f"仿真真值 {SIM_TOE_AHEAD_CM} 与关卡取值 {TOE_AHEAD_CM} 不一致"
+    assert TOE_AHEAD_CM > 0, "脚尖应在光心投影前方（现场实测 +4.24）"
+    assert abs(HURDLE_STOP_CM - (HURDLE_TOE_GAP_CM + TOE_AHEAD_CM)) < 1e-9, \
+        "HURDLE_STOP_CM 必须是'脚尖离杆距离 + 脚尖偏移'，不能直接用脚尖距离"
+    assert HURDLE_STOP_CM > 3.5, \
+        "停点必须落在可见带（近界 3.5cm）之内，否则最后一段只能靠航位推算"
+    assert HURDLE_STOP_CM - TOE_AHEAD_CM == HURDLE_TOE_GAP_CM
+    # 若照字面把停点取成"脚尖距离"（1.0），工具读数 1.0 时脚尖已经在杆后 3.24cm
+    assert HURDLE_TOE_GAP_CM < TOE_AHEAD_CM, \
+        "要求的离杆余量小于脚尖偏移，说明口径换算没做"
+    print(f"  停点口径：工具读数 {HURDLE_STOP_CM:.2f}cm = 脚尖离杆 "
+          f"{HURDLE_TOE_GAP_CM:.1f}cm + 脚尖偏移 {TOE_AHEAD_CM:.2f}cm；"
+          f"落在可见带内（>3.5cm），末段无需航位推算；"
+          f"落点区间 [{HURDLE_TOE_GAP_CM:.1f}, "
+          f"{HURDLE_TOE_GAP_CM + STEP_BOUND_CM:.2f}]cm ✓")
 
 
 # ---------------------------------------------------------------------
@@ -271,6 +330,7 @@ if __name__ == "__main__":
     test_goal_uniqueness()
     test_action_groups_match_scene()
     test_stair_sequence_hardcoded()
+    test_toe_frame_arithmetic()
     test_degraded_paths()
     test_exit_switch()
     if not args.quick:
