@@ -19,6 +19,7 @@ from core.paths import RESULT_DIR
 from core.robot_core import RobotState
 from levels import goodluck as level_goodluck
 from levels import nine_grid as level_nine_grid
+from levels import press_button as level_press_button
 
 
 # =====================================================================
@@ -46,6 +47,14 @@ LEVELS = {
         "module": level_nine_grid,
         "tag_poses": {},
         "run_level": level_nine_grid.run_level,
+    },
+    # 机器人智按按钮：用 AprilTag 但不做 PnP，只按「标签横向位置 + 像素宽度」
+    # 做像素闭环（现场参考实现 robot/press_final.py），tag_poses 留空。
+    # 离线自检：python levels/press_button.py --selftest
+    "press_button": {
+        "module": level_press_button,
+        "tag_poses": {},
+        "run_level": level_press_button.run_level,
     },
 }
 
