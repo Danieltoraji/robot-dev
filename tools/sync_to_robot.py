@@ -4,7 +4,7 @@
 sync_to_robot.py —— PC → 机器人代码同步（Jupyter Contents API，零第三方依赖）
 
 机器人端 Jupyter: http://192.168.31.209:8888（密码登录）；
-目标目录: Robot_control_self_module（即 /home/pi/Robot_control_self_module）。
+目标目录: Robot_Competition（即 /home/pi/Robot_Competition）。
 
 原理：
   1. GET /login 取 _xsrf → POST /login（password）拿会话 cookie；
@@ -37,9 +37,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-DEFAULT_HOST = os.environ.get("ROBOT_HOST", "http://192.168.43.81:8888")
+DEFAULT_HOST = os.environ.get("ROBOT_HOST", "http://192.168.31.209:8888")
 DEFAULT_PASSWORD = "pi"
-DEFAULT_REMOTE_ROOT = "Robot_control_self_module"
+DEFAULT_REMOTE_ROOT = "Robot_Competition"
 DEFAULT_PATHS = ["main.py", "debug.sh", "core", "vision", "levels", "tools", "models"]
 
 # 机器人运行时需要的标定产物：archive/ 默认不同步（PC 专用），这些文件例外。
@@ -171,7 +171,7 @@ def main():
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--password", default=DEFAULT_PASSWORD)
     parser.add_argument("--remote-root", default=DEFAULT_REMOTE_ROOT,
-                        help="机器人侧目标目录（Jupyter 根下，默认 Robot_control_self_module）")
+                        help="机器人侧目标目录（Jupyter 根下，默认 Robot_Competition）")
     parser.add_argument("--paths", nargs="+", default=DEFAULT_PATHS,
                         help="要同步的本地文件/目录（相对仓库根）")
     parser.add_argument("--check", action="store_true",
