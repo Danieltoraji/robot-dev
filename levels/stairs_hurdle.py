@@ -178,6 +178,18 @@ LANDING_EPS = 1e-9
 #: 后退调节的组合上限：一次调节里最多做几个动作（退回 + 小步）。
 #: 4 个动作能覆盖"后退 0.9~2.5cm"这一档常见取值；再多就是浪费时间了。
 BACK_OFF_MAX_ACTIONS = 4
+#: 后退步的相对散布（保守占位值）：算"最坏净位移"时把后退按这个比例缩小。
+#:
+#: ⚠ `back_one_step` 的散布没实测过，这里是占位值。它直接决定后退调节
+#: **会不会被启用**：散布估得越大，"最坏净位移"越大，能通过安全检查的组合
+#: 越少。仿真实测（后退散布 15%、后退≈整步长）时，安全检查会把所有组合挡掉
+#: ——**后退比小步长又不稳时，这个功能本来就没用**，挡掉是对的。
+#: 现场量了后退步之后，顺手估一下它的重复性再改这里。
+BACK_STEP_SCATTER = 0.10
+#: 一次接近里后退调节最多用几次。它是"凑细档"的微调，不该反复退——
+#: 万一实测净位移与预测有出入，反复退会让机器人整体往后退。超过就认了，
+#: 停在原地（离杆远一点总比退到看不见强）。
+MAX_BACK_OFFS = 3
 
 # =====================================================================
 # 楼梯段：整段开环写死（现场结论）
@@ -255,6 +267,7 @@ class StairsHurdleLevel:
         self.small_step_cm = 0.0       # 本局实测到的最大小步位移（只往上修）
         self.step_cm = 0.0             # 本局实测到的最大整步位移（只往上修）
         self.last_action = None        # 最近一次 _advance 用的动作名
+        self.back_offs = 0             # 本次接近里后退调节已用次数
 
     # ------------------------------------------------------------------
     # 基础设施
@@ -502,11 +515,20 @@ class StairsHurdleLevel:
         back = mc.BACK_STEP_CM
         if not back or back <= 0:
             return False
+        if self.back_offs >= MAX_BACK_OFFS:
+            self._log(f"  后退调节已用满 {MAX_BACK_OFFS} 次，不再退")
+            return False
         # 后退也是同一套腿部动作，本局步长缩放同样作用于它——不折算的话
         # 预测的净位移会整体偏，搜出来的组合落不到窗口里（实测就是这么
         # 20 个种子里只触发 2 次的）。
         back = back * self._scale_est()
-        _, s_nom, _ = self._ladder()[-1]
+        ladder = self._ladder()
+        _, s_nom, s_bound = ladder[-1]
+        # 搜索时"瞄准"用名义值（否则一律偏悲观，本来贴窗的组合会被挡掉），
+        # 但**安全**要用最坏情况：前进可能偏大（s_bound），后退可能偏小
+        # （back×(1−散布)）。只看名义值会在实测里漏掉十几毫米——
+        # 实测就有种子因此落到离杆 0.06cm（低于 0.2cm 的窗口下界）。
+        back_lo = back * (1.0 - BACK_STEP_SCATTER)
         # 动作最少优先，其次净位移最大；k 上限 3、m 上限 2 覆盖
         # "后退 0.9~2.5cm" 这一档常见取值
         best = None
@@ -519,9 +541,11 @@ class StairsHurdleLevel:
                 if net <= 0:
                     continue
                 landing = room - net
-                # 容一点浮点误差：边界上有 "1.6-1.1 = 0.49999999999999994"
-                # 这种情形，不加容差会把刚好落在窗口下界的组合判掉
-                if -overshoot_ok_cm <= landing <= LANDING_EPS:
+                # 最坏情况落点（前进偏大 / 后退偏小 => 净位移最大）
+                worst = room - (k * s_bound - m * back_lo)
+                # 瞄准：预计落进窗口；安全：最坏也不越过窗口下界
+                if -overshoot_ok_cm <= landing <= LANDING_EPS \
+                        and worst >= -overshoot_ok_cm:
                     best = (k, m, net, landing)
                     break
             if best:
@@ -540,6 +564,7 @@ class StairsHurdleLevel:
             self._sleep()
         # 组合的净位移不等于单步，**不能**拿它去标定小步长度
         self.last_action = "back_off"
+        self.back_offs += 1
         return True
 
     def _go(self, action, room, nom, window_hit):
@@ -606,6 +631,7 @@ class StairsHurdleLevel:
         last = None
         misses = 0
         prev = None            # (读数, 动作名, 步数)：上一次前进之后的状态
+        self.back_offs = 0
         for _ in range(MAX_ROUNDS):
             m = self._measure(window)
             if m is None and misses == 0:
