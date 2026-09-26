@@ -24,7 +24,7 @@ x=右）。缺省用 GroundHomography.from_pose 解析自举（±3cm 级）；�
 
 现场操作流程（约 20 分钟）
 ------------------------
-1. 机器人摆到观测姿态：stand，头 pitch=1000（与关卡 PITCH_OBS 一致）、
+1. 机器人摆到观测姿态：stand，头 pitch=1100（与关卡 PITCH_OBS 一致）、
    头部回正（1500）。**之后不要再动俯仰/头部。**
 2. 确定光心地面投影点 O：相机正下方地面位置（卷尺/吊线，从机身参考点量）。
 3. 在 O 周围摆 4~6 个红色目标（胶带片/红色边角料），目标下沿按本地系
@@ -36,15 +36,15 @@ x=右）。缺省用 GroundHomography.from_pose 解析自举（±3cm 级）；�
    可任意移动**（本地系性质），但相机高度/俯仰变了必须重标。
 6. 用 tools/verify_red_distance.py 在**另一个站位**复核测距精度。
 
-用法
-----
-    python tools/calib_stairs_hurdle.py --pitch 1000            # 真机拍照+点击
-    python tools/calib_stairs_hurdle.py --pitch 1000 --image photo.jpg
-    python tools/calib_stairs_hurdle.py --pitch 1000 --image photo.jpg \
+用法（⚠ 已放弃，仅留档；下面命令只在"有已知坐标点阵"时才用得上）
+-----------------------------------------------------------------
+    python tools/calib_stairs_hurdle.py --pitch 1100            # 真机拍照+点击
+    python tools/calib_stairs_hurdle.py --pitch 1100 --image photo.jpg
+    python tools/calib_stairs_hurdle.py --pitch 1100 --image photo.jpg \
         --px "1200,1500; 1500,1600; 900,1700; 1600,1400" \
         --ground "0,25; 10,35; -10,40; 5,55"
 
-交互：左键点击 → u 撤销 → r 重置 → s 保存 → q/ESC 退出
+⚠ `cv2.namedWindow` 在机器人上是 headless，**标定必须在 PC 上用 `--image` 跑**。
 """
 
 import argparse

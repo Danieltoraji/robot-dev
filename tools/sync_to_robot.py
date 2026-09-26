@@ -61,8 +61,9 @@ DEFAULT_PATHS = ["main.py", "debug.sh", "core", "vision", "levels", "tools", "mo
 # 缺失会退回 from_pose 解析自举（布局归属精度下降）——必须随代码一起上机。
 EXTRA_FILES = [
     "archive/result/ninegrid_homography.json",
-    # 上下楼梯与识别跨障：本地系地面单应标定（缺失退回 from_pose 自举，
-    # 测距精度下降到 ±3cm 级）——必须随代码一起上机
+    # 上下楼梯与识别跨障：**已放弃全 H 标定**（见 docs 方案 §7.1，标定原点现场
+    # 找不到），本关改用卷尺刻度标定，参数经 build_meter() 传进 from_pose，
+    # 不再需要这个 JSON。条目保留只为兼容历史产物；本地没有该文件时自动跳过。
     "archive/result/stairs_hurdle_calib.json",
 ]
 
