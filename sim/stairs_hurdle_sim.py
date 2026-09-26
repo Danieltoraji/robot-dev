@@ -216,10 +216,26 @@ class SimStairsRobot(RobotState):
     DOWN_YAW_BIAS_DEG = -1.5
     DOWN_YAW_SIGMA_DEG = 1.5
 
-    #: 未实测动作的名义值（仅仿真用；关卡不得当真值）
-    FWD_SMALL_CM_NOMINAL = 1.5
-    BACK_STEP_CM_NOMINAL = 3.2
+    #: 未实测动作的名义长度（仅仿真用；关卡不得当真值）。
+    #: ⚠ 这两个数以 core/motion_calib 的**现场标定值**为准：填了就用实测值，
+    #:   没填才退回名义值。仿真读的是"实测真源"，不是从关卡抄过来的猜测。
+    FWD_SMALL_CM_NOMINAL = mc.FWD_SMALL_STEP_CM or 1.5
+    BACK_STEP_CM_NOMINAL = mc.BACK_STEP_CM or 3.2
     RIGHT_MOVE_CM_NOMINAL = 2.5
+
+    #: go_forward_one_step 的单步相对散布。
+    #:
+    #: 旧版写的是 15%——那**不是实测值，是随手填的**：实测 ±3σ 只有 0.055cm
+    #: （占步长 2.1%），组间极差 0.9cm/20步（2.5%）。15% 在 1.8cm 步长上是
+    #: σ=0.27cm、3σ=0.81cm，比实测大一个量级，等于让关卡去对付一个不存在的
+    #: 机器人（末段"能不能贴到杆前 1.2cm"这种判断会被它整个淹掉）。
+    FWD_STEP_SIGMA_REL = (mc.FWD_STEP_3SIGMA_CM / 3.0) / mc.FWD_STEP_CM_LEGACY
+    #: 局间步长整体漂移（每局抽一次，作用于所有整步）。
+    #: 依据：实测两次量 go_forward_one_step 得到 2.652 与 1.8（差 1.47 倍）——
+    #: **局间**步长确实会整体变（重装、电量、地面）。所以模型是
+    #: "局间大漂移 + 局内小散布"，而不是把大漂移摊到每一步上。
+    #: 关卡那边靠 _observe_step 在局内实测并把上界往上修来应对。
+    FWD_SCALE_SIGMA = 0.12
 
     def __init__(self, scene: StairsScene, seed=0, start=(0.0, -60.0),
                  heading_deg=0.0, wobble_sigma_deg=0.3):
@@ -241,6 +257,8 @@ class SimStairsRobot(RobotState):
             "left": 1.0 + float(self.rng.normal(0.0, 0.030)),
             "right": 1.0 + float(self.rng.normal(0.0, 0.005)),
         }
+        # 局间步长整体漂移（每局一次；见 FWD_SCALE_SIGMA 说明）
+        self._step_scale = 1.0 + float(self.rng.normal(0.0, self.FWD_SCALE_SIGMA))
 
     # ---- I/O 接缝 ----
 
@@ -265,11 +283,16 @@ class SimStairsRobot(RobotState):
         right = np.array([np.cos(th), -np.sin(th)])
         slip = self.rng.normal
         if name == "go_forward_one_step":
-            self.pos += fwd * mc.FWD_STEP_CM * (1 + slip(0, 0.15))
+            # 实测散布（很小）+ 本局的整体步长漂移（可能很大）
+            self.pos += fwd * (mc.FWD_STEP_CM * self._step_scale
+                               * (1 + slip(0, self.FWD_STEP_SIGMA_REL)))
         elif name == "go_forward_one_small_step":
-            self.pos += fwd * self.FWD_SMALL_CM_NOMINAL * (1 + slip(0, 0.15))
+            self.pos += fwd * (self.FWD_SMALL_CM_NOMINAL * self._step_scale
+                               * (1 + slip(0, self.FWD_STEP_SIGMA_REL)))
         elif name == "back_one_step":
-            self.pos -= fwd * self.BACK_STEP_CM_NOMINAL * (1 + slip(0, 0.15))
+            # 后退：本局步长缩放同样作用于它（同一套腿部动作幅度）
+            self.pos -= fwd * (self.BACK_STEP_CM_NOMINAL * self._step_scale
+                               * (1 + slip(0, 0.15)))
         elif name == "left_move":
             self.pos -= right * mc.LEFT_MOVE_CM * (1 + slip(0, 0.20))
         elif name == "right_move":
