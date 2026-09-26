@@ -4,6 +4,7 @@
 
 import argparse
 import glob
+import json
 import logging
 import math
 import os
@@ -30,7 +31,8 @@ from hiwonder.Controller import Controller
 from CameraCalibration.CalibrationConfig import calibration_param_path
 
 
-LOG_FILE = "/home/pi/JustForTestNoUse/BlueCube_test/apriltag_sorting_task.log"
+LOG_FILE = "/home/pi/Robot_Competition/levels/apriltag_sorting_task.log"
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s",
@@ -76,15 +78,19 @@ TAG_X_FINE = 22
 END_YAW_LOWER = -15    # yaw下限
 END_YAW_UPPER = 5      # yaw上限
 END_FORWARD_TOL = 0.07  # 纵深修正阈值(米)
+WALK_STEPS = 10        # 终点直行步数
+MAX_TURN = 30          # 终点找tag最大小步转次数
 
 # Number of final small forward steps before grasping / placing.
 PICK_FINAL_STEPS = 2
+STEP4_MAX_FORWARDS = 10  # step4凑近最多连续前进步数, 到顶直接判定到位(防止推着海绵无限前进)
 MAX_PICK_RETRIES = 3  # 抓取验证失败最大重试次数
 PLACE_FINAL_STEPS = 1
 
 # Head scanning.
 HEAD_STEP_X = 15
 HEAD_STEP_Y = 15
+INIT_HEAD_PITCH = 1100  # 初始化时头部俯仰中位(低头的中间参数, 原为yaml servo1)
 
 # 夹爪闭合程度: 1.0=最紧(8=0,16=1000), 0.5=半开, 0=全开(500)
 GRIP_SCALE = 1.0
@@ -111,6 +117,77 @@ RED_H_LOW1, RED_H_HIGH1 = 0, 10
 RED_H_LOW2, RED_H_HIGH2 = 160, 180
 RED_S_LOW, RED_S_HIGH = 80, 255
 RED_V_LOW, RED_V_HIGH = 80, 255
+
+# ---- 卡尔曼滤波参数(可被 calib_config.json 覆盖) ----
+KF_CX_Q, KF_CX_R = 1.0, 4.0
+KF_CY_Q, KF_CY_R = 1.0, 4.0
+KF_DIST_Q, KF_DIST_R = 0.002, 0.01
+KF_OFFSET_Q, KF_OFFSET_R = 0.002, 0.01
+KF_ANGLE_Q, KF_ANGLE_QV, KF_ANGLE_R = 5.0, 1.0, 10.0
+KF_AREA_Q, KF_AREA_R = 100.0, 500.0
+KF_LINE_Q, KF_LINE_R = 1.0, 10.0
+
+# ---- 标定配置加载(calib_config.json 由 tools/calib_tuner.py 生成) ----
+# 白名单: 允许被配置文件覆盖的模块常量
+CALIB_CONST_KEYS = [
+    "BLUE_LAB_MIN", "BLUE_LAB_MAX",
+    "RED_H_LOW1", "RED_H_HIGH1", "RED_H_LOW2", "RED_H_HIGH2",
+    "RED_S_LOW", "RED_S_HIGH", "RED_V_LOW", "RED_V_HIGH",
+    "COLOR_AREA_MIN", "CENTER_X",
+    "COLOR_FAR_Y", "COLOR_NEAR_Y", "COLOR_TOO_NEAR_Y",
+    "COLOR_X_TURN", "COLOR_X_LARGE", "COLOR_X_FINE",
+    "BOARD_DEPTH_M", "TAG_PLACE_NEAR_M", "TAG_PLACE_FAR_M", "TAG_PLACE_BIG_M",
+    "TAG_FAR_Y", "TAG_NEAR_Y", "TAG_TOO_NEAR_Y",
+    "TAG_X_TURN", "TAG_X_LARGE", "TAG_X_FINE",
+    "END_YAW_LOWER", "END_YAW_UPPER", "WALK_STEPS", "MAX_TURN",
+    "PICK_FINAL_STEPS", "PLACE_FINAL_STEPS", "MAX_PICK_RETRIES", "STEP4_MAX_FORWARDS",
+    "LINE_CENTER_X", "LINE_TURN_THRESHOLD", "SEARCH_LINE_ALIGN_THRESHOLD",
+    "VERTICAL_LINE_RATIO", "LINE_LOST_TIMEOUT", "LINE_LOST_HOLD", "MAX_LOST_TURNS",
+    "KF_CX_Q", "KF_CX_R", "KF_CY_Q", "KF_CY_R",
+    "KF_DIST_Q", "KF_DIST_R", "KF_OFFSET_Q", "KF_OFFSET_R",
+    "KF_ANGLE_Q", "KF_ANGLE_QV", "KF_ANGLE_R",
+    "KF_AREA_Q", "KF_AREA_R", "KF_LINE_Q", "KF_LINE_R",
+]
+# 允许被配置文件覆盖的命令行参数(dest名), 仅当命令行未显式指定时生效
+CALIB_ARG_KEYS = [
+    "pick_area_threshold", "pick_y_threshold", "pick_too_near_y",
+    "post_pick_left_turns", "post_pick_forward_steps", "back_steps_after_place",
+    "line_head_delta", "line_final_steps", "line_search_turns",
+]
+_ARG_OPTION_STRINGS = {
+    "pick_area_threshold": "--pick-area-threshold",
+    "pick_y_threshold": "--pick-y-threshold",
+    "pick_too_near_y": "--pick-too-near-y",
+    "post_pick_left_turns": "--post-pick-left-turns",
+    "post_pick_forward_steps": "--post-pick-forward-steps",
+    "back_steps_after_place": "--back-steps-after-place",
+    "line_head_delta": "--line-head-delta",
+    "line_final_steps": "--line-final-steps",
+    "line_search_turns": "--line-search-turns",
+}
+
+
+def load_calib_config():
+    """加载脚本同目录的 calib_config.json; 不存在或损坏时返回 None(行为与无配置完全一致)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calib_config.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (ValueError, OSError) as exc:
+        log.warning("calib_config.json 解析失败, 已忽略: %s", exc)
+        return None
+
+
+CALIB_CONFIG = load_calib_config()
+if CALIB_CONFIG:
+    _applied = []
+    for _key in CALIB_CONST_KEYS:
+        if _key in CALIB_CONFIG:
+            globals()[_key] = CALIB_CONFIG[_key]
+            _applied.append(_key)
+    log.info("calib_config.json 覆盖 %d 个常量: %s", len(_applied), _applied)
 
 
 @dataclass
@@ -237,15 +314,16 @@ class SortingTask:
         self.last_state = None
         self.state_enter_time = time.time()
         self.start_time = time.time()
-        self.kf_cx = Kalman1DConst(0.0, Q=1.0, R=4.0)  # cx 卡尔曼(R大=更信预测=更平滑)
-        self.kf_cy = Kalman1DConst(0.0, Q=1.0, R=4.0)  # cy 卡尔曼
-        self.kf_dist = Kalman1DConst(0.0, Q=0.002, R=0.01)  # PnP distance 卡尔曼(米)
-        self.kf_offset = Kalman1DConst(0.0, Q=0.002, R=0.01)  # PnP offset 卡尔曼(米)
-        self.kf_angle = Kalman1D(0.0, Q_angle=5.0, Q_v=1.0, R=10.0)  # 角度卡尔曼(带速度模型)
-        self.kf_area = Kalman1DConst(0.0, Q=100.0, R=500.0)  # area 卡尔曼(像素)
-        self.kf_line_cx = Kalman1DConst(LINE_CENTER_X, Q=1.0, R=10.0)  # 巡线红线中心x卡尔曼(初始画面中心,防起步假偏移)
+        self.kf_cx = Kalman1DConst(0.0, Q=KF_CX_Q, R=KF_CX_R)  # cx 卡尔曼(R大=更信预测=更平滑)
+        self.kf_cy = Kalman1DConst(0.0, Q=KF_CY_Q, R=KF_CY_R)  # cy 卡尔曼
+        self.kf_dist = Kalman1DConst(0.0, Q=KF_DIST_Q, R=KF_DIST_R)  # PnP distance 卡尔曼(米)
+        self.kf_offset = Kalman1DConst(0.0, Q=KF_OFFSET_Q, R=KF_OFFSET_R)  # PnP offset 卡尔曼(米)
+        self.kf_angle = Kalman1D(0.0, Q_angle=KF_ANGLE_Q, Q_v=KF_ANGLE_QV, R=KF_ANGLE_R)  # 角度卡尔曼(带速度模型)
+        self.kf_area = Kalman1DConst(0.0, Q=KF_AREA_Q, R=KF_AREA_R)  # area 卡尔曼(像素)
+        self.kf_line_cx = Kalman1DConst(LINE_CENTER_X, Q=KF_LINE_Q, R=KF_LINE_R)  # 巡线红线中心x卡尔曼(初始画面中心,防起步假偏移)
         self.line_is_vertical = False  # 巡线平行判定(线竖直时用平移)
         self.color_step = 1  # approach_color step状态机(参考官方Transport)
+        self.step4_forward_steps = 0  # step4凑近连续前进步数(兜底计数)
         self.pick_retries = 0  # 抓取失败重试计数
         # 双线程共享(检测线程写, 动作线程读)
         import threading
@@ -260,7 +338,7 @@ class SortingTask:
         self.last_debug_save = 0.0
         self.debug_save_path = "/home/pi/codes/images/sorting_task_debug.jpg"
 
-        self.detector = apriltag.Detector(searchpath=apriltag._get_demo_searchpath())
+        self.detector = apriltag.Detector(searchpath=["/usr/local/lib"])
 
         param_data = np.load(calibration_param_path + ".npz")
         mtx = param_data["mtx_array"]
@@ -297,6 +375,7 @@ class SortingTask:
             self.board = AGC.board
             self.ctl = AGC.ctl
         self.set_head_center(duration=500)
+        self.set_head(y=INIT_HEAD_PITCH, duration=300)  # 初始化低头中位 1100
         self.actions.run("stand")
         self.robot_initialized = True
 
@@ -424,7 +503,7 @@ class SortingTask:
                 rvec = rvecs[best_idx]
                 tvec = tvecs[best_idx]
                 R, _ = cv2.Rodrigues(rvec)
-                cam_in_tag = -R.T @ tvec
+                cam_in_tag = (-R.T @ tvec).ravel()  # (3,1)->(3,), numpy2下元素才是标量(math.sqrt/float不接受1元素数组)
                 distance = float(math.sqrt(cam_in_tag[0]**2 + cam_in_tag[1]**2 + cam_in_tag[2]**2))
                 offset = float(-cam_in_tag[0])
                 forward = float(abs(cam_in_tag[2]))
@@ -508,18 +587,31 @@ class SortingTask:
                 self.color_step = 4
         elif self.color_step == 4:  # 凑近(小步前进)
             if target.cy > COLOR_TOO_NEAR_Y:
+                self.step4_forward_steps = 0
                 self.actions.run("back_fast")
             elif target.area >= self.args.pick_area_threshold:
                 # 面积已足够大(足够近), 不再追着海绵走, 直接进入抓取判定
                 log.info("sponge aligned for final pickup approach (area=%.0f)", target.area)
+                self.step4_forward_steps = 0
                 self.color_step = 1  # reset for next
                 return True
             elif target.cy < COLOR_NEAR_Y:
+                # 兜底: 连续前进到步数上限还没满足面积, 说明已在推着海绵走, 直接判定到位
                 self.actions.run("go_forward_one_step")
+                self.step4_forward_steps += 1
+                log.info("sponge step4 forward %d/%d (area=%.0f cy=%d)",
+                         self.step4_forward_steps, STEP4_MAX_FORWARDS, target.area, target.cy)
+                if self.step4_forward_steps >= STEP4_MAX_FORWARDS:
+                    log.info("sponge aligned for pickup (step4 forward limit %d reached)", STEP4_MAX_FORWARDS)
+                    self.step4_forward_steps = 0
+                    self.color_step = 1  # reset for next
+                    return True
             elif abs(dx) > COLOR_X_FINE:
+                self.step4_forward_steps = 0
                 self.color_step = 3  # 偏了回step3调整
             else:
                 log.info("sponge aligned for final pickup approach")
+                self.step4_forward_steps = 0
                 self.color_step = 1  # reset for next
                 return True
         return False
@@ -744,7 +836,7 @@ class SortingTask:
             cnt_large, _ = self._get_area_max_contour(cnts)
             if cnt_large is not None:
                 rect = cv2.minAreaRect(cnt_large)
-                box = np.int0(cv2.boxPoints(rect))
+                box = np.intp(cv2.boxPoints(rect))
                 cx = float(box[0][0] + box[2][0]) / 2.0
                 centroid_x_sum += cx * r[4]
                 weight_sum += r[4]
@@ -894,8 +986,6 @@ class SortingTask:
         log.info("navigate to end tag %d (yaw_range=[%d,%d] walk=10)", tag_id, END_YAW_LOWER, END_YAW_UPPER)
         self.ctl.set_pwm_servo_pulse(1, 1500, 500)
         time.sleep(0.3)
-        WALK_STEPS = 10
-        MAX_TURN = 30
         # 阶段1: 小步转直到-15<yaw<5
         yaw_locked = False
         for step in range(MAX_TURN):
@@ -1118,7 +1208,8 @@ class SortingTask:
                 worker.join(timeout=2)
             if camera is not None:
                 camera.release()
-            cv2.destroyAllWindows()
+            if self.debug_gui:  # 无GUI编译的OpenCV(机器人无DISPLAY)下destroyAllWindows会抛cv2.error
+                cv2.destroyAllWindows()
             if self.robot_initialized and not self.args.dry_run:
                 AGC.stopActionGroup()
                 if not (self.args.blue_pickup_test and self.args.skip_test_putdown):
@@ -1146,7 +1237,7 @@ def parse_args():
     parser.add_argument("--line-search-turns", type=int, default=30, help="放置后右转找红线最多几次(看到即停)")
     parser.add_argument("--line-final-steps", type=int, default=10, help="放置后沿红线走到终点的步数")
     parser.add_argument("--line-head-delta", type=int, default=60, help="巡线时低头角度(相对servo1, 60=看远)")
-    parser.add_argument("--pick-area-threshold", type=float, default=5000.0,
+    parser.add_argument("--pick-area-threshold", type=float, default=3500.0,
                         help="海绵面积达到此值即视为足够近, 触发抓取")
     parser.add_argument("--pick-y-threshold", type=int, default=350,
                         help="海绵cy达到此值即视为足够近, 触发抓取")
@@ -1159,6 +1250,16 @@ def parse_args():
     parser.add_argument("--hold-after-pick", type=float, default=5.0, help="seconds to hold the object in blue pickup test")
     parser.add_argument("--skip-test-putdown", action="store_true", help="in blue pickup test, do not run put_down after holding")
     args = parser.parse_args()
+    # calib_config.json 覆盖参数(命令行显式指定的优先)
+    _cli_opts = {a.split("=", 1)[0] for a in sys.argv if a.startswith("--")}
+    if CALIB_CONFIG:
+        for _dest in CALIB_ARG_KEYS:
+            if _dest in CALIB_CONFIG and _ARG_OPTION_STRINGS[_dest] not in _cli_opts:
+                _new = CALIB_CONFIG[_dest]
+                try:
+                    setattr(args, _dest, type(getattr(args, _dest))(_new))
+                except (TypeError, ValueError) as exc:
+                    log.warning("calib_config 参数 %s=%r 类型不合法, 忽略: %s", _dest, _new, exc)
     if min(args.post_pick_left_turns, args.post_pick_forward_steps, args.back_steps_after_place,
            args.line_initial_steps, args.line_search_turns, args.line_final_steps) < 0:
         parser.error("movement counts must be nonnegative")

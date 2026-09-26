@@ -63,6 +63,7 @@ SAMPLE_BANDS = (
     (380, 430),
     (430, 480),
 )
+SAMPLE_BAND_HEIGHT = 50  # 各采样带等高，用于计算横条填充率
 
 # 正常巡线阈值
 CENTER_DEADBAND = 42              # 近处红线离画面中心超过此值才横移
@@ -75,8 +76,19 @@ FILTER_RESET_JUMP = 140           # 位置突变过大时直接重置滤波
 
 # 路口检测：赛道固定为直角弯，只需判断"是否到路口"，不再靠视觉猜方向
 HORIZONTAL_MIN_WIDTH = 90         # 普通线宽 52-75，直角弯横条 94-160，90 只对真实横向岔路触发
+HORIZONTAL_FILL_MIN = 0.30        # 横条采样带填充率下限：单条横条填充率高(~0.7+)，
+                                  # 转过弯后"前方竖线+脚下残留"的水平跨度填充率低(~0.14)，
+                                  # 用填充率排除多线跨度被误判成横条。
 CORNER_DIRECTION_DEADBAND = 15    # 横条中点相对主线中心偏移超过此值才判向（否则歧义=0）
-CORNER_TURN_TRIGGER_Y = 380       # 路口特征接近画面底部后才开始转身，调小以更早触发
+CORNER_TURN_TRIGGER_Y = 350       # 路口特征（横条）下移到该深度即开始转身。
+                                  # 曾设 380：横条在画面底部因透视/裁剪变稀疏（fill_ratio
+                                  # 掉到 0.30 以下被过滤），corner_y 达不到 380 就消失，
+                                  # 机器人横向略偏（横条偏左被裁剪）时转弯完全不触发、冲过路口。
+                                  # 实机数据：接近阶段横条稳定在 ~246，到路口升到 343~388；
+                                  # 曾降到 330 保证在横条饱满时触发，但实测偏早（机器人离弯
+                                  # 还有余量就转身）。最近日志横条在 y≈370 仍能检出
+                                  # （horizontal_seen=True），y≈376 才因填充率不足消失，
+                                  # 故上调到 350 更接近弯再转，同时低于 370 失效点保留余量。
 CORNER_LATCH_SECONDS = 2.0        # 路口特征短暂漏检时继续保持"已到路口"状态
 CORNER_DEBUG_INTERVAL = 0.5       # 调试打印节流：每隔多久打印一次检测到的最大宽度/行
 
@@ -88,8 +100,26 @@ POST_TURN_MAX_EXTRA_TURNS = 12    # 横条残留时最多额外小步微调次�
 
 # 赛道固定，转弯顺序提前写死（从起点开始，依次对应每个路口的转向）
 CORNER_TURN_SEQUENCE = ['left', 'right', 'right', 'left']
-CORNER_TURN_REPEATS = 6           # 单次90°整弯需要的 turn_left/turn_right 执行次数
-                                  # 需用 action_test.py 实测单次转向角度后校准（90 / 单次角度）
+
+# 转弯采用「主转固定步数 + 精修」两阶段：
+#   主转按标定角度（左 22°/次、右 25.7°/次）转到接近 90°——左 4 步≈88°、
+#   右 3 步≈77°。转弯中间新直道在画面里倾斜、被采样带误判成横条（宽>90），
+#   direction_samples 为空、heading 无法计算，所以主转阶段不看视觉、只按
+#   标定角度开环转固定步数，避免像旧版那样用「横条消失/竖线 heading」在转弯
+#   中间判断失效而原地打转 308°。
+#   精修阶段转弯已基本到位：横条还在→继续转大步兜底；竖线出现→按 heading
+#   符号闭环（未转够续转大步、转过反向小步回摆），直到竖线正对。
+CORNER_MAIN_STEPS_LEFT = 4        # 左转主转步数：4×22°=88°
+CORNER_MAIN_STEPS_RIGHT = 4       # 右转主转步数：4×25.7°≈103°。曾设 3（77°）：机器人
+                                  # 横向略偏（offset≈50）时，3 步后横条仍 180px 宽不消失、
+                                  # 竖线不出现，精修 6 步全浪费在「横条续转」大步上，累计
+                                  # 231° 过冲。4 步 103° 更稳地跳过转弯中间（弯1 左转 4 步
+                                  # 88° 已验证竖线可靠出现）。
+CORNER_FINE_MAX_STEPS = 6         # 精修阶段最多步数（未转够用大步，横条残留与转过用小步）
+CORNER_EXIT_HEADING_PX = 20.0     # 转弯完成判据：前方竖线 heading 绝对值 ≤ 此值视为已对准新方向
+                                  # （正常直线循迹 heading 在 ±20px 内，精细对齐交给后续循迹）。
+CORNER_MIN_VERTICAL_SPAN = 40.0   # 前方竖线存在的判据：direction_samples 的垂直跨度需 ≥ 此值，
+                                  # 否则说明竖线尚未出现（横条主导），继续按原方向大步转。
 
 # 动作与安全限制
 FORWARD_ACTION = 'go_forward_fast'
@@ -183,6 +213,8 @@ def empty_vision_state(frame_id=0):
         'near_x': IMAGE_CENTER_X,
         'near_y': FRAME_SIZE[1] - 1,
         'heading': 0.0,
+        'raw_heading': 0.0,
+        'vertical_span': 0.0,
         'horizontal_corner': False,
         'corner_pending': False,
         'corner_y': 0,
@@ -344,33 +376,37 @@ def analyze_path_samples(samples):
         sample for sample in samples
         if sample[3] - sample[2] < HORIZONTAL_MIN_WIDTH
     ]
+    raw_heading = 0.0
     if len(direction_samples) >= 2:
         direction_near = max(direction_samples, key=lambda sample: sample[0])
         direction_ahead = min(direction_samples, key=lambda sample: sample[0])
         vertical_span = direction_near[0] - direction_ahead[0]
-        heading = ((direction_ahead[1] - direction_near[1]) * 200.0 /
-                   vertical_span) if vertical_span >= 40 else 0.0
+        if vertical_span >= 40:
+            raw_heading = ((direction_ahead[1] - direction_near[1]) * 200.0 /
+                           vertical_span)
     else:
         vertical_span = 0.0
-        heading = 0.0
 
     # heading 是「远端 - 近端」横向像素差经斜率放大后的值，正常直线循迹在
     # ±20px 内。路口附近 direction_samples 只剩远端窄带、vertical_span 贴近
     # 40px 下限时会被放大到 ±数百（实机见 heading=-461.4），远超可信范围。
     # 超过上限说明是路口/噪声，置 0 忽略朝向修正，让 corner_pending/
     # corner_ready 逻辑接管，避免在接近路口时乱转方向。
+    # raw_heading 保留未截断的原始值，供转弯闭环判断「未转够 / 转过」的符号。
+    heading = raw_heading
     if abs(heading) > HEADING_MAX:
         heading = 0.0
 
     # 路口特征：某条采样带的红色区域宽度远超正常直线段宽度，说明这里出现了
     # 岔路（横向的红线段）。只需要知道"到没到"，不需要判断岔路方向。
+    # 用填充率排除「前方竖线 + 脚下残留」的水平跨度被误判成横条。
     horizontal_seen = False
     corner_y = 0
     max_width = 0
     max_width_y = 0
     max_width_left_x = 0
     max_width_right_x = 0
-    for sample_y, _, left_x, right_x, _ in samples:
+    for sample_y, _, left_x, right_x, count in samples:
         width = right_x - left_x
         if width > max_width:
             max_width = width
@@ -378,8 +414,11 @@ def analyze_path_samples(samples):
             max_width_left_x = left_x
             max_width_right_x = right_x
         if width >= HORIZONTAL_MIN_WIDTH:
-            horizontal_seen = True
-            corner_y = max(corner_y, sample_y)
+            fill_ratio = (count / (width * SAMPLE_BAND_HEIGHT)
+                          if width > 0 else 0.0)
+            if fill_ratio >= HORIZONTAL_FILL_MIN:
+                horizontal_seen = True
+                corner_y = max(corner_y, sample_y)
 
     corner_ready = horizontal_seen and corner_y >= CORNER_TURN_TRIGGER_Y
 
@@ -399,6 +438,7 @@ def analyze_path_samples(samples):
         'near_x': near[1],
         'near_y': near[0],
         'heading': heading,
+        'raw_heading': raw_heading,
         'vertical_span': vertical_span,
         'horizontal_corner': horizontal_seen,
         'corner_y': corner_y,
@@ -597,9 +637,33 @@ def move():
                         print('V3 巡线：转弯后确认超次，恢复正常循迹')
                     else:
                         post_turn_extra_turns += 1
-                        action = small_turn_action_for(post_turn_direction)
+                        # 转弯后横条残留：竖线可见时用 heading 判向；竖线不可见
+                        # （转弯中间）时用横条中点偏移 offset_x 判向，避免盲目
+                        # 前进走出路口（弯2 曾因此前进 4 步走过横条后丢线）。
+                        #   corner_turn*(offset_x)>0 → 没转够 → 续转
+                        #   corner_turn*(offset_x)<0 → 转过 → 回摆
+                        span = state.get('vertical_span', 0.0)
+                        raw_h = state.get('raw_heading', 0.0)
+                        offset_x = state.get('corner_offset_x', 0.0)
+                        if (span >= CORNER_MIN_VERTICAL_SPAN and
+                                abs(raw_h) <= CORNER_EXIT_HEADING_PX):
+                            post_turn_active = False
+                            clear_pending_corner()
+                            print('V3 巡线：转弯后竖线正对，恢复正常循迹')
+                            continue
+                        if span >= CORNER_MIN_VERTICAL_SPAN:
+                            # 竖线可见，用 heading 判向
+                            adjust_direction = (post_turn_direction
+                                                if post_turn_direction * raw_h > 0
+                                                else -post_turn_direction)
+                        else:
+                            # 竖线不可见，用横条偏移判向（offset=0 保守续转）
+                            adjust_direction = (post_turn_direction
+                                                if post_turn_direction * offset_x >= 0
+                                                else -post_turn_direction)
+                        action = small_turn_action_for(adjust_direction)
                         action_label = '转弯确认微调向{}（{}/{}）'.format(
-                            direction_name(post_turn_direction),
+                            direction_name(adjust_direction),
                             post_turn_extra_turns, POST_TURN_MAX_EXTRA_TURNS)
                         if action_label != last_action_label:
                             print('V3 巡线：{}'.format(action_label))
@@ -630,11 +694,85 @@ def move():
                         print('V3 巡线：{}'.format(action_label))
                         last_action_label = action_label
                     turn_started = True
-                    AGC.runActionGroup(
-                        turn_action_for(corner_turn), times=CORNER_TURN_REPEATS,
-                        with_stand=TURN_WITH_STAND)
+                    # 转弯两阶段：主转（固定步数开环，接近 90°）→ 精修（竖线
+                    # 正对即停）。转弯中间新直道被误判成横条、heading 不可用，
+                    # 故主转只看标定角度；精修阶段竖线竖直、heading 可靠。
+                    main_steps = (CORNER_MAIN_STEPS_LEFT if corner_turn < 0
+                                  else CORNER_MAIN_STEPS_RIGHT)
+                    turn_steps = 0
+                    for _ in range(main_steps):
+                        AGC.runActionGroup(
+                            turn_action_for(corner_turn), times=1,
+                            with_stand=TURN_WITH_STAND)
+                        turn_steps += 1
+                        time.sleep(NORMAL_ACTION_SETTLE)
+                    for _ in range(CORNER_FINE_MAX_STEPS):
+                        latest = get_vision_state()
+                        vis = latest.get('visible', False)
+                        span = latest.get('vertical_span', 0.0)
+                        raw_h = latest.get('raw_heading', 0.0)
+                        hc = latest.get('horizontal_corner', False)
+                        # 完成：前方竖线存在且已正对。
+                        if (vis and span >= CORNER_MIN_VERTICAL_SPAN and
+                                abs(raw_h) <= CORNER_EXIT_HEADING_PX):
+                            print('V3 转弯精修：第{}步 完成 span={:.0f} raw_h={:.1f}'.format(
+                                turn_steps, span, raw_h))
+                            break
+                        if vis and span >= CORNER_MIN_VERTICAL_SPAN:
+                            # 竖线出现但未正对。符号判据（与 line_seeker 的
+                            # turn_sign*heading<0 等价，因 corner_turn 右=+1、
+                            # 左=-1 恰与 turn_sign 相反）：
+                            #   corner_turn*raw_h>0 → 未转够（线在转弯侧）→ 续转大步
+                            #   corner_turn*raw_h<0 → 转过（线在反侧）→ 反向小步回摆
+                            if corner_turn * raw_h > 0:
+                                print('V3 转弯精修：第{}步 未转够续转 span={:.0f} raw_h={:.1f}'.format(
+                                    turn_steps, span, raw_h))
+                                AGC.runActionGroup(
+                                    turn_action_for(corner_turn), times=1,
+                                    with_stand=TURN_WITH_STAND)
+                            else:
+                                print('V3 转弯精修：第{}步 转过回摆 span={:.0f} raw_h={:.1f}'.format(
+                                    turn_steps, span, raw_h))
+                                AGC.runActionGroup(
+                                    small_turn_action_for(-corner_turn), times=1,
+                                    with_stand=TURN_WITH_STAND)
+                        elif hc:
+                            # 横条还在：转弯中间竖线不可见、heading 失效，改用
+                            # 横条中点相对主线中心的偏移 offset_x 判向：
+                            #   corner_turn*offset_x > 死区 → 没转够 → 续转大步
+                            #   corner_turn*offset_x < -死区 → 转过 → 回摆小步
+                            #   |offset_x| ≤ 死区 → 横条对中 → 小步续转（保守）
+                            offset_x = latest.get('corner_offset_x', 0.0)
+                            if corner_turn * offset_x > CORNER_DIRECTION_DEADBAND:
+                                print('V3 转弯精修：第{}步 横条偏侧续转 offset={:.0f}'.format(
+                                    turn_steps, offset_x))
+                                AGC.runActionGroup(
+                                    turn_action_for(corner_turn), times=1,
+                                    with_stand=TURN_WITH_STAND)
+                            elif corner_turn * offset_x < -CORNER_DIRECTION_DEADBAND:
+                                print('V3 转弯精修：第{}步 横条反侧回摆 offset={:.0f}'.format(
+                                    turn_steps, offset_x))
+                                AGC.runActionGroup(
+                                    small_turn_action_for(-corner_turn), times=1,
+                                    with_stand=TURN_WITH_STAND)
+                            else:
+                                print('V3 转弯精修：第{}步 横条对中小步续转 offset={:.0f}'.format(
+                                    turn_steps, offset_x))
+                                AGC.runActionGroup(
+                                    small_turn_action_for(corner_turn), times=1,
+                                    with_stand=TURN_WITH_STAND)
+                        else:
+                            # 无横条无竖线：可能转过或短暂丢线，停止精修。
+                            print('V3 转弯精修：第{}步 无线停止 span={:.0f} raw_h={:.1f}'.format(
+                                turn_steps, span, raw_h))
+                            break
+                        turn_steps += 1
+                        time.sleep(NORMAL_ACTION_SETTLE)
                     turn_started = False
                     last_turn_completed_at = time.monotonic()
+                    print('V3 巡线：路口{}转弯{}步（主{}步+精修{}步）'.format(
+                        corner_index + 1, turn_steps,
+                        main_steps, turn_steps - main_steps))
                     post_turn_active = True
                     post_turn_direction = corner_turn
                     post_turn_clear_frames = 0
@@ -651,6 +789,18 @@ def move():
                     # 转弯顺序表已用完（到终点），不再理会路口特征，继续直行。
                     action = FORWARD_ACTION
                     action_label = '路口顺序已完成，直行'
+            elif state['horizontal_corner']:
+                # 横条存在（接近路口或转弯后残留）：heading 被横条干扰，转向
+                # 修正会原地打转。改为横向对中：红线中心偏右→右移、偏左→左移；
+                # 已对中则前进（接近路口或走出路口），让横条自然变化。
+                if abs(center_error) >= CENTER_DEADBAND:
+                    action = (LATERAL_RIGHT_ACTION if center_error > 0
+                              else LATERAL_LEFT_ACTION)
+                    action_label = '路口横移向{}'.format(
+                        direction_name(1 if center_error > 0 else -1))
+                else:
+                    action = FORWARD_ACTION
+                    action_label = '路口前进'
             elif abs(heading) >= HEADING_TURN_THRESHOLD:
                 path_direction = 1 if heading > 0 else -1
                 turn_direction = path_direction
@@ -821,6 +971,8 @@ def run(img):
                 'near_x': near_x,
                 'near_y': analysis['near_y'],
                 'heading': heading,
+                'raw_heading': analysis['raw_heading'],
+                'vertical_span': analysis['vertical_span'],
                 # 路口特征确认后保持接近状态，短暂漏检也不恢复横移。
                 'horizontal_corner': analysis['horizontal_corner'],
                 'corner_pending': _corner_pending,
