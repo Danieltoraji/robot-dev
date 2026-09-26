@@ -1,22 +1,20 @@
 # -*- coding: utf-8 -*-
-"""上下楼梯与识别跨障关卡（levels/stairs_hurdle.py）—— 六步流程重制版
+"""上下楼梯与识别跨障关卡（levels/stairs_hurdle.py）—— 四步流程重制版
 
 方案文档：docs/关卡算法/上下楼梯与识别跨障-stairs-hurdle/完整方案-2026-09-25-流程重制.md
 
 流程
 ----
     1 对准并走到起爬点   目标=红胶条（楼梯根部）  闭环 + 末段推算
-    2 上楼               climb_stairs x2          开环（动作组）
-    3 顶上对正           目标=木条方向            闭环（只用方向）
-    4 下楼               down_floor x2            开环（动作组）
-    5 对准并走到起跨点   目标=木条                闭环 + 末段推算
-    6 跨栏并离场         hurdles + 前进           开环（动作组）
+    2 上下台阶           4 个动作组 + 4 次右小转  整段开环（写死）
+    3 对准并走到起跨点   目标=木条                闭环 + 末段推算
+    4 跨栏                hurdles                 开环（动作组）
 
 三条设计原则
 ------------
 1. **摆位为主，视觉为辅**：位置与朝向由人摆定，机器人只修"人摆不准"的
    那部分（主要是航向），不做多轮搜索式对正，也不做长距离盲搜。
-2. **除动作组执行期间外一律闭环**：爬楼/下楼/跨栏是黑箱动作组，执行期间
+2. **除动作组执行期间外一律闭环**：上下台阶/跨栏是黑箱动作组，执行期间
    插不进判断；其余每一步都必须有视觉确认。
 3. **按步骤指定目标**：胶条与木条同色、同检测、都横跨赛道，靠"距离窗口"
    区分。不用"取最近的红东西"——胶条退到脚边被遮挡时，最近的红东西会
@@ -25,7 +23,8 @@
 关键数字（全部现场实测，见方案 §2 与 core/motion_calib.py）
 ----------------------------------------------------------
     pitch 1100、光心离地 33.9cm、安装下俯偏移 19.1°、可见带 3.5~71cm
-    起跨点离木条 0.5cm（照参考实现，动作组当黑箱）
+    前进统一用 go_forward_one_step（实测 1.8cm/步）
+    起跨点必须在木条前 1cm 以内
     末段约 3cm 必被机体自遮挡，只能按已标定步长推算
 
 控制约定（右正左负，与 nine_grid/goodluck 一致）
@@ -68,7 +67,6 @@ FALLBACK_PITCHES = (1050, 1150)
 # =====================================================================
 A_STAND = "stand"
 A_FWD = "go_forward_one_step"
-A_FWD_SMALL = "go_forward_one_small_step"
 A_LEFT = "left_move"
 A_RIGHT = "right_move"
 A_TURN_L = "turn_left_small_step"
@@ -78,36 +76,58 @@ A_DOWN = "down_floor"
 A_HURDLE = "hurdles"
 
 # =====================================================================
-# 未实测常数 —— ⚠️ 上机前必须实测覆盖（方案 §9 待现场确认）
+# 现场实测常数（2026-09-25 现场）
 # =====================================================================
-# 这三个撑着"末段推算"和降级链，用之前必须先量：
-#: go_forward_one_small_step 的单步位移（末段推算全靠它）
-FWD_SMALL_CM = 1.5
-#: hurdles 动作组的净前进量（出场步数推算用）
-HURDLE_FWD_NOMINAL_CM = 10.0
-#: 摆位先验兜底：完全未见胶条时按参考实现走的步数
-FALLBACK_APPROACH_STEPS = 5
+#: hurdles 动作组的净前进量（cm）——现场实测 18
+HURDLE_FWD_NOMINAL_CM = 18.0
+#: 摆位先验：机器人开局（人摆好之后）机体中心离胶条的距离（cm）
+#:
+#: ⚠ **未实测**。取 60cm 的依据：可见带远界约 71cm，摆位必须让胶条在视野里；
+#:   同时别贴太近，否则第1步的视觉闭环无事可做。上机时量一次人摆位的实际
+#:   距离填进来——这个数只影响**降级路径**（胶条完全看不见时），不影响正常流程。
+PLACEMENT_DIST_CM = 60.0
+
+# ⚠ 已弃用 go_forward_one_small_step（现场结论：步长太短、准直性极差）。
+# 全程前进统一用 go_forward_one_step，末段推算也用它。
+# 步长取自 core/motion_calib.FWD_STEP_CM（现场报 1.8cm）。
 
 # =====================================================================
 # 目标距离窗口（按步骤指定，见设计原则 3）
 # =====================================================================
-# ⚠️ 真正的判别手段是**步骤顺序**（第1步时木条还远在可见带之外；下楼后胶条
-# 已在身后），窗口是第二道保险：把明显不属于本步的读数挡掉，避免机器人一旦
-# 冲过头、木条进入视野时被当成胶条继续往里走。
-# 窗口上界不要超过可见带远界（1100 档由标定参数算出约 69cm），否则等于没挡。
+# ⚠️ 真正的判别手段是**步骤顺序**（第1步时木条还远在可见带之外；下完台阶后
+# 胶条已在身后），窗口是第二道保险：把明显不属于本步的读数挡掉，避免机器人
+# 一旦冲过头、木条进入视野时被当成胶条继续往里走。
+# 窗口上界不要超过可见带远界（1100 档由标定参数算出约 71cm），否则等于没挡。
 WINDOW_TAPE = (0.0, 55.0)        # 第1步：红胶条（楼梯根部）
-WINDOW_BAR_TOP = (25.0, 70.0)    # 第3步：站在顶部平台看木条
-WINDOW_BAR_FLAT = (0.0, 50.0)    # 第5步：下楼后在平地看木条
+WINDOW_BAR_FLAT = (0.0, 50.0)    # 第3步：下完台阶后在平地看木条
 
 # =====================================================================
 # 停点
 # =====================================================================
-#: 起爬点：机器人中心距胶条的距离（照参考实现；动作组当黑箱）
+#: 起爬点：机器人中心距胶条的距离（照参考实现；楼梯段整体开环写死）
 CLIMB_STOP_CM = 7.0
-#: 起跨点：离木条 0.5cm（照参考实现）
-HURDLE_STOP_CM = 0.5
-#: 进到这个距离以内改用小步，防冲过
-SMALL_STEP_BELOW_CM = 15.0
+#: 起跨点：**必须在栏杆前 1cm 以内**（现场要求）
+HURDLE_STOP_CM = 1.0
+
+# =====================================================================
+# 楼梯段：整段开环写死（现场结论）
+# =====================================================================
+# 上/下台阶动作本身会把机体转歪，现场用固定"右小转"逐步补回来，比顶上
+# 用视觉测方位更省事也更稳（视觉那一版要额外一帧 + 判据，收益不明显）。
+# 顺序：climb-右小转-climb-右小转-down-右小转-down-右小转
+STAIR_SEQUENCE = (
+    (A_CLIMB, 1), (A_TURN_R, 1),
+    (A_CLIMB, 1), (A_TURN_R, 1),
+    (A_DOWN, 1), (A_TURN_R, 1),
+    (A_DOWN, 1), (A_TURN_R, 1),
+)
+
+# =====================================================================
+# 收尾开关
+# =====================================================================
+#: True = 跨栏后**直接结束**（现场直接切下一关，不走离场步）
+#: False = 按跨障区几何推算步数走到终点线
+SKIP_EXIT = True
 
 # =====================================================================
 # 容差与轮数上限
@@ -145,11 +165,10 @@ BAR_DIST_FALLBACK_CM = 32.0  # 未测到杆距时的缺省（25~40 的中值）
 SETTLE_S = 0.3
 CAPTURE_RETRY = 3
 FRAMES_CONFIRM = 3
-TOP_FALLBACK_TURN_R = 2     # 顶上未见木条时，退回参考的开环补偿
 
 
 class StairsHurdleLevel:
-    """六步流程主控。state 为 RobotState（或仿真子类）。"""
+    """四步流程主控。state 为 RobotState（或仿真子类）。"""
 
     def __init__(self, state: RobotState, cam_height_cm=CAM_HEIGHT_CM,
                  pitch_offset_deg=PITCH_OFFSET_DEG, settle_s=SETTLE_S,
@@ -277,17 +296,18 @@ class StairsHurdleLevel:
         return False
 
     def _advance(self, forward_cm, stop_cm):
-        """前进一步或一批；接近目标时切小步、一步一测
+        """前进一步或一批
 
-        远距批量不是开环：步数由实测读数除以**步长上界**得到（用上界 =>
-        宁可欠走），并且下一帧立刻复测兜底。近距（余量 < 8cm）退回一步一测，
-        避免一步跨过起跨点。
+        远距"保守批量"不是开环：步数由**实测读数**除以**步长上界**得到
+        （用上界 => 宁可欠走），下一帧立刻复测兜底。近距（余量 < 8cm）
+        退回一步一测，避免一步跨过起跨点。
+
+        ⚠ 全程只用 go_forward_one_step：现场结论是 small_step 步长太短
+        （1.5cm 级）且准直性极差，走几步就偏，反而害事。
         """
         room = forward_cm - stop_cm
         if room <= FAR_BATCH_MIN_CM:
-            action = (A_FWD_SMALL if forward_cm < SMALL_STEP_BELOW_CM
-                      else A_FWD)
-            self.state.act(action, times=1)
+            self.state.act(A_FWD, times=1)
             self._sleep()
             return 1
         step_bound = mc.FWD_STEP_CM * FWD_STEP_SAFETY
@@ -300,19 +320,22 @@ class StairsHurdleLevel:
     def _dead_reckon(self, distance_cm, label, bias="short"):
         """按标定步长推算走完末段
 
-        bias='short'：宁可少走（起跨点少走只是跨得早，走过头就是踢杆）。
+        bias='short'：宁可少走（起跨点少走只是跨得早；走过头就是踢杆）。
+
+        ⚠ 步长是 1.8cm 级，末段的**量化误差就是 1.8cm**——这是不用 small_step
+        之后必然的代价。所以起跨点只能保证落在 1.8cm 的格点上，做不到任意精度。
         """
         if distance_cm <= 0:
             return 0
-        n = distance_cm / FWD_SMALL_CM
+        n = distance_cm / mc.FWD_STEP_CM
         steps = int(math.floor(n)) if bias == "short" else int(math.ceil(n))
         if steps <= 0:
-            self._log(f"{label}：余量 {distance_cm:.1f}cm 不足一小步，不再走")
+            self._log(f"{label}：余量 {distance_cm:.1f}cm 不足一步，不再走")
             return 0
-        self.state.act(A_FWD_SMALL, times=steps)
+        self.state.act(A_FWD, times=steps)
         self._sleep()
-        self._log(f"{label}：推算前进 {steps} 小步（约 "
-                  f"{steps * FWD_SMALL_CM:.1f}cm / 目标 {distance_cm:.1f}cm）")
+        self._log(f"{label}：推算前进 {steps} 步（约 "
+                  f"{steps * mc.FWD_STEP_CM:.1f}cm / 目标 {distance_cm:.1f}cm）")
         return steps
 
     # ------------------------------------------------------------------
@@ -369,87 +392,94 @@ class StairsHurdleLevel:
         self._log(f"{label}：轮数耗尽，按当前位置继续")
         return True
 
+    def _approach_prior(self, window, stop_cm, label, prior_cm):
+        """闭环接近；目标始终不见时，按摆位先验盲走——但**边走边接着找**
+
+        "盲走"只是起点，不是一路撞到底：每走一小批就再拍一帧，目标一旦重新
+        出现立刻交回闭环。摆位先验估错时，错得越多越早看见目标，所以这个
+        兜底的风险是有界的。
+
+        ⚠ 与旧版的区别：旧版"未见目标就走 5 大步"物理意图不明（13cm，既不
+        是走完全程也不是有意义的一小段），实际效果是机器人停在离楼梯 30cm
+        开外，第2步的动作组够不着、第3步连木条都看不见。改成"按先验走到
+        起爬点"之后，降级路径才真的走完关卡。
+        """
+        if self._approach(window, stop_cm, label):
+            return
+        self._log(f"{label}：目标始终未见，改按摆位先验走"
+                  f"（先验 {prior_cm:.0f}cm - 停点 {stop_cm:.1f}cm）")
+        left = prior_cm - stop_cm
+        step_bound = mc.FWD_STEP_CM * FWD_STEP_SAFETY
+        while left > FAR_BATCH_MIN_CM:
+            n = max(1, min(MAX_BATCH_STEPS, int(left / step_bound)))
+            self.state.act(A_FWD, times=n)
+            self._sleep()
+            left -= n * mc.FWD_STEP_CM
+            self._log(f"{label}：先验盲走 {n} 步（余 {max(0.0, left):.1f}cm）")
+            if self._measure(window) is not None:
+                self._log(f"{label}：目标重新出现，交回闭环")
+                self._approach(window, stop_cm, label)
+                return
+        self._dead_reckon(left, label)
+
     # ------------------------------------------------------------------
-    # 六个步骤
+    # 四个步骤
     # ------------------------------------------------------------------
 
     def _step1_to_climb_point(self):
         self._log("第1步：对准并走到起爬点（目标=红胶条）")
-        if self._approach(WINDOW_TAPE, CLIMB_STOP_CM, "接近楼梯"):
-            return
-        # 摆位为主：胶条保证可见，真看不到时按参考的开环走法兜底
-        self._log(f"第1步降级：按参考走法开环前进 "
-                  f"{FALLBACK_APPROACH_STEPS} 大步（摆位先验）")
-        self.state.act(A_FWD, times=FALLBACK_APPROACH_STEPS)
-        self._sleep()
+        self._approach_prior(WINDOW_TAPE, CLIMB_STOP_CM, "接近楼梯",
+                             PLACEMENT_DIST_CM)
 
-    def _step2_climb(self):
-        self._log("第2步：上楼 ×2（动作组，开环）")
-        for i in (1, 2):
-            self.state.act(A_CLIMB)
-            self._sleep()
-        self.state.act(A_STAND)
-        self._sleep()
+    def _step2_stairs(self):
+        """第2步：上下台阶——**整段开环写死**
 
-    def _step3_align_on_top(self):
-        """顶上对正：防止上楼把机器人带歪，导致下楼摔倒
+        顺序：climb-右小转-climb-右小转-down-右小转-down-右小转。
 
-        只用**方向**：站在台阶上时木条低于脚下平面，投影是绕光心的均匀
-        径向缩放——方向严格不变、距离偏小一到两成，所以距离不进判据。
+        为什么不用视觉：现场结论是这套固定补偿更省事也更稳。上楼/下楼动作
+        本身会把机体转歪，"逐动作右小转"就是补它；中间插一帧测方位要额外
+        拍照 + 判据，收益不明显，还多一个失败点。
         """
-        self._log("第3步：顶上对正（目标=木条方向，只用方向）")
-        m = self._measure(WINDOW_BAR_TOP)
-        if m is None:
-            m = self._pitch_retry(WINDOW_BAR_TOP)
-        if m is None:
-            self.state.act(A_TURN_R, times=TOP_FALLBACK_TURN_R)
-            self._log(f"顶上看不见木条，退回参考的开环补偿"
-                      f"（右转 x{TOP_FALLBACK_TURN_R}）")
-            return False
-        for _ in range(MAX_ROUNDS):
-            if abs(m.bearing_err_deg) <= self._rot_tol(m.bearing_err_deg):
-                break
-            action = A_TURN_L if m.bearing_err_deg > 0 else A_TURN_R
-            self.state.act(action, times=1)
+        self._log(f"第2步：上下台阶（开环写死 {len(STAIR_SEQUENCE)} 个动作）")
+        for i, (action, times) in enumerate(STAIR_SEQUENCE, 1):
+            self.state.act(action, times=times)
             self._sleep()
-            m = self._measure(WINDOW_BAR_TOP)
-            if m is None:
-                self._log("顶上方位修正中途丢失木条，停止修正")
-                return False
-        self._log(f"顶上方位 {m.bearing_err_deg:+.1f}°"
-                  f"（死区 {self._rot_tol(m.bearing_err_deg):.1f}°）")
-        return True
-
-    def _step4_descend(self):
-        self._log("第4步：下楼 ×2（动作组，开环）")
-        for i in (1, 2):
-            self.state.act(A_DOWN)
-            self._sleep()
+            self._log(f"  {i}/{len(STAIR_SEQUENCE)} {action} x{times}")
         self.state.act(A_STAND)
         self._sleep()
 
-    def _step5_to_hurdle_point(self):
-        """下楼后重新对准并走到起跨点（目标=木条，方向与距离都用）
+    def _step3_to_hurdle_point(self):
+        """第3步：对准并走到起跨点（目标=木条，方向与距离都用）
 
         这一段是全场罚分（碰撞，封顶 −6）的唯一来源，测量冗余度最高。
+        **现场要求：必须停在栏杆前 1cm 以内。**
         """
-        self._log("第5步：对准并走到起跨点（目标=木条）")
+        self._log("第3步：对准并走到起跨点（目标=木条）")
         m0 = self._measure(WINDOW_BAR_FLAT)
         if m0 is not None:
             self.bar_dist_cm = m0.forward_cm
-            self._log(f"木条距楼梯出口 {self.bar_dist_cm:.1f}cm")
-        self._approach(WINDOW_BAR_FLAT, HURDLE_STOP_CM, "接近木条")
+            self._log(f"木条距台阶出口 {self.bar_dist_cm:.1f}cm")
+        self._approach_prior(WINDOW_BAR_FLAT, HURDLE_STOP_CM, "接近木条",
+                             self.bar_dist_cm or BAR_DIST_FALLBACK_CM)
         conf = self._measure_median(WINDOW_BAR_FLAT, n=2)
         self.hurdle_trigger_fwd = (conf[0] if conf is not None
                                    else HURDLE_STOP_CM)
         self._log(f"起跨点就位（读数 {self.hurdle_trigger_fwd:.1f}cm，"
-                  f"目标 {HURDLE_STOP_CM:.1f}cm）")
+                  f"要求 ≤{HURDLE_STOP_CM:.1f}cm）")
 
-    def _step6_cross_and_exit(self):
-        self._log("第6步：跨栏并离场")
+    def _step4_hurdle(self):
+        """第4步：跨栏（+ 可选离场）
+
+        跨栏动作组实测净前进 18cm，比原来估的 10cm 大一倍——所以跨完之后
+        到终点常常已经没剩多少路了。
+        """
+        self._log("第4步：跨栏")
         self.state.act(A_HURDLE)
         self.state.act(A_STAND)
         self._sleep(0.5)
+        if SKIP_EXIT:
+            self._log("收尾开关 SKIP_EXIT=True：跨栏后直接结束（现场切下一关）")
+            return
         steps = self._exit_steps()
         if steps > 0:
             self.state.act(A_FWD, times=steps)
@@ -459,8 +489,8 @@ class StairsHurdleLevel:
     def _exit_steps(self):
         """出场步数由跨障区几何与实测杆距推算，不用固定常数
 
-        换障区自楼梯下沿出口起 50cm；木条在下楼后实测距离 bar 处，
-        起跨点又在木条前 0.5cm，跨栏动作本身再带人前进一段。
+        跨障区自台阶出口起 50cm；木条在实测距离 bar 处，起跨点在木条前
+        HURDLE_STOP_CM，跨栏动作本身再带人前进 HURDLE_FWD_NOMINAL_CM。
         """
         bar = self.bar_dist_cm if self.bar_dist_cm else BAR_DIST_FALLBACK_CM
         advanced = (bar - HURDLE_STOP_CM) + HURDLE_FWD_NOMINAL_CM
@@ -509,11 +539,9 @@ class StairsHurdleLevel:
         try:
             self._init_pose()
             self._step1_to_climb_point()
-            self._step2_climb()
-            self._step3_align_on_top()
-            self._step4_descend()
-            self._step5_to_hurdle_point()
-            self._step6_cross_and_exit()
+            self._step2_stairs()
+            self._step3_to_hurdle_point()
+            self._step4_hurdle()
             return self._finish(True)
         except Exception as e:  # 任何异常都落站立，不留倒姿
             self._log(f"异常：{type(e).__name__}: {e}")

@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""stairs_hurdle 六步流程端到端仿真测试
+"""stairs_hurdle 四步流程端到端仿真测试
 
 复用 sim/stairs_hurdle_sim.py 的合成相机（真实内参+畸变+安装偏移）与带噪声
 动作，跑 levels/stairs_hurdle.py 的真实流程。算法零 mock，只重写 I/O 接缝。
 
 覆盖：
-- N 个随机种子全流程走完，且越过终点线；
+- N 个随机种子全流程走完，且真正跨过木条；
 - 起跨点落在门限内（末段推算的结果）；
 - 每步目标唯一性（第1步只有胶条、下楼后只有木条）；
-- 第3步顶上对正能修掉上楼带来的航向偏差；
+- 楼梯段确实是写死的 4 动作 + 4 右小转，且走完站在平地；
 - 动作组净位移与场景几何自洽（两次上楼落在顶部平台、两次下楼落在平地）；
 - 降级路径（目标全程不可见）不弃赛。
 
@@ -27,7 +27,8 @@ import numpy as np
 from core.ground_line_meter import build_meter
 from levels.stairs_hurdle import (
     StairsHurdleLevel, PITCH_OBS, WINDOW_TAPE, WINDOW_BAR_FLAT,
-    WINDOW_BAR_TOP, HURDLE_STOP_CM, CONFIRM_SLACK_CM, TOL_ROT_DEG,
+    HURDLE_STOP_CM, CONFIRM_SLACK_CM, STAIR_SEQUENCE,
+    HURDLE_FWD_NOMINAL_CM, SKIP_EXIT, A_CLIMB, A_DOWN, A_TURN_R, A_STAND,
 )
 from sim.stairs_hurdle_sim import SimStairsRobot, StairsScene
 from vision.red_line_detector import RedLineDetector
@@ -72,16 +73,26 @@ def test_e2e_seeds():
         assert tf is not None, f"seed={seed} 未记录起跨读数"
         assert 0.0 <= tf <= HURDLE_STOP_CM + CONFIRM_SLACK_CM + 0.5, \
             f"seed={seed} 起跨读数 {tf:.1f}cm 超门限"
-        # 越过终点线
-        assert robot.pos[1] >= FINISH_LINE_CM, \
-            f"seed={seed} 终了 y={robot.pos[1]:.1f} 未过终点线 {FINISH_LINE_CM:.0f}"
         # 必须真正跨过木条（没有停在杆前或杆上）
         assert robot.pos[1] > scene.bar_y + 5.0, \
             f"seed={seed} 终了 y={robot.pos[1]:.1f} 未跨过木条 {scene.bar_y:.1f}"
+        # 落点合理性：
+        #   SKIP_EXIT=True 时跨完就交棒，落点 = 杆位 + 跨栏净前进 18cm，
+        #   木条最远在 85cm 处，所以允许越过终点线一点（那不是错误）；
+        #   但不许冲出去太远——那说明步长/位移推算整体偏大。
+        #   SKIP_EXIT=False 时才有"必须过终点线"的要求。
+        if SKIP_EXIT:
+            assert robot.pos[1] < FINISH_LINE_CM + 25.0, \
+                f"seed={seed} 终了 y={robot.pos[1]:.1f} 冲得离谱"
+        else:
+            assert robot.pos[1] >= FINISH_LINE_CM, \
+                f"seed={seed} 终了 y={robot.pos[1]:.1f} 未过终点线 {FINISH_LINE_CM:.0f}"
         worst_cap = max(worst_cap, robot.n_captures)
         assert robot.n_captures <= CAPTURE_GUARD, \
             f"seed={seed} 拍照 {robot.n_captures} 张超护栏"
-    print(f"  端到端 {n_ok}/{N_SEEDS} 完成，起跨点全落门限，全部越过终点线 ✓"
+    tail = "全部跨过木条" + ("（SKIP_EXIT：落点=杆位+18cm）" if SKIP_EXIT
+                            else "并越过终点线")
+    print(f"  端到端 {n_ok}/{N_SEEDS} 完成，起跨点全落门限，{tail} ✓"
           f"（最多拍照 {worst_cap} 张，耗时 {time.time() - t0:.0f}s）")
 
 
@@ -137,32 +148,45 @@ def test_goal_uniqueness():
 
 
 # ---------------------------------------------------------------------
-# 第3步顶上对正
+# 楼梯段：写死的动作序列
 # ---------------------------------------------------------------------
 
-def test_step3_corrects_drift():
-    """上楼会把人带歪；第3步必须用木条方向把它修进容差"""
-    ok_cnt = 0
+def test_stair_sequence_hardcoded():
+    """第2步必须原样下发写死的序列，并且走完站在平地
+
+    这一段不做视觉：上/下楼动作组之间只夹"右小转"补航向。测试要盯两件事——
+    序列没被改（改了就是悄悄换策略），以及走完之后确实回到 z=0 的平地
+    （没卡在台阶上）。
+    """
+    expect = [A_CLIMB, A_TURN_R, A_CLIMB, A_TURN_R,
+              A_DOWN, A_TURN_R, A_DOWN, A_TURN_R]
+    assert [a for a, _ in STAIR_SEQUENCE] == expect, \
+        f"楼梯段序列被改动：{[a for a, _ in STAIR_SEQUENCE]}"
+    assert all(n == 1 for _, n in STAIR_SEQUENCE), "楼梯段每个动作都只发 1 次"
+
+    headings = []
     for seed in range(8):
-        scene = StairsScene(bar_dist=float([25.0, 32.0, 40.0][seed % 3]))
+        scene = StairsScene(bar_dist=30.0)
         robot = SimStairsRobot(scene, seed=seed, start=(0.0, 0.0),
                                heading_deg=0.0, wobble_sigma_deg=0.0)
-        robot.set_pitch(PITCH_OBS)
-        # 摆到顶部平台，并注入一个明显的航向偏差（模拟上楼带歪）
-        robot.pos = np.array([0.0, 24.0])
-        robot.z = 5.0
-        robot.heading = -18.0 + seed
         level = StairsHurdleLevel(robot, settle_s=0.0, verbose=False)
         level._build_meter(PITCH_OBS)
-        before = robot.heading
-        level._step3_align_on_top()
-        after = robot.heading
-        assert abs(after) <= TOL_ROT_DEG, \
-            f"seed={seed} 顶上对正后航向 {after:+.1f}° 仍超容差 {TOL_ROT_DEG}"
-        assert abs(after) < abs(before), \
-            f"seed={seed} 顶上对正没起作用：{before:+.1f}° -> {after:+.1f}°"
-        ok_cnt += 1
-    print(f"  顶上对正：{ok_cnt}/8 把注入的航向偏差修进容差 ±{TOL_ROT_DEG:.0f}° ✓")
+        robot.action_log.clear()
+        level._step2_stairs()
+        got = [a for a, _ in robot.action_log if a != A_STAND]
+        assert got == expect, f"seed={seed} 实际下发 {got}"
+        assert abs(robot.z) < 1e-6, f"seed={seed} 楼梯段走完 z={robot.z} 不在平地"
+        # 每步位移在仿真里是名义值 ±10%，4 步累计 σ≈2.4cm，所以只要求
+        # "确实下来了"；"下来之后木条还看得见"由端到端测试兜。
+        assert robot.pos[1] >= 40.0, \
+            f"seed={seed} 楼梯段走完 y={robot.pos[1]:.1f} 还在楼梯上"
+        headings.append(robot.heading)
+    # 写死的 4 次右小转是按现场观察的累计左偏配的；仿真里的偏置是名义值，
+    # 只要残余航向还在第3步能修的范围内即可（左转一步 8.6°）。
+    worst = max(abs(h) for h in headings)
+    assert worst <= 20.0, f"楼梯段走完残余航向 {worst:.1f}° 过大"
+    print(f"  楼梯段：8 种子序列完全一致、均落平地 z=0；"
+          f"残余航向最大 {worst:.1f}°（写死补偿 vs 仿真名义偏置）✓")
 
 
 # ---------------------------------------------------------------------
@@ -198,7 +222,7 @@ def test_action_groups_match_scene():
 # ---------------------------------------------------------------------
 
 def test_degraded_paths():
-    """目标全程不可见时也不弃赛：第1步走摆位先验、第5步按先验起跨"""
+    """目标全程不可见时也不弃赛：第1步走摆位先验、第3步按先验起跨"""
     cases = [("胶条不可见", dict(tape_visible=False)),
              ("木条不可见", dict(bar_visible=False)),
              ("两个都不可见", dict(tape_visible=False, bar_visible=False))]
@@ -209,8 +233,34 @@ def test_degraded_paths():
         level = StairsHurdleLevel(robot, settle_s=0.0, verbose=False)
         ok = level.run_level()
         assert ok, f"{name}：应走降级链完成而不是弃赛"
+        assert robot.pos[1] > 45.0, f"{name}：终了 y={robot.pos[1]:.1f} 没走完楼梯段"
         assert robot.n_captures <= CAPTURE_GUARD, f"{name}：拍照超护栏"
     print("  降级路径：胶条/木条/两者全不可见，均不弃赛 ✓")
+
+
+# ---------------------------------------------------------------------
+# 收尾开关
+# ---------------------------------------------------------------------
+
+def test_exit_switch():
+    """SKIP_EXIT=False 时必须真的走到终点线（开关不能是死代码）
+
+    现场默认 SKIP_EXIT=True（跨完直接交棒），但开关要真的能翻——翻过去之后
+    出场步数由 `_exit_steps` 按跨障区几何与实测杆距算，不能再用固定常数。
+    """
+    import levels.stairs_hurdle as lv
+    assert lv.SKIP_EXIT is True, "现场结论是跨完直接切下一关，默认应为 True"
+    lv.SKIP_EXIT = False
+    try:
+        for seed in range(6):
+            scene, robot, level = make_run(seed)
+            assert level.run_level(), f"seed={seed} 未完成"
+            assert robot.pos[1] >= FINISH_LINE_CM, \
+                f"seed={seed} 终了 y={robot.pos[1]:.1f} 未过终点线 {FINISH_LINE_CM:.0f}"
+    finally:
+        lv.SKIP_EXIT = True
+    print(f"  收尾开关：SKIP_EXIT=False 时 6/6 走到终点线 y≥{FINISH_LINE_CM:.0f} ✓"
+          f"（跨栏净前进按实测 {HURDLE_FWD_NOMINAL_CM:.0f}cm 计）")
 
 
 if __name__ == "__main__":
@@ -220,8 +270,9 @@ if __name__ == "__main__":
     args = ap.parse_args()
     test_goal_uniqueness()
     test_action_groups_match_scene()
-    test_step3_corrects_drift()
+    test_stair_sequence_hardcoded()
     test_degraded_paths()
+    test_exit_switch()
     if not args.quick:
         test_e2e_seeds()
     print("全部 stairs_hurdle 端到端测试通过 ✓")
