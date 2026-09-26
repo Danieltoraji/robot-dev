@@ -29,6 +29,7 @@ import argparse
 import ast
 import glob
 import json
+import math
 import os
 import sys
 
@@ -94,14 +95,17 @@ PARAMS = [
     ("TAG_X_TURN", 3, "TAG_X_TURN", 1, 0, 320, None),
     ("TAG_X_LARGE", 3, "TAG_X_LARGE", 1, 0, 320, None),
     ("TAG_X_FINE", 3, "TAG_X_FINE", 1, 0, 320, None),
+    ("HEAD_SCAN_LEFT", 3, "HEAD_SCAN_LEFT", 1, 0, 1000, None),
+    ("HEAD_SCAN_RIGHT", 3, "HEAD_SCAN_RIGHT", 1, 0, 1000, None),
     # 4 巡线
     ("LINE_CENTER_X", 4, "LINE_CENTER_X", 1, 0, 640, None),
     ("LINE_TURN_THRESHOLD", 4, "LINE_TURN_THR", 1, 0, 320, None),
     ("SEARCH_LINE_ALIGN_THRESHOLD", 4, "SEARCH_ALIGN", 1, 0, 320, None),
-    ("VERTICAL_LINE_RATIO", 4, "VERT_RATIO_x100", 100, 0, 500, None),
+    ("VERTICAL_ANGLE_TOL", 4, "VERT_ANGLE_TOL_deg", 1, 0, 90, None),
     ("LINE_LOST_HOLD", 4, "LOST_HOLD_x10", 10, 0, 100, None),
     ("LINE_LOST_TIMEOUT", 4, "NOFRAME_TO_x10", 10, 0, 100, None),
     ("MAX_LOST_TURNS", 4, "MAX_LOST_TURNS", 1, 0, 50, None),
+    ("MAX_CONSEC_MOVES", 4, "MAX_CONSEC_MOVES", 1, 1, 10, None),
     ("line_head_delta", 4, "LINE_HEAD_DELTA", 1, 0, 500, None),
     # 5 终点 + 动作计数
     ("END_YAW_LOWER", 5, "END_YAW_LO", 1, -90, 180, None),
@@ -270,10 +274,24 @@ def detect_red_line_raw(img, v, roi):
             cx = float(box[0][0] + box[2][0]) / 2.0
             sx += cx * r[4]
             sw += r[4]
-            if r[4] >= 0.5:
-                bw, bh = cv2.boundingRect(best)[2], cv2.boundingRect(best)[3]
-                if bh / max(bw, 1) >= v["VERTICAL_LINE_RATIO"]:
-                    vertical = True
+    # 竖直判定: 三段ROI合并区域的轮廓PCA主轴方向(单带40px会被带宽截断, 线宽大时主轴翻转)
+    _y1 = min(r[0] for r in roi)
+    _y2 = max(r[1] for r in roi)
+    _mcnts = cv2.findContours(mask[_y1:_y2, :], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_L1)[-2]
+    _mbest, _marea = None, 0.0
+    for c in _mcnts:
+        a = abs(cv2.contourArea(c))
+        if a > _marea:
+            _marea, _mbest = a, c
+    if _mbest is not None:
+        m = cv2.moments(_mbest)
+        if m["m00"] > 0:
+            mu11 = m["mu11"] / m["m00"]
+            mu20 = m["mu20"] / m["m00"]
+            mu02 = m["mu02"] / m["m00"]
+            angle = math.degrees(0.5 * math.atan2(2.0 * mu11, mu20 - mu02))
+            if abs(angle) >= 90.0 - v["VERTICAL_ANGLE_TOL"]:
+                vertical = True
     line_cx = int(sx / sw) if sw > 0 else -1
     return line_cx, vertical, mask
 

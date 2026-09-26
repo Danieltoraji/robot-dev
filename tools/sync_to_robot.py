@@ -37,7 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-DEFAULT_HOST = os.environ.get("ROBOT_HOST", "http://192.168.43.81:8888")
+DEFAULT_HOST = os.environ.get("ROBOT_HOST", "http://192.168.31.209:8888")
 DEFAULT_PASSWORD = "pi"
 DEFAULT_REMOTE_ROOT = "Robot_control_self_module"
 DEFAULT_PATHS = ["main.py", "debug.sh", "core", "vision", "levels", "tools", "models"]

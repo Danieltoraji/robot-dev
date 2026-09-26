@@ -123,14 +123,16 @@ tag 检测不能在 PC 本地做，用模拟值调 tag 阈值最方便）。
 | `BOARD_DEPTH_M` | 量比赛板实际厚度 |
 | `TAG_FAR_Y/NEAR_Y/TOO_NEAR_Y` | 仅 PnP 失效时用（像素回退），照 6.2 方法按实测 cy 定 |
 | `TAG_X_TURN/LARGE/FINE` | 与颜色横向档同理 |
+| `HEAD_SCAN_LEFT / HEAD_SCAN_RIGHT` | 头部左右扫描极限（相对 servo2 脉冲，当前左 300/右 500）；找不到 tag/海绵时头扫范围，扩大有助于发现视野外的 tag |
 
 ### 6.4 巡线（页 4）
 | 参数 | 标定方法 |
 |---|---|
-| `LINE_CENTER_X` | 画面中线 320，摄像头偏移时修正 |
+| `LINE_CENTER_X` | 巡线目标中心 x（当前 340，摄像头偏移时修正） |
 | `LINE_TURN_THRESHOLD` | 蛇形摆动=调高；反应迟钝=调低 |
 | `SEARCH_LINE_ALIGN_THRESHOLD` | 放完海绵转身找线时 |dx| 收敛到多少算对正；太小永远对不齐 |
-| `VERTICAL_LINE_RATIO` | 正对红线时看 `line_*.jpg` 快照里红色矩形实测高宽比，定在该值以下 |
+| `VERTICAL_ANGLE_TOL` | 任一 ROI 带内红线轮廓**主轴方向**与竖直夹角 ≤ 此值判"线竖直"（当前 25°；PCA 方向判据与线宽/距离无关，替代旧的高宽比判据——线近而宽时旧判据永远判不竖直） |
+| `MAX_CONSEC_MOVES` | 同方向连续平移上限（当前 2），超过强制前进一步重判——打断卡尔曼滞后造成的平移过冲之字形 |
 | `LINE_LOST_HOLD/TIMEOUT/MAX_LOST_TURNS` | 按实测转角定"左大转几次能找回线" |
 | `line_head_delta` | 低头角决定红线落在哪几行 ROI，看快照调 |
 
@@ -141,14 +143,14 @@ tag 检测不能在 PC 本地做，用模拟值调 tag 阈值最方便）。
 | `WALK_STEPS / MAX_TURN` | 终点距离 ÷ 实测单步距离 |
 | `PICK_FINAL_STEPS / PLACE_FINAL_STEPS` | 总抓空→加大；总撞上→减小 |
 | `MAX_PICK_RETRIES` | 一般不动 |
-| `post_pick_left_turns / post_pick_forward_steps` | 用实测转角+步长在地图上算"抓取点→Tag 搜索通道"反推 |
+| `post_pick_left_turns / post_pick_forward_steps` | 用实测转角+步长在地图上算"抓取点→Tag 搜索通道"反推（当前左转 20） |
 | `back_steps_after_place` | 退多远才够转身看到身后红线，实测 |
 | `line_final_steps / line_search_turns` | 终点距离换算 / 找线最多转几次 |
 
 ### 6.6 卡尔曼（页 6）
 原则：**R（观测噪声）越大越平滑但越滞后；Q（过程噪声）越大越跟手但越抖。**
 目标框发抖→先加 R；动作反应慢（转身过头）→加 Q。
-注意 `kf_area` 的 Q=100 是有意设大的（面积变化快），"够近但面积上不去"要警惕滤波滞后。
+注意 `kf_area` 的 Q=100 是有意设大的（面积变化快），"够近但面积上不去"要警惕滤波滞后。巡线中心 `kf_line` 的 Q 已提至 30：巡线循环每执行一个动作（约 1.2 秒）才更新一次滤波，Q 太小时稳态滞后达几十像素，机器人会按滞后值决策导致平移过冲之字形。
 
 ## 7. 已知坑
 
