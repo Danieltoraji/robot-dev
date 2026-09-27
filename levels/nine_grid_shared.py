@@ -103,6 +103,7 @@ from core.robot_core import (
 from vision.nine_grid_detector import (
     ID_TO_COLOR,
     NineGridDetector,
+    is_trustworthy,
 )
 
 
@@ -1428,6 +1429,12 @@ class NineGridShared:
                                                       shape=True)
                     frame_obs.append((pitch, pulse, obs))
                     for o in obs:
+                        # 低证据**又**不纯的候选不参与"定数字"（木框那类会被
+                        # 黄/橙掩膜命中且面积常比真面板大）。它们仍留在 frame_obs
+                        # 里供几何使用；定数字这一步只认"有黑字 或 够纯"的观测，
+                        # 否则会把木框绑成某个数字，污染 数字→格 映射。
+                        if not is_trustworthy(o):
+                            continue
                         px = (o.hull_centroid_px if o.clipped
                               else o.center_px)
                         pix_obs.append((pitch, pulse, o.digit, px,

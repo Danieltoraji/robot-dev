@@ -54,6 +54,7 @@ from levels.nine_grid_shared import (
     CAMERA_FOV_H_DEG,
     NineGridShared,
     PITCH_DOWN,
+    PITCH_NAV,
     action_name_cn,
     layout_enabled,
 )
@@ -338,6 +339,11 @@ FORWARD_COVER_NEAR = 0.115         # < 此值（≈30cm 以外）走中步；≥
 #   原来一次 1 步、每步拍帧复测 ⇒ 目标在身后要磨十几轮。3 步 ≈15.5~25.9°
 #   （左 8.625°/右 5.200° × 3），远小于 ±33.7° 半视场，不会跳过视野。
 SEARCH_TURN_STEPS = 3
+# ★ 本格开始时**先抬头看一眼**（用户 2026-09-28 要求）：抬头档视野远，目标在
+#   中远处更容易被看到；看到了就进主循环朝它走（判档会判"绿·直行"）。
+#   置 False 可一键关掉（它只多花 1 张照片；主循环仍用低头档）。
+SEARCH_LOOK_UP_FIRST = True
+SEARCH_LOOK_UP_PITCH = PITCH_NAV
 FORWARD_FAR_STEPS = 5            # 远距一次前进步数（5×2.652 ≈ 13cm）
 FORWARD_MID_STEPS = 3            # 中距一次前进步数（3×2.652 ≈ 8cm）
 # ★ 2026-09-28：从**参考原版**搬回来的"前进不力 ⇒ 跨步"机制。
@@ -401,6 +407,10 @@ TURN_BATCH_EMA_ALPHA = 0.3      # 单步实际角的指数滑动平均
 TURN_BATCH_EMA_ALPHA_FAST = 0.5  # 前几批用快收敛，抵消初值偏差
 TURN_BATCH_EMA_FAST_UPDATES = 2  # 快收敛批次数
 TURN_BATCH_MIN_EFFECTIVE_DEG = 0.5  # 单步实测低于此 = 被地面吞掉（只记日志）
+# 真实"像素 ↔ 角度"换算（**不是** yaw_gain 那条伺服增益）：±33.7° 半视场 / 1296px
+#   ⇒ ≈154.8 px/°（见 `_body_angle_deg` 的实测说明：那条 0.388 的比值正是
+#     60/(154.8) 的产物）。EMA 必须用**真实角**，否则量纲自己就错了。
+TURN_BATCH_FOV_PX_PER_DEG = 154.8
 # 方向 → (动作名, EMA 属性名, 中文名)
 TURN_BATCH_DIRS = {
     "left": ("turn_left_small_step", "_small_turn_left_deg", "左"),
@@ -417,6 +427,10 @@ TURN_BATCH_DIRS = {
 #   一旦明显更小就说明还没走近），比 whole 单调：
 #     框宽 ≥ FORWARD_BOX_NEAR_PX（面板基本看全）⇒ n = 1
 FORWARD_BOX_NEAR_PX = 1100.0
+# ★ 近距判定余量（2026-09-28 现场事故补）：紫份额只要到"门 − 这个余量"就认为
+#   面板已经压进紫带 ⇒ 前进恒走 1 步。现场面板6 那帧紫 0.340（门 0.35，只差
+#   0.01）却仍走 ×5 ⇒ 踩过去。取 0.05（约等于现场帧间紫的自然抖动上限）。
+NEAR_ARRIVE_MARGIN = 0.05
 # ---- 前进无效脱困（**2026-09-28 改成用框宽判**，见循环里那段长注释）----
 # 旧版用整帧色占比判（NO_PROGRESS_COVER / NO_PROGRESS_PATIENCE，已删除）：
 # 那个量在近距不单调（面板下沿出画幅后 whole 正常下降），近距永远判不出卡住。
@@ -649,6 +663,14 @@ class NineGridLevel(NineGridShared):
         self.phase = f"DRIVE{digit}"
         pitch0 = getattr(self.state, "pitch", None)
         self.state.set_pitch(PITCH_DOWN)
+        # ★ 2026-09-28 用户要求：**本格开始先抬头看一眼**——抬头档（PITCH_NAV）
+        #   看得远，目标面板在中远处更容易被看到；看见就直接进主循环（判档会
+        #   判成"绿·直行"就朝它走），不必先低头盲搜。
+        #   注意：抬头档只用于**快速确认"目标在不在视野里"**，主循环仍用低头档
+        #   （低头档是"能压到格心"的那一档，见 `本关全程 1040` 的决策）。
+        if SEARCH_LOOK_UP_FIRST:
+            self._look_up_and_check(digit, color)
+            self.state.set_pitch(PITCH_DOWN)
         lost = 0
         turns = 0
         self._reacq_deg = 0.0          # 本轮重捕获已累计转过的角度
@@ -665,9 +687,10 @@ class NineGridLevel(NineGridShared):
         prev_org = None
         prev_box = None                # 上一帧框宽（仅诊断/日志用）
         prev_gate_vec = None           # 上一帧的 (紫,橙,占比)：前进不力判据的基准
-        prev_turn = None               # 上一次转向前的偏角（更新单步实际角用）
+        prev_turn = None               # 上一次转向前的偏角（日志用）
         prev_turn_n = 0                # 上一次转向下发的步数
-        prev_turn_dir = None           # 上一次转向的方向（"left"/"right"，左右独立更新）
+        prev_turn_dir = None           # 上一次转向的方向（"left"/"right"）
+        prev_px_of_turn = None         # 上一次转向前的目标像素列（算单步实际角用）
         stall = 0
         try:
             for _ in range(UNIFIED_MAX_STEPS):
@@ -759,39 +782,70 @@ class NineGridLevel(NineGridShared):
                 if (zone == "turn" and prev_turn is not None
                         and prev_turn_n > 0 and prev_turn_dir in TURN_BATCH_DIRS):
                     _act_name, attr, cn = TURN_BATCH_DIRS[prev_turn_dir]
-                    if abs(yaw_gain) < abs(prev_turn):
-                        per = (abs(prev_turn) - abs(yaw_gain)) / prev_turn_n
+                    # ★★ 2026-09-28 现场事故（用户指出）：偏角读数从 +9.3° 一路
+                    #   涨到 +10.8°（**机器人一步都没转过去**），而这里把
+                    #   "读数变了"当成"转过去了"，EMA 反而稳步上涨到 9.8°/步。
+                    #   两个根因：
+                    #   ① 量的单位错：`yaw_gain` 是**增益折算值**（×0.388），
+                    #      不是真实角度；用一个未标定的增益去标定"单步实际角"，
+                    #      量纲自己就先错了。改用**像素变化**换算真实角
+                    #      （TURN_BATCH_FOV_PX_PER_DEG）。
+                    #   ② 没有"没转过去"的判别：读数朝**错方向**变化时不能更新 EMA。
+                    #      ⇒ 只有"转后读数往该方向变"（绝对值变小，或过冲后反向）
+                    #      且单步实测 ≥ TURN_BATCH_MIN_EFFECTIVE_DEG 才更新。
+                    #   顺带：EMA 上限 = 该方向已知的最快单步（左 8.625/右 5.2），
+                    #      不可能比"名义值"还快（旧 clip 上限 10.0 会一直涨）。
+                    _px = float(p["px"])
+                    per = None
+                    if prev_px_of_turn is not None:
+                        per = abs(_px - prev_px_of_turn) / TURN_BATCH_FOV_PX_PER_DEG \
+                            / prev_turn_n
+                    # 方向自检：读数必须朝"目标更靠近居中"的方向变，否则判"没转过去"
+                    moved_right_way = (
+                        (prev_turn_dir == "left" and _px < prev_px_of_turn)
+                        or (prev_turn_dir == "right" and _px > prev_px_of_turn)
+                    ) if prev_px_of_turn is not None else True
+                    cap = float({"left": TURN_LEFT_SMALL_DEG,
+                                 "right": TURN_RIGHT_SMALL_DEG}[prev_turn_dir])
+                    if per is None or per < TURN_BATCH_MIN_EFFECTIVE_DEG \
+                            or not moved_right_way:
+                        # 没测到 / 几乎没动 / 朝错方向 ⇒ **不更新 EMA**，
+                        # 并交给打滑保护计数（它会连续两次后 ≈ 后退一步脱困）
+                        per_show = 0.0 if per is None else per
+                        print(f"[转向] {cn}转这一批**没转过去**（读数 "
+                              f"{(0.0 if prev_px_of_turn is None else prev_px_of_turn):.0f}"
+                              f"→{_px:.0f}px，约 {per_show:.2f}°/步）"
+                              f"→ 不更新 EMA")
+                        if self._check_turn_slip(per_show, direction_cn=cn,
+                                                 n_steps=prev_turn_n):
+                            prev_turn, prev_turn_n, prev_turn_dir = None, 0, None
+                            prev_px_of_turn = None
+                            prev_zone = None
+                            continue
                     else:
-                        per = (abs(prev_turn) + abs(yaw_gain)) / prev_turn_n
-                    per = float(np.clip(per, 0.3, 10.0))
-                    alpha = (TURN_BATCH_EMA_ALPHA_FAST
-                             if self._turn_updates < TURN_BATCH_EMA_FAST_UPDATES
-                             else TURN_BATCH_EMA_ALPHA)
-                    self._turn_updates += 1
-                    before = float(getattr(self, attr))
-                    setattr(self, attr, (1.0 - alpha) * before + alpha * per)
-                    print(f"[转向] {cn}转批量实测更新：{before:.1f} → "
-                          f"{getattr(self, attr):.1f}°/步"
-                          f"（上一批 {prev_turn_n} 步，偏角 "
-                          f"{prev_turn:+.1f}°→{yaw_gain:+.1f}°，单步 "
-                          f"{per:.2f}°）")
-                    # 统一决策里 `_small_turn_deg` 只作"聚合显示"用（三段式仍用它
-                    # 规划），这里同步成左右均值，免得日志里那个数永远停在初值。
-                    self._small_turn_deg = 0.5 * (self._small_turn_left_deg
-                                                  + self._small_turn_right_deg)
-                    if per < TURN_BATCH_MIN_EFFECTIVE_DEG:
-                        # 只记日志：不弃用小转（弃用会让"被地面吞掉"那格彻底没招）
-                        print(f"[转向] 单步实测仅 {per:.2f}°"
-                              f"（<{TURN_BATCH_MIN_EFFECTIVE_DEG}°，疑被地面吞掉）")
-                    # ★ 旋转打滑保护（用户 2026-09-28）：连续 TURN_SLIP_STRIKES 次
-                    #   实测单步角 < TURN_SLIP_MIN_DEG ⇒ 后退一步 + 清 EMA。
-                    #   现场症状：打滑/脚被卡住时一直无谓旋转（每批几乎没转动，
-                    #   而批量规划又按"估计角"继续放量）。
-                    if self._check_turn_slip(per, direction_cn=cn,
-                                             n_steps=prev_turn_n):
-                        prev_turn, prev_turn_n, prev_turn_dir = None, 0, None
-                        prev_zone = None
-                        continue
+                        per = float(np.clip(per, 0.3, cap))
+                        alpha = (TURN_BATCH_EMA_ALPHA_FAST
+                                 if self._turn_updates < TURN_BATCH_EMA_FAST_UPDATES
+                                 else TURN_BATCH_EMA_ALPHA)
+                        self._turn_updates += 1
+                        before = float(getattr(self, attr))
+                        setattr(self, attr, (1.0 - alpha) * before + alpha * per)
+                        print(f"[转向] {cn}转批量实测更新：{before:.1f} → "
+                              f"{getattr(self, attr):.1f}°/步"
+                              f"（上一批 {prev_turn_n} 步，像素 {prev_px_of_turn:.0f}→"
+                              f"{_px:.0f}，单步 {per:.2f}°，上限 {cap:.1f}°）")
+                        # 统一决策里 `_small_turn_deg` 只作"聚合显示"用（三段式仍用它
+                        # 规划），这里同步成左右均值，免得日志里那个数永远停在初值。
+                        self._small_turn_deg = 0.5 * (self._small_turn_left_deg
+                                                      + self._small_turn_right_deg)
+                        # ★ 旋转打滑保护（用户 2026-09-28）：连续 TURN_SLIP_STRIKES
+                        #   次实测单步角 < TURN_SLIP_MIN_DEG ⇒ 后退一步 + 清 EMA。
+                        if self._check_turn_slip(per, direction_cn=cn,
+                                                 n_steps=prev_turn_n):
+                            prev_turn, prev_turn_n, prev_turn_dir = None, 0, None
+                            prev_px_of_turn = None
+                            prev_zone = None
+                            continue
                 # ② 算批量：偏角大 ⇒ 多转几步；**该方向**估计角小 ⇒ 自动多转
                 n_turn = 1
                 turn_dir = None
@@ -819,8 +873,21 @@ class NineGridLevel(NineGridShared):
                         n = FORWARD_FAR_STEPS
                     elif cov < FORWARD_COVER_NEAR:
                         n = FORWARD_MID_STEPS
-                    if float(p.get("box") or 0.0) >= FORWARD_BOX_NEAR_PX:
+                    box = float(p.get("box") or 0.0)
+                    if box >= FORWARD_BOX_NEAR_PX:
                         n = 1          # 看全了 ⇒ 一步一复测（近距保险丝）
+                    # ★★ 2026-09-28 现场事故：面板6 那一段"紫 0.34 / 橙 0.30 / 框宽 946px"
+                    #   仍被判成"远"⇒ 连发 ×5 直行，直接把面板踩过去。
+                    #   根因：分档量 `whole`（0.041）在近距**必然**小 —— 面板下沿出了
+                    #   画幅，可见面积本来就少；于是"已经站在板上"被读成"还很远"。
+                    #   真正的"快到了"签名在**到达门那几个量**上：
+                    #     · 紫接近门（≥ 门 − NEAR_MARGIN）⇒ 面板已经压进紫带；
+                    #     · 橙低于门（≤ 门）⇒ 面板不再留在远处。
+                    #   任一成立 ⇒ **恒走 1 步**（2.652cm，一步一复测）。
+                    #   宁可多拍几帧，也绝不再一次跨 13cm 把面板送过去。
+                    if sh[1] >= ARRIVE_PURPLE_MIN - NEAR_ARRIVE_MARGIN \
+                            or sh[2] <= ARRIVE_ORANGE_MAX:
+                        n = 1
                 # ---- 前进不力判据（**2026-09-28 用户指定，替代框宽法**）----
                 # 规则：若**上一个动作是直行**，取到达判据的三个观测量
                 #       v = (紫, 橙, 整帧占比)
@@ -869,8 +936,10 @@ class NineGridLevel(NineGridShared):
                 if zone == "turn":
                     prev_turn, prev_turn_n = yaw_gain, n_turn
                     prev_turn_dir = turn_dir
+                    prev_px_of_turn = float(p["px"])   # 下一帧算像素差用
                 else:
                     prev_turn, prev_turn_n, prev_turn_dir = None, 0, None
+                    prev_px_of_turn = None
                 if n_turn > 1:
                     _cn = TURN_BATCH_DIRS[turn_dir][2] if turn_dir else "?"
                     print(f"[转向] 面板{digit} {_cn}转批量 {n_turn} 步"
@@ -1171,6 +1240,35 @@ class NineGridLevel(NineGridShared):
             return "left_move" if px_body < w / 2.0 else "right_move"
         return ("turn_left_small_step" if px_body < w / 2.0
                 else "turn_right_small_step")
+    def _look_up_and_check(self, digit, color):
+        """抬头档看一眼目标在不在视野里（用户 2026-09-28 要求）
+
+        抬头档（`PITCH_NAV`）视野远，目标面板在中远处更容易被看到；看到就报一行，
+        主循环随后仍用低头档接近（低头档才是"能压到格心"的那一档）。
+        **纯信息**：不改任何决策状态，找不到也不额外转向（交给主循环的重捕获）。
+        """
+        try:
+            self.state.set_pitch(SEARCH_LOOK_UP_PITCH)
+            frame = self._capture()
+            if frame is None:
+                return False
+            obs = self.detector.detect_panels(
+                frame, colors=[color], arbitrate=True, drop_border=False)
+            if not obs:
+                print(f"[抬头] 面板{digit} 抬头档（pitch {SEARCH_LOOK_UP_PITCH}）"
+                      f"没看到 → 回低头档正常流程")
+                return False
+            o = max(obs, key=lambda x: x.hull_area)
+            px = (o.hull_centroid_px if o.clipped else o.center_px)[0]
+            print(f"[抬头] 面板{digit} 抬头档看到（画面列 {px:.0f}px，"
+                  f"框宽 {o.bbox[2]:.0f}px）→ 目标在视野内，进入主循环（低头档）"
+                  f"朝它走")
+            self._target_seen = True
+            return True
+        except Exception as e:
+            print(f"[抬头] 探测异常（{type(e).__name__}: {e}）——忽略，回正常流程")
+            return False
+
     def _capture_and_measure(self, color, pitch=None):
         """★ 一次拍照 → 三个观测量（统一决策的**唯一**感知入口）
 
