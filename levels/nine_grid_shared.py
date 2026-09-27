@@ -1232,15 +1232,21 @@ class NineGridShared:
         return True
 
     def _arena_guard(self):
-        """离场护栏：死推位姿越出场地外框（台面 ±1 格）→ 中止整局（**唯一**硬停）
+        """离场护栏（**2026-09-28 起：只记日志，不再中止、也不再否决任何动作**）
 
-        定位是"拦彻底失控"的兜底，不是防跌落预案：死推位姿在形变场景下实测
-        能偏 30cm+（到达判据本身有误差，_reanchor_pose 又把它锚到"以为"的
-        格心），所以外框放到台面 ±1 格。它是 2026-09-25 之后**唯一**还能让
-        机器人自己停下来的判据（时间/拍照数/动作数都改成只提醒了）。
+        ★★ 用户决定：**死推必须被全面打倒、扬弃**。而本方法过去是"读死推位姿
+        `self.pose` 判越界 ⇒ 中止整局 + 拒绝动作"——那就是让死推在决策里说话。
+        现在：
+          · 越界只打印一行 `[护栏·仅告警]`，**不中止整局、不否决动作**；
+          · 是否越界完全交给场地上的裁判/人工观察；
+          · `self.pose` 也不再被推进（见 `_act`），所以这里读到的数只会停在
+            起始假设上——打印出来仅作"起始假设"参考，不带任何决策权。
+
+        为什么保留这行日志而不是整段删掉：现场复盘需要知道"机器人以为自己在哪"
+        与"实际在哪"的差距（它一直是量化死推漂移的唯一免费证据）。
         """
         if self._abort_level is not None:
-            # 已判定整局收手：保持（新的尝试开始时会清 _cell_tripped，这里补回）
+            # 兼容旧状态：以前中止过就保持中止；现在不再产生新中止。
             if self._cell_tripped is None:
                 self._cell_tripped = self._abort_level
             return True
@@ -1249,9 +1255,12 @@ class NineGridShared:
         if (ARENA_X_CM[0] <= x <= ARENA_X_CM[1]
                 and ARENA_Y_CM[0] <= y <= ARENA_Y_CM[1]):
             return False
-        return self._abort_cell(
-            f"位姿越界 (x={x:.0f}, y={y:.0f}) 超出 x{ARENA_X_CM} "
-            f"y{ARENA_Y_CM}", abort_level=True)
+        if not getattr(self, "_arena_warned", False):
+            self._arena_warned = True
+            print(f"[护栏·仅告警] 按起始假设推算的位置 (x={x:.0f}, y={y:.0f}) 超出 "
+                  f"x{ARENA_X_CM} y{ARENA_Y_CM}——**不中止、不拦动作**"
+                  f"（死推已被扬弃，是否出界以现场观察为准）")
+        return False
 
     def _capture(self):
         """统一拍照入口：单格拍照计数（遥测）+ 进度提醒 + 转发 state.capture_frame"""
@@ -1885,8 +1894,8 @@ class NineGridShared:
     def _record_landing(self, digit):
         """把"跑完本格时机器人离目标格格心的距离"记进 self.panel_landing
 
-        真机（无真值）退化为用死推位姿 self.pose 估计，并在日志里标明来源；
-        仿真里 state.pos 是真值，因此这个数字可以用来抓"假到达"。
+        ⚠️ 2026-09-28：**死推被扬弃** ⇒ 没有真值（真机无 `state.pos`）时
+        直接记 None（"无数据"），不再拿死推位姿冒充落点。真值只在仿真/夹具里存在。
         """
         cell = self.digit_cell.get(digit)
         if cell is None:
@@ -1894,11 +1903,11 @@ class NineGridShared:
             return
         center = np.asarray(grid_cell_center(cell), float)
         truth = getattr(self.state, "pos", None)
-        if truth is not None:
-            src, pos = "真值", np.asarray(truth, float)[:2]
-        else:
-            src, pos = "死推", np.asarray(self.pose, float)[:2]
-        self.panel_landing[digit] = (float(np.linalg.norm(pos - center)), src)
+        if truth is None:
+            self.panel_landing[digit] = None      # 真机：无真值就如实记"无数据"
+            return
+        pos = np.asarray(truth, float)[:2]
+        self.panel_landing[digit] = (float(np.linalg.norm(pos - center)), "真值")
 
     def _count_frame(self):
         """按当前阶段累计拍照数（诊断；见 run_level 的汇总打印）"""
@@ -2207,14 +2216,17 @@ class NineGridShared:
         # 单格动作计数（纯遥测；2026-09-13 发现这个计数从来没被累加过，
         # 遥测里恒显示 0）。它不再参与任何"停手"判断。
         self._cell_actions += max(1, int(times))
-        self.predict_pose(action, times)
+        # ★★ 2026-09-28 用户决定：**死推必须被全面打倒、扬弃** ⇒ 这里**不再**
+        #   调用 `predict_pose()`。`self.pose` 因此永远停在起始假设上、不再累积，
+        #   任何决策都拿不到"推算出来的位置"。
+        #   （`predict_pose()` 本体保留在文件里，只为让老日志/老测试的名字查得到；
+        #    运行路径上没有任何调用点了。）
         if kind == "turn":
             self._cell_turn_cmd_deg += req
         else:
             # 期间发生平移：旧转向不可盲目撤销，大转振荡记忆也失效
             self._last_turn = None
             self._last_big_turn = None
-        self._arena_guard()
 
     # =================================================================
     # 旋转打滑保护（2026-09-28，用户要求）

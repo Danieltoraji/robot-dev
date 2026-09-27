@@ -424,20 +424,11 @@ class NineGridThreeStageLevel(NineGridShared):
             print(f"[对准] 目标{digit}丢失 → 重新搜索一次")
             if self._search_target(digit) is None:
                 break
-        # 目标始终不入视野，但死推说到位了：交给低头颜色判据裁决（抗形变、
-        # 不需要看见目标数字本身——色块压过与否是机器人与色块的相对关系）。
+        # ★ 2026-09-28：**死推被扬弃** ⇒ 原来这里"目标不可见但按死推推算说已
+        #   到位 ⇒ 交给低头颜色判据"的旁路**已删除**。目标没看见就是没看见，
+        #   不许拿推算出来的位置放行。
         if self._attempt_stuck:
             return False
-        if digit in self.digit_cell:
-            rel = self.target_relative(digit)
-            if rel is not None:
-                fwd, lat, _b = rel
-                if abs(fwd) <= ARRIVE_FALLBACK_CM and abs(lat) <= 20.0:
-                    print(f"[对准] 目标{digit}不可见，但按动作推算已到位"
-                          f"（纵向 {fwd:+.1f}cm、横向 {lat:+.1f}cm）"
-                          f"→ 交由低头档颜色判据裁决")
-                    self._target_seen = True
-                    return True
         print(f"[对准] 目标{digit}反复丢失，本轮对准收手（稍后换办法重试本格）")
         return False
     def _find_target_panel(self, digit, pitch=PITCH_NAV, head=None):
@@ -557,37 +548,16 @@ class NineGridThreeStageLevel(NineGridShared):
                 print(f"[搜索] 面板{digit} 在低头档找到（第 {rnd + 1} 轮，"
                       f"用掉 {frames} 帧）")
                 return seen_down[0], seen_down[1]
-            # 按死推提示转向（提示无效时固定左转）：**按提示大小转足**，
-            # 一次转 1~5 个大转步（22~129°）——动作不花帧，只有头部扫花帧，
-            # 这样"目标在身后 180°"也能两轮内覆盖到。
-            hint_rel = (self.target_relative(digit)
-                        if digit in self.digit_cell else None)
-            hint = hint_rel[2] if hint_rel is not None else 0.0
-            if abs(hint) < 5.0:
-                hint = -TURN_LEFT_DEG      # 负 = 目标在左侧 → 左转
-            k = int(np.clip(round(abs(hint) / TURN_RIGHT_DEG), 1, 5))
-            self._act("turn_right" if hint > 0 else "turn_left", k)
+            # ★ 2026-09-28：**死推被扬弃** ⇒ 搜索转向与"盲走"都不再用位姿推算：
+            #   · 转向固定**左转**（与统一决策同款单向扫，实测不会朝错方向连转）；
+            #   · 不再"按推算距离盲走近目标"——那是拿一个已经不可信的位姿当作
+            #     行动依据。目标没进视野就继续扫，扫够额度由外层换方向重试本格。
+            k = int(np.clip(round(abs(-TURN_LEFT_DEG) / TURN_RIGHT_DEG), 1, 5))
+            self._act("turn_left", k)
             frames += 1
-            # 盲走近目标（死推指引，动作不花帧）：地板形变会把可见地面带整体
-            # 推走（±15° → 可见带在 0~50cm 与 19~184cm 间摆动），此时目标
-            # 可能压根不在任何俯仰档的视野里，只能先走近再由视觉接管。
-            fwd_rel = (self.target_relative(digit)
-                       if digit in self.digit_cell else None)
-            if fwd_rel is not None:
-                fwd = fwd_rel[0]
-                if fwd > FIND_BLIND_CM:
-                    if blind_cm >= FIND_BLIND_TOTAL_CM:
-                        print(f"[搜索] 面板{digit} 按动作推算已盲走累计 {blind_cm:.0f}cm 仍未入"
-                              f"视野（上限 {FIND_BLIND_TOTAL_CM:.0f}cm）"
-                              "→ 终止（不再继续盲走，位姿提示已不可信）")
-                        break
-                    n = int(np.clip(round((fwd - FIND_BLIND_CM) / 4.0
-                                          / FORWARD_ONE_STEP_CM),
-                                    1, FIND_BLIND_MAX_STEPS))
-                    print(f"[搜索] 面板{digit} 未进入视野（按动作推算纵向 {fwd:.0f}cm）"
-                          f"→ 盲走 {n} 步")
-                    self._act("go_forward_one_step", n)
-                    blind_cm += n * FORWARD_ONE_STEP_CM
+            # ★ 2026-09-28：原来这里还有一段"按死推纵向距离盲走近目标"（`fwd` 来自
+            #   `target_relative` ⇒ 读死推位姿）——**已删除**。盲走是拿不可信位姿
+            #   当行动依据；目标没进视野就继续扫，扫够额度由外层换方向重试本格。
         print(f"[搜索] 面板{digit} 搜索次数用尽（共 {frames} 帧）")
         return None
     def _turn_to_face_target(self, digit, max_iters=6, first_seen=None):
@@ -953,25 +923,9 @@ class NineGridThreeStageLevel(NineGridShared):
                                           else "turn_left_small_step", 1)
                             lat_fixes += 1
                             continue
-                # 第二个独立判据：**死推到位即停压**（见 ARRIVE_STOP_FORWARD_CM）。
-                # 它让"踩到格心"这件事不完全依赖颜色曲线的形状——相机俯仰被地板
-                # 形变改掉时，颜色判据可能永远不回落（实测前压 44cm 仍不回落），
-                # 而死推距离不受俯仰影响。任一判据成立即到位，依据写清哪一条。
-                if digit in self.digit_cell:
-                    fwd_now, lat_now, _bn = self.target_relative(digit)
-                    if abs(fwd_now) <= ARRIVE_STOP_FORWARD_CM \
-                            and abs(lat_now) <= ARRIVE_FALLBACK_SIDE_CM:
-                        self._note_dead_reckoning_hit("stop", digit, fwd_now, lat_now)
-                        ev_txt = (f"峰值帧色块占画幅 {peak_cover:.3f}"
-                                  f"（高宽比 {ev_aspect_best:.2f}）")
-                        self._arrive_evidence = (
-                            f"按动作推算已到位（纵向 {fwd_now:+.1f}、"
-                            f"横向 {lat_now:+.1f}cm；已前压 {press_cm:.0f}cm；"
-                            f"颜色占比峰值 {peak:.4f} 未回落｜"
-                            f"{ev_txt}｜到达判断条件拒止 {ev_reject} 次）")
-                        print(f"[到达] 按动作推算已到位（纵向 {fwd_now:+.1f} "
-                              f"横向 {lat_now:+.1f}cm）→ 判定到达")
-                        return True
+                # ★ 2026-09-28：**死推被扬弃** ⇒ 原来"按死推距离到位即停压"的
+                #   第二条判据**已删除**（它读 `target_relative`，即读死推位姿）。
+                #   现在"踩到格心"只由**视觉**判：颜色占比曲线 + 高宽比等画面量。
                 # 步长自适应：占比**还在涨**时用 3 步批量（≈8cm）赶路，一旦不再涨
                 # （到峰/过峰）改单步（2.652cm）精停。实测：用"与峰值比"判据会
                 # 在爬升段误判成"接近峰值"而一路单步挪（占比 0.06→0.13 花了
@@ -990,26 +944,10 @@ class NineGridThreeStageLevel(NineGridShared):
                 self._act("go_forward_one_step", press_steps)
             print(f"[到达] 循环次数／前压额度用尽（峰值占比 {peak:.4f}，"
                   f"已前压 {press_cm:.0f}cm）")
-            # 兜底：视觉判据没走完（例如峰值后占比掉得不够）时，用**死推距离**
-            # 复核——位姿每格到达后已重置，短程死推（≤1格）精度足够。
-            # ⚠️ 没有地图（布局扫失败/被关掉）时 target_relative 返回 None：
-            #    这条兜底只能弃权，不能崩（2026-09-28 修）。
-            rel = self.target_relative(digit)
-            if rel is not None:
-                fwd, lat, _b = rel
-            else:
-                print("[到达] 无格心映射（布局扫失败/已关）→ 死推距离兜底弃权")
-                return False
-            if abs(fwd) <= ARRIVE_FALLBACK_CM \
-                    and abs(lat) <= ARRIVE_FALLBACK_SIDE_CM:
-                self._note_dead_reckoning_hit("fallback", digit, fwd, lat)
-                self._arrive_evidence = (
-                    f"按动作推算距离兜底（纵向 {fwd:+.1f}、横向 {lat:+.1f}cm；"
-                    f"已前压 {press_cm:.0f}cm 后占比仍未回落，"
-                    f"峰值 {peak:.4f}）")
-                print(f"[到达] 按动作推算距离兜底判定到位（纵向 {fwd:+.1f} "
-                      f"横向 {lat:+.1f}cm）")
-                return True
+            # ★ 2026-09-28：**死推被扬弃** ⇒ 原来这里"用死推距离兜底复核到位"
+            #   的整段**已删除**。视觉判据没走完就是没到位——交回外层换办法重试
+            #   本格，而不是拿推算位置宣布到达。
+            print("[到达] 视觉判据未成立 → 本次到达收手（不采用任何位姿推算兜底）")
             return False
         finally:
             self.state.set_pitch(PITCH_NAV)
@@ -1062,35 +1000,25 @@ class NineGridThreeStageLevel(NineGridShared):
                     print(f"[复核] 格{cell} 近距数字模型判定为 {o.model_digit}"
                           f"({o.model_conf:.2f}) vs 颜色={digit}——{verdict}")
         self.state.act("stand")
-        # 落点残差：位姿此刻仍是死推值（_reanchor_pose 在返回后才重置），
-        # 所以这是"机器人与期望格心的差距"的独立估计，不是自证。
+        # ★ 2026-09-28：**死推被扬弃** ⇒ 这里不再用 `target_relative`（读死推位姿）
+        #   估"落点残差"。真机没有真值就如实报"无数据"，不拿推算数字充数。
         resid = None
-        if digit in self.digit_cell:
-            fwd, lat, _b = self.target_relative(digit)
-            resid = float(np.hypot(fwd, lat))
-            self._cell_arrive_resid_cm = resid
-        shaky = "  警告: 距格心超过半格，按钮可能未压到" \
-            if (resid is not None and resid > GRID_CELL_CM / 2) else ""
-        resid_txt = "无数据（无格心映射）" if resid is None else f"{resid:.1f}cm"
         print(f"[确认] 面板{digit} 已压过格心｜判定依据: {self._arrive_evidence or '无'}"
-              f"｜距格心 {resid_txt}{shaky}")
+              f"｜距格心 无数据（真机无真值；死推已扬弃）")
         print("[确认] 微动开关状态在 Pi 侧不可读——是否触发以场地计分为准")
         return True
     def _reanchor_pose(self, digit):
-        """到达后把位置压回格心，航向不动（老办法就是这么跑的）
+        """（**2026-09-28 起：死推被扬弃，本方法不再写位姿，只打一行参考日志**）
 
-        三段式的到达由它自己那套判据负责（`_walk_until_underfoot` +
-        `_press_switch`），位姿只用来选方向，所以这里只重置位置。
-        用视觉+地图反推位姿是统一决策那边的事，见 levels/nine_grid.py。
+        历史：到达后把位置"重置为格心"（`self.pose = [格心, 原航向]`）——那正是
+        拿"以为的格心"冒充定位。现在 `self.pose` 既不推进也不改写；真机没有真值，
+        落点就如实报"无数据"。统一决策那边的视觉+地图反推是另一条路
+        （`levels/nine_grid.py` 的 `_reanchor_pose`），地图总开关默认关闭。
         """
         if digit not in self.digit_cell:
             return
-        resid = self._cell_arrive_resid_cm
         c = grid_cell_center(self.digit_cell[digit])
-        self.pose = np.array([c[0], c[1], self.pose[2]])
-        print(f"[锚定] 位置重置为格心 {c[0]:.0f},{c[1]:.0f}"
-              f"（航向保持 {np.degrees(self.pose[2]):.1f}°"
-              f"{'' if resid is None else f'，距格心 {resid:.1f}cm'}）")
+        print(f"[锚定] **不写位姿**（死推已扬弃）——参考格心 {c[0]:.0f},{c[1]:.0f}")
     def _big_turn(self, bearing):
         """大步转向兜底：量化到 22°/25.7°，过冲由下一轮闭环吸收
 

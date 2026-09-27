@@ -1286,10 +1286,13 @@ class NineGridLevel(NineGridShared):
                   f"{anc.get('cam_height_cm', float('nan')):.0f}cm）"
                   f"｜对照格心 {c[0]:.0f},{c[1]:.0f}")
             return
-        self.pose = np.array([c[0], c[1], self.pose[2]])
-        print(f"[锚定] 地图锚不可用 → 退回'格心 + 原航向'"
-              f"（格心 {c[0]:.0f},{c[1]:.0f}"
-              f"{'' if resid is None else f'，距格心 {resid:.1f}cm'}）")
+        # ★ 2026-09-28：**死推被扬弃** ⇒ 原来这里"地图锚不可用 → 退回'格心+原航向'"
+        #   的那次写位姿**已删除**：那是拿"以为的格心"当位置写回 `self.pose`，
+        #   等于让死推继续冒充定位。现在锚不可用就什么都不做（`self.pose` 不再
+        #   被写、也不再被推进），并把"测不到"如实打出来。
+        print(f"[锚定] 地图锚不可用 → **不写位姿**（死推已扬弃）"
+              f"（参考格心 {c[0]:.0f},{c[1]:.0f}"
+              f"{'' if resid is None else f'，上次记录的距格心 {resid:.1f}cm'}）")
 
 
 def run_level(state):
