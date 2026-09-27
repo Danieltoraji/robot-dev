@@ -239,16 +239,26 @@ class RobotState:
     # 头部舵机控制
     # -----------------------------------------------------------------
 
-    def set_head(self, pulse, move_time_ms=HEAD_MOVE_TIME_MS):
+    def set_head(self, pulse, move_time_ms=HEAD_MOVE_TIME_MS, force=False):
         """转动头部舵机并等待到位；目标与当前位置相同则跳过。
 
         需要旋转时，按脉宽差（角度差）动态缩放等待时间。
         900μs≈90°为满量程，最小 HEAD_MOVE_TIME_MIN_MS。
+
+        force=True：即使记录值已经是目标脉宽也**照发一次**，按满量程给等待
+        时间。开场初始化必须用它——`__init__` 把 current_head_pulse 预设成
+        1500，若舵机实际不在中位（刚上电、刚换过舵机、被手掰过），普通调用
+        会因为"已在目标位"直接 return，**一次脉冲都发不出去**，后面所有
+        几何全错而且看不出来。
         """
-        if pulse == self.current_head_pulse:
+        if pulse == self.current_head_pulse and not force:
             return  # 已在目标位置，无需等待
-        delta = abs(pulse - self.current_head_pulse)
-        dynamic_time = max(HEAD_MOVE_TIME_MIN_MS, int(move_time_ms * delta / 900))
+        if force:
+            dynamic_time = move_time_ms
+        else:
+            delta = abs(pulse - self.current_head_pulse)
+            dynamic_time = max(HEAD_MOVE_TIME_MIN_MS,
+                               int(move_time_ms * delta / 900))
         ctl.set_pwm_servo_pulse(2, pulse, dynamic_time)
         time.sleep(dynamic_time / 1000.0 + 0.2)
         self.current_head_pulse = pulse
@@ -257,15 +267,17 @@ class RobotState:
         """转动头部至 PITCH_UP_PULSE（固定抬头；外参标定须与此俯仰一致）"""
         ctl.set_pwm_servo_pulse(1, PITCH_UP_PULSE, 500)
 
-    def set_pitch(self, pulse, move_time_ms=500):
+    def set_pitch(self, pulse, move_time_ms=500, force=False):
         """俯仰舵机（ID1）通用控制：1500=水平，可调约 950~2000，越小越低头
 
         与目标脉宽相同则跳过；转动后按转动时长等待舵机到位。
         （数字宫格等需要多俯仰档切换的关卡使用；AprilTag 关卡仍用 raise_head。）
+
+        force=True：同 set_head，开场初始化用，保证脉冲一定下发。
         """
         if ctl is None:
             return
-        if pulse == self.current_pitch_pulse:
+        if pulse == self.current_pitch_pulse and not force:
             return
         ctl.set_pwm_servo_pulse(1, pulse, move_time_ms)
         time.sleep(move_time_ms / 1000.0 + 0.3)
