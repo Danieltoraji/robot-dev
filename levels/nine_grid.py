@@ -77,6 +77,7 @@ from core.ground_homography import (
 from vision.nine_grid_detector import (
     build_color_mask,
     normalize_illumination,
+    pick_same_color,
 )
 
 
@@ -333,6 +334,10 @@ FIND_STRIDE = 1             # 每丢几帧转一步
 #                    25→0.126｜20→0.137｜15→0.147（此后随裁切不再增）
 FORWARD_COVER_MID = 0.085          # < 此值（≈42cm 以外）走大步
 FORWARD_COVER_NEAR = 0.115         # < 此值（≈30cm 以外）走中步；≥ 此值恒 1 步
+# ★ 目标丢失后的搜索小转：**一次发几步**（2026-09-28 用户要求：改成一次 3 步）
+#   原来一次 1 步、每步拍帧复测 ⇒ 目标在身后要磨十几轮。3 步 ≈15.5~25.9°
+#   （左 8.625°/右 5.200° × 3），远小于 ±33.7° 半视场，不会跳过视野。
+SEARCH_TURN_STEPS = 3
 FORWARD_FAR_STEPS = 5            # 远距一次前进步数（5×2.652 ≈ 13cm）
 FORWARD_MID_STEPS = 3            # 中距一次前进步数（3×2.652 ≈ 8cm）
 # ★ 2026-09-28：从**参考原版**搬回来的"前进不力 ⇒ 跨步"机制。
@@ -1115,11 +1120,17 @@ class NineGridLevel(NineGridShared):
         want_left = self._reacq_dir > 0.0
         step = TURN_LEFT_SMALL_DEG if want_left else -TURN_RIGHT_SMALL_DEG
         act = "turn_left_small_step" if want_left else "turn_right_small_step"
+        # ★ 2026-09-28 用户要求：**找不到目标的小转一次发 3 步**（原来一次 1 步，
+        #   每步都要拍一帧复测 ⇒ 目标在身后时要磨十几轮）。
+        #   实际转角 = 3 × (左 8.625° / 右 5.200°) ≈ 15.5~25.9°，
+        #   比相机横向视场（±33.7° 半视场）小得多，不会跳过视野。
         turns += 1
-        print(f"[重捕获] 面板{digit} 连续 {lost} 帧未见 → {action_name_cn(act)}"
-              f"（第 {turns} 步，已转 {self._reacq_deg:.0f}°）")
-        self._act(act, 1)
-        return turns, step
+        print(f"[重捕获] 面板{digit} 连续 {lost} 帧未见 → "
+              f"{action_name_cn(act, SEARCH_TURN_STEPS)}"
+              f"（第 {turns} 次，累计{action_name_cn(act, SEARCH_TURN_STEPS)}"
+              f"≈{self._reacq_deg:.0f}°）")
+        self._act(act, SEARCH_TURN_STEPS)
+        return turns, step * SEARCH_TURN_STEPS
     def _zone_masks(self, w, h):
         """把示意图四块区域栅格化成布尔掩膜（按画幅尺寸缓存，只算一次）
 
@@ -1185,7 +1196,7 @@ class NineGridLevel(NineGridShared):
         sh = self._zone_shares(frame, color)
         obs_l = self.detector.detect_panels(
             frame, colors=[color], arbitrate=False, drop_border=False)
-        o = max(obs_l, key=lambda x: x.hull_area) if obs_l else None
+        o = pick_same_color(obs_l)
         out = {"obs": o, "frame": frame, "shares": sh,
                "w": float(frame.shape[1]), "h": float(frame.shape[0]),
                "px": None, "py": None, "box": 0.0}
