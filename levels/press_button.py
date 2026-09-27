@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """机器人智按按钮：拍照识别层 + 动作库常量。
-
+调参地点在第178行。
 识别层：拍照 → apriltag 库识别 → 返回 {id: 四角}。只跑真机，不留 PC 分支。
 """
 
@@ -177,7 +177,7 @@ target_defaults = dict(
 )
 # 每个目标的独立覆盖（只写要改的那几个，其余继承 target_defaults）
 target_overrides = {
-    102: dict(press_low_cm=20.0, press_high_cm=23.0),
+    102: dict(press_low_cm=18.0, press_high_cm=21.0),
     101: dict(press_low_cm=20.0, press_high_cm=23.0),
 }
 
@@ -530,6 +530,8 @@ def press_button(state, tag_id):
         state.act(action, times)
 
         if action == A_PRESS:
+            state.act(A_BACK)                # 后退一步脱离
+            state.act(A_PRESS)                # 再按一次，保险
             state.act(A_BACK)                # 后退一步脱离
             state.set_head(HEAD_CENTER)
             print("[按按钮][%d] 已按下，后退脱离，完成" % tag_id)
