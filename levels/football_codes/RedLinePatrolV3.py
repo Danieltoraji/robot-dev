@@ -9,6 +9,7 @@ detect_red_line()、roi、MIN_CONTOUR_AREA、calibration_param_path。
 算法与参数与 V2 保持一致。
 """
 
+import os
 import sys
 import cv2
 import time
@@ -16,11 +17,24 @@ import math
 import threading
 import numpy as np
 
-import hiwonder.Camera as Camera
-import hiwonder.ros_robot_controller_sdk as rrc
-from hiwonder.Controller import Controller
-import hiwonder.ActionGroupControl as AGC
-import hiwonder.yaml_handle as yaml_handle
+# hiwonder SDK 仅存在于机器人上。Windows 导入失败时进入离线模式：
+# 视觉与决策（run()/decide_action()）仍可被 PC 模拟器离线调用，
+# 运动线程不启动，比赛代码在机器人上的行为不变。
+try:
+    import hiwonder.Camera as Camera
+    import hiwonder.ros_robot_controller_sdk as rrc
+    from hiwonder.Controller import Controller
+    import hiwonder.ActionGroupControl as AGC
+    import hiwonder.yaml_handle as yaml_handle
+    HARDWARE_AVAILABLE = True
+except ImportError:
+    Camera = None
+    rrc = None
+    Controller = None
+    AGC = None
+    yaml_handle = None
+    HARDWARE_AVAILABLE = False
+    print('RedLinePatrolV3：未找到 hiwonder SDK，进入离线模式（不启动运动线程）', flush=True)
 
 if sys.version_info.major == 2:
     print('Please run this program with python3!')
@@ -97,9 +111,25 @@ CORNER_DEBUG_INTERVAL = 0.5       # 调试打印节流：每隔多久打印一�
 # 横条残留说明转弯没转够、朝原方向小步微调；横条消失（面对直道）连续数帧后恢复。
 POST_TURN_CLEAR_FRAMES = 5        # 连续 horizontal_seen=False 多少帧才认定已面对直道
 POST_TURN_MAX_EXTRA_TURNS = 12    # 横条残留时最多额外小步微调次数（防卡死）
+POST_TURN_MIN_FORWARD_STEPS = 3   # 转弯完成后，前进/横移累计达到此次数才允许触发
+                                  # 下一个路口：保证转完弯必须真正驶离路口，防止残留
+                                  # 横条在弯口原地连转漏弯。残留横条随前进自然退场，
+                                  # 真路口的横条随接近变深，无需硬编码时间或距离。
 
 # 赛道固定，转弯顺序提前写死（从起点开始，依次对应每个路口的转向）
 CORNER_TURN_SEQUENCE = ['left', 'right', 'right', 'left']
+
+# 与 CORNER_TURN_SEQUENCE 平行：对应弯在触发转弯后、主转之前先前进
+# CORNER_PRE_TURN_FORWARD_STEPS 步，把转身支点推进到路口——横条深度信号
+# 被机器人身体遮挡时触发会偏早约 1 步，第 2/3/4 弯实测如此；弯 1 已验证
+# 不偏早，保持 False。
+CORNER_PRE_TURN_FORWARD = (False, True, True, True)
+# 横条驱动的弯前前进：触发转弯后继续前进，直到横条消失（横条随接近而
+# 填充率/宽度坍塌，消失=已走到路口上方），再经 corner_pending 锁存多走
+# 约 1 步后原地主转。步数随每个弯的实际距离自适应；上限
+# CORNER_PRE_TURN_FORWARD_MAX_STEPS 步兜底，防止横条与场地红色连成片、
+# 永不消失时一直前进。前进过头仍在线上，比支点偏早（转完离线）安全。
+CORNER_PRE_TURN_FORWARD_MAX_STEPS = 4
 
 # 转弯采用「主转固定步数 + 精修」两阶段：
 #   主转按标定角度（左 22°/次、右 25.7°/次）转到接近 90°——左 4 步≈88°、
@@ -116,6 +146,15 @@ CORNER_MAIN_STEPS_RIGHT = 4       # 右转主转步数：4×25.7°≈103°。曾
                                   # 231° 过冲。4 步 103° 更稳地跳过转弯中间（弯1 左转 4 步
                                   # 88° 已验证竖线可靠出现）。
 CORNER_FINE_MAX_STEPS = 6         # 精修阶段最多步数（未转够用大步，横条残留与转过用小步）
+
+# 转弯节奏与提速：主转开环不看视觉，每步只需等动作完成；精修每步只需
+# 一张新帧（15fps 下足够），正常巡线仍用 NORMAL_ACTION_SETTLE=1.0。
+# 注意：0.3/0.5 曾导致弯3转完丢线未找回（机器人未停稳/视觉未稳定嫌疑），
+# 暂回退到 1.0 与正常巡线一致，定位元凶后再逐步调小。
+TURN_MAIN_STEP_SETTLE = 1.0
+TURN_FINE_STEP_SETTLE = 1.0
+FINE_SMALL_STREAK_ESCALATE = 2    # 连续小步转弯达到此次数仍未明显改善 -> 升级一次同方向大步
+FINE_SMALL_PROGRESS_MIN = 3.0     # 小步窗口内误差（px）改善小于此值视为"效果不够明显"
 CORNER_EXIT_HEADING_PX = 20.0     # 转弯完成判据：前方竖线 heading 绝对值 ≤ 此值视为已对准新方向
                                   # （正常直线循迹 heading 在 ±20px 内，精细对齐交给后续循迹）。
 CORNER_MIN_VERTICAL_SPAN = 40.0   # 前方竖线存在的判据：direction_samples 的垂直跨度需 ≥ 此值，
@@ -143,6 +182,14 @@ SEARCH_OBSERVE_SECONDS = 1.0
 
 HEAD_TILT_OFFSET = 40
 SHOW_DISPLAY = False
+
+# 调试帧保存（默认关闭，不影响比赛运行）：置 True 后把每一帧校正后图像
+# 存到 DEBUG_SAVE_DIR，供 PC 端 test_programs_NoUseInMain/redline_route_debug.py
+# 离线复盘（demoV4 与独立运行都经过 run()，两条路径均覆盖）。
+# PC 拉取：python tools/pull_from_robot.py --remote /home/pi/codes/pictures/patrol --dest <本地目录>
+SAVE_DEBUG_FRAMES = False
+DEBUG_SAVE_DIR = '/home/pi/codes/pictures/patrol'
+DEBUG_SAVE_EVERY_N = 1
 # ==================================
 
 # V3 总控接口：脚下红线轮廓最小面积（与 demoV4.py PatrolEndDetector 配合）。
@@ -155,8 +202,12 @@ roi = (
 )
 
 
-board = rrc.Board()
-ctl = Controller(board)
+if HARDWARE_AVAILABLE:
+    board = rrc.Board()
+    ctl = Controller(board)
+else:
+    board = None
+    ctl = None
 servo_data = None
 
 enter = False
@@ -168,6 +219,7 @@ line_lost_time = 0
 turn_started = False
 approach_active = False
 corner_ready = False
+search_active = False     # 丢线搜索进行中（demoV4 终点判定据此屏蔽候选终点）
 last_turn_completed_at = 0.0  # 最近一次路口转弯完成时间（monotonic），终点判定冷却期用
 
 _state_lock = threading.Lock()
@@ -245,6 +297,7 @@ def reset():
     global _corner_index
     global _corner_direction, _corner_offset_x
     global line_center_x, line_lost_time, turn_started, approach_active, corner_ready
+    global search_active
     global last_turn_completed_at
 
     with _state_lock:
@@ -263,6 +316,7 @@ def reset():
         turn_started = False
         approach_active = False
         corner_ready = False
+        search_active = False
         last_turn_completed_at = 0.0
 
 
@@ -406,6 +460,7 @@ def analyze_path_samples(samples):
     max_width_y = 0
     max_width_left_x = 0
     max_width_right_x = 0
+    max_width_fill_ratio = 0.0
     for sample_y, _, left_x, right_x, count in samples:
         width = right_x - left_x
         if width > max_width:
@@ -413,6 +468,8 @@ def analyze_path_samples(samples):
             max_width_y = sample_y
             max_width_left_x = left_x
             max_width_right_x = right_x
+            max_width_fill_ratio = (count / (width * SAMPLE_BAND_HEIGHT)
+                                    if width > 0 else 0.0)
         if width >= HORIZONTAL_MIN_WIDTH:
             fill_ratio = (count / (width * SAMPLE_BAND_HEIGHT)
                           if width > 0 else 0.0)
@@ -448,6 +505,9 @@ def analyze_path_samples(samples):
         'sample_count': len(samples),
         'max_width': max_width,
         'max_width_y': max_width_y,
+        'max_width_left_x': max_width_left_x,
+        'max_width_right_x': max_width_right_x,
+        'max_width_fill_ratio': max_width_fill_ratio,
     }
 
 
@@ -559,349 +619,568 @@ def observe_for_line(timeout):
     return False
 
 
-def move():
-    global turn_started, last_turn_completed_at
-    last_handled_frame = -1
-    last_visible_state = empty_vision_state()
-    search = LostLineSearch()
-    search_exhausted_reported = False
-    last_action_label = ''
-    last_turn_direction = 0
-    last_turn_error = None
-    no_progress_turns = 0
-    turn_hold_reported = False
-    no_line_since = 0
-    ever_seen_line = False
-    post_turn_active = False
-    post_turn_direction = 0
-    post_turn_clear_frames = 0
-    post_turn_extra_turns = 0
+class Decision:
+    """decide_action 的返回值：本轮要执行的动作计划与等待/观察指令。
 
+    真机 move() 执行器与离线模拟器共用：actions 逐条执行（每条可带 settle
+    睡眠），wait>0 表示本轮不执行动作、等待后重新决策，observe 表示动作
+    执行完后按 SEARCH_OBSERVE_SECONDS 观察红线（丢线搜索用）。
+    """
+    def __init__(self):
+        self.actions = []       # [(action_name, times, with_stand, settle), ...]
+        self.wait = 0.0         # 本轮不执行动作，等待该秒数后重新决策
+        self.settle_after = 0.0 # 全部动作执行完后的额外睡眠
+        self.observe = False    # 动作执行完后观察红线（丢线搜索用）
+        self.search_count = 0   # observe 命中的搜索次数（供打印）
+        self.label = ''         # 本轮决策描述（模拟器显示用）
+
+
+class PatrolSession:
+    """move() 决策链的跨帧会话状态（纯数据，无硬件）。
+
+    模拟器与真机 move() 共用同一份状态定义，保证离线回放与真机行为一致。
+    corner_index 在"暂停巡线"（running=False）期间保留，与重构前模块级
+    _corner_index 的保留语义一致（patrol_end_recovery 漏弯恢复依赖它）。
+    """
+    def __init__(self):
+        self.last_handled_frame = -1
+        self.last_visible_state = empty_vision_state()
+        self.search = LostLineSearch()
+        self.search_exhausted_reported = False
+        self.last_action_label = ''
+        self.last_turn_direction = 0
+        self.last_turn_error = None
+        self.no_progress_turns = 0
+        self.turn_hold_reported = False
+        self.no_line_since = 0
+        self.ever_seen_line = False
+        self.post_turn_active = False
+        self.post_turn_direction = 0
+        self.post_turn_clear_frames = 0
+        self.post_turn_extra_turns = 0
+        # 转弯后前进进度：最近一次转弯完成后，累计执行的前进/横移动作次数。
+        # 达到 POST_TURN_MIN_FORWARD_STEPS 才允许触发下一个路口，防止
+        # 残留横条在弯口原地连转漏弯（初始化即达标：尚未转过弯）。
+        self.post_turn_progress_steps = POST_TURN_MIN_FORWARD_STEPS
+        self.corner_index = 0
+        # 转弯状态机（重构抽取：原 move() 的主转+精修拆成逐帧决策）
+        self.turn_active = False
+        self.turn_corner = 0
+        self.turn_steps = 0
+        self.turn_main_steps_total = 0
+        self.turn_fine_remaining = 0
+        self.turn_pre_forward_remaining = 0   # 转弯前还需前进几步（仅查表指定的弯）
+        self.turn_main_issued = False         # 主转固定步数是否已下发
+        self.turn_small_streak = 0            # 连续小步转弯计数（升级大步用）
+        self.turn_streak_base_error = 0.0     # 小步序列起始误差（px）
+
+    def reset(self, keep_corner_index=False):
+        corner_index = self.corner_index if keep_corner_index else 0
+        self.__init__()
+        self.corner_index = corner_index
+
+
+def _finish_turn(session, now, decision):
+    """转弯主转+精修全部结束后的收尾，与重构前 move() 转弯完成段一一对应。"""
+    global turn_started, last_turn_completed_at
+    turn_started = False
+    last_turn_completed_at = now
+    print('V3 巡线：路口{}转弯{}步（主{}步+精修{}步）'.format(
+        session.corner_index + 1, session.turn_steps,
+        session.turn_main_steps_total,
+        session.turn_steps - session.turn_main_steps_total))
+    session.post_turn_active = True
+    session.post_turn_direction = session.turn_corner
+    session.post_turn_clear_frames = 0
+    session.post_turn_extra_turns = 0
+    # 转弯刚完成：清零前进进度，必须先真正驶离路口（前进/横移累计
+    # POST_TURN_MIN_FORWARD_STEPS 次）才允许触发下一个路口。
+    session.post_turn_progress_steps = 0
+    session.corner_index += 1
+    clear_pending_corner()
+    session.last_turn_direction = 0
+    session.last_turn_error = None
+    session.no_progress_turns = 0
+    session.turn_hold_reported = False
+    session.turn_active = False
+    decision.settle_after = NORMAL_ACTION_SETTLE
+    decision.label = '路口{}转弯完成'.format(session.corner_index)
+
+
+def _decide_turn_fine_step(state, session, now, decision):
+    """转弯进行中的一步决策：对应重构前 move() 精修 for 循环的一次迭代。
+
+    真机上每帧调用一次，等价于原循环内每次 get_vision_state() 后推进一步；
+    模拟器逐帧喂图，自然推进精修直至完成。连续小步改善不足时升级为同方向
+    大步一次，加速收敛。
+    """
+    vis = state.get('visible', False)
+    span = state.get('vertical_span', 0.0)
+    raw_h = state.get('raw_heading', 0.0)
+    hc = state.get('horizontal_corner', False)
+
+    if session.turn_fine_remaining <= 0:
+        _finish_turn(session, now, decision)
+        return decision
+
+    # 完成：前方竖线存在且已正对。
+    if (vis and span >= CORNER_MIN_VERTICAL_SPAN and
+            abs(raw_h) <= CORNER_EXIT_HEADING_PX):
+        print('V3 转弯精修：第{}步 完成 span={:.0f} raw_h={:.1f}'.format(
+            session.turn_steps, span, raw_h))
+        _finish_turn(session, now, decision)
+        return decision
+
+    vertical_usable = vis and span >= CORNER_MIN_VERTICAL_SPAN
+    error = (abs(raw_h) if vertical_usable
+             else abs(state.get('corner_offset_x', 0.0)))
+    small_action = None   # 本轮若用小步时的动作
+    big_action = None     # 同方向大步（小步改善不足时升级用）
+
+    if vertical_usable:
+        # 竖线出现但未正对。符号判据（与 line_seeker 的
+        # turn_sign*heading<0 等价，因 corner_turn 右=+1、
+        # 左=-1 恰与 turn_sign 相反）：
+        #   corner_turn*raw_h>0 → 未转够（线在转弯侧）→ 续转大步
+        #   corner_turn*raw_h<0 → 转过（线在反侧）→ 反向小步回摆
+        if session.turn_corner * raw_h > 0:
+            print('V3 转弯精修：第{}步 未转够续转 span={:.0f} raw_h={:.1f}'.format(
+                session.turn_steps, span, raw_h))
+            step_action = turn_action_for(session.turn_corner)
+            session.turn_small_streak = 0
+        else:
+            print('V3 转弯精修：第{}步 转过回摆 span={:.0f} raw_h={:.1f}'.format(
+                session.turn_steps, span, raw_h))
+            small_action = small_turn_action_for(-session.turn_corner)
+            big_action = turn_action_for(-session.turn_corner)
+    elif hc:
+        # 横条还在：转弯中间竖线不可见、heading 失效，改用
+        # 横条中点相对主线中心的偏移 offset_x 判向：
+        #   corner_turn*offset_x > 死区 → 没转够 → 续转大步
+        #   corner_turn*offset_x < -死区 → 转过 → 回摆小步
+        #   |offset_x| ≤ 死区 → 横条对中 → 小步续转（保守）
+        offset_x = state.get('corner_offset_x', 0.0)
+        if session.turn_corner * offset_x > CORNER_DIRECTION_DEADBAND:
+            print('V3 转弯精修：第{}步 横条偏侧续转 offset={:.0f}'.format(
+                session.turn_steps, offset_x))
+            step_action = turn_action_for(session.turn_corner)
+            session.turn_small_streak = 0
+        elif session.turn_corner * offset_x < -CORNER_DIRECTION_DEADBAND:
+            print('V3 转弯精修：第{}步 横条反侧回摆 offset={:.0f}'.format(
+                session.turn_steps, offset_x))
+            small_action = small_turn_action_for(-session.turn_corner)
+            big_action = turn_action_for(-session.turn_corner)
+        else:
+            print('V3 转弯精修：第{}步 横条对中小步续转 offset={:.0f}'.format(
+                session.turn_steps, offset_x))
+            small_action = small_turn_action_for(session.turn_corner)
+            big_action = turn_action_for(session.turn_corner)
+    else:
+        # 无横条无竖线：可能转过或短暂丢线，停止精修。
+        print('V3 转弯精修：第{}步 无线停止 span={:.0f} raw_h={:.1f}'.format(
+            session.turn_steps, span, raw_h))
+        _finish_turn(session, now, decision)
+        return decision
+
+    # 小步→大步升级：连续 FINE_SMALL_STREAK_ESCALATE 次小步、误差改善不足
+    # FINE_SMALL_PROGRESS_MIN 时，本轮升级为同方向大步一次，再回到小步。
+    if small_action is not None:
+        if session.turn_small_streak == 0:
+            session.turn_streak_base_error = error
+            session.turn_small_streak = 1
+            step_action = small_action
+        elif session.turn_streak_base_error - error < FINE_SMALL_PROGRESS_MIN:
+            step_action = big_action
+            print('V3 转弯精修：第{}步 小步改善不足升级大步 err={:.1f}->{:.1f}'.format(
+                session.turn_steps, session.turn_streak_base_error, error))
+            session.turn_small_streak = 0
+        else:
+            step_action = small_action
+            session.turn_small_streak = 0
+
+    session.turn_steps += 1
+    session.turn_fine_remaining -= 1
+    decision.actions = [(step_action, 1, True, TURN_FINE_STEP_SETTLE)]
+    decision.label = '转弯精修第{}步'.format(session.turn_steps)
+    return decision
+
+
+def decide_action(state, session, now):
+    """纯决策：根据当前视觉状态与会话状态，返回本轮动作计划。
+
+    与真机 move() 执行器配套使用，不直接驱动任何硬件；离线模拟器可传入
+    虚拟时间逐帧调用，决策优先级链与打印日志和重构前 move() 完全一致。
+    """
+    global turn_started, search_active
+    decision = Decision()
+
+    # 转弯进行中：先执行转弯前前进（仅查表指定的弯，横条驱动、步数自适应），
+    # 再一次性下发主转，之后逐帧精修。整个转弯过程不受"帧未更新"去重与
+    # 丢线分支影响。
+    if session.turn_active:
+        if session.turn_pre_forward_remaining > 0:
+            # 横条（或 corner_pending 锁存内）仍在视野：继续前进接近路口。
+            if state.get('horizontal_corner') or state.get('corner_pending'):
+                session.turn_pre_forward_remaining -= 1
+                decision.actions = [(FORWARD_ACTION, 1, False, NORMAL_ACTION_SETTLE)]
+                decision.label = '转弯前前进（横条仍在，最多再走{}步）'.format(
+                    session.turn_pre_forward_remaining)
+                return decision
+            # 横条消失：已走到路口上方，本轮直接转入主转。
+            session.turn_pre_forward_remaining = 0
+        if not session.turn_main_issued:
+            session.turn_main_issued = True
+            session.turn_steps = session.turn_main_steps_total
+            decision.actions = [
+                (turn_action_for(session.turn_corner), 1, True,
+                 TURN_MAIN_STEP_SETTLE)
+            ] * session.turn_main_steps_total
+            decision.label = '路口{}向{}转（主转{}步）'.format(
+                session.corner_index + 1,
+                direction_name(session.turn_corner),
+                session.turn_main_steps_total)
+            return decision
+        return _decide_turn_fine_step(state, session, now, decision)
+
+    if state['visible']:
+        session.no_line_since = 0
+        session.ever_seen_line = True
+        session.last_visible_state = state
+        if session.search.active or session.search.exhausted:
+            print('V3 丢线搜索：重新发现红线，恢复巡线')
+            search_active = False
+            clear_pending_corner()
+            session.search.reset()
+            session.search_exhausted_reported = False
+            session.last_handled_frame = state['frame_id']
+            decision.wait = 0.05
+            decision.label = '重新发现红线'
+            return decision
+
+        if state['frame_id'] == session.last_handled_frame:
+            decision.wait = 0.01
+            return decision
+        session.last_handled_frame = state['frame_id']
+
+        center_error = state['near_x'] - IMAGE_CENTER_X
+        heading = state['heading']
+        action = None
+        action_label = ''
+        turn_direction = 0
+        turn_error = 0
+
+        # 转弯后确认期：转弯刚结束画面里可能仍残留横条（corner_ready 持续
+        # True），直接响应会把残留横条误判成下一个路口导致连续转弯。确认期
+        # 内屏蔽 corner_ready：横条残留说明转弯没转够、朝原方向小步微调；
+        # 横条消失（面对直道）连续数帧后才恢复前进与路口检测。
+        corner_ready_flag = state['corner_ready']
+        if session.post_turn_active:
+            corner_ready_flag = False
+            if state['horizontal_corner']:
+                session.post_turn_clear_frames = 0
+                if session.post_turn_extra_turns >= POST_TURN_MAX_EXTRA_TURNS:
+                    session.post_turn_active = False
+                    print('V3 巡线：转弯后确认超次，恢复正常循迹')
+                else:
+                    session.post_turn_extra_turns += 1
+                    # 转弯后横条残留：竖线可见时用 heading 判向；竖线不可见
+                    # （转弯中间）时用横条中点偏移 offset_x 判向，避免盲目
+                    # 前进走出路口（弯2 曾因此前进 4 步走过横条后丢线）。
+                    #   corner_turn*(offset_x)>0 → 没转够 → 续转
+                    #   corner_turn*(offset_x)<0 → 转过 → 回摆
+                    span = state.get('vertical_span', 0.0)
+                    raw_h = state.get('raw_heading', 0.0)
+                    offset_x = state.get('corner_offset_x', 0.0)
+                    if (span >= CORNER_MIN_VERTICAL_SPAN and
+                            abs(raw_h) <= CORNER_EXIT_HEADING_PX):
+                        session.post_turn_active = False
+                        clear_pending_corner()
+                        print('V3 巡线：转弯后竖线正对，恢复正常循迹')
+                        decision.label = '转弯后竖线正对'
+                        return decision
+                    if span >= CORNER_MIN_VERTICAL_SPAN:
+                        # 竖线可见，用 heading 判向
+                        adjust_direction = (session.post_turn_direction
+                                            if session.post_turn_direction * raw_h > 0
+                                            else -session.post_turn_direction)
+                    else:
+                        # 竖线不可见，用横条偏移判向（offset=0 保守续转）
+                        adjust_direction = (session.post_turn_direction
+                                            if session.post_turn_direction * offset_x >= 0
+                                            else -session.post_turn_direction)
+                    action = small_turn_action_for(adjust_direction)
+                    action_label = '转弯确认微调向{}（{}/{}）'.format(
+                        direction_name(adjust_direction),
+                        session.post_turn_extra_turns, POST_TURN_MAX_EXTRA_TURNS)
+                    if action_label != session.last_action_label:
+                        print('V3 巡线：{}'.format(action_label))
+                        session.last_action_label = action_label
+                    decision.actions = [(action, TURN_ACTION_TIMES, True,
+                                         NORMAL_ACTION_SETTLE)]
+                    decision.label = action_label
+                    return decision
+            else:
+                session.post_turn_clear_frames += 1
+                if session.post_turn_clear_frames >= POST_TURN_CLEAR_FRAMES:
+                    session.post_turn_active = False
+                    clear_pending_corner()
+                    print('V3 巡线：转弯后确认完成，恢复正常循迹')
+
+        # 路口触发条件：corner_ready、当前帧真看到横条（排除 corner_pending
+        # 锁存把已消失横条"记忆"成路口），且转完弯后已前进/横移离开路口
+        # 至少 POST_TURN_MIN_FORWARD_STEPS 次（残留横条随前进退场，真路口
+        # 横条随接近变深，二者由前进进度自然区分）。
+        if (corner_ready_flag and state['horizontal_corner']
+                and session.post_turn_progress_steps >= POST_TURN_MIN_FORWARD_STEPS):
+            corner_turn = expected_corner_direction(session.corner_index)
+            visual_dir = state.get('corner_direction', 0)
+            offset_x = state.get('corner_offset_x', 0.0)
+            if (visual_dir != 0 and visual_dir != corner_turn
+                    and abs(offset_x) >= 2 * CORNER_DIRECTION_DEADBAND):
+                # 视觉判向与顺序表强矛盾（高置信）：上一弯很可能没真正转
+                # 过去（支点偏早导致转完离线、漏弯恢复找错弯等），先回退
+                # 一格再查表；仍不吻合则以视觉为准，避免朝错误方向继续转。
+                if session.corner_index > 0:
+                    session.corner_index -= 1
+                    corner_turn = expected_corner_direction(session.corner_index)
+                    print('V3 方向校验：视觉判向{} 与赛道顺序矛盾，回退至路口{}（顺序{}）'.format(
+                        direction_name(visual_dir), session.corner_index + 1,
+                        direction_name(corner_turn)))
+                if visual_dir != corner_turn:
+                    corner_turn = visual_dir
+                    print('V3 方向校验：回退后仍不吻合，改按视觉判向{}转（offset={:.0f}）'.format(
+                        direction_name(visual_dir), offset_x))
+            if corner_turn != 0:
+                if visual_dir != 0 and visual_dir != corner_turn:
+                    print('V3 方向校验：视觉判向{} 与赛道顺序{} 不一致（offset={:.0f}）'.format(
+                        direction_name(visual_dir), direction_name(corner_turn),
+                        offset_x))
+                action_label = '路口{}按顺序执行向{}转 corner_y={:.0f}'.format(
+                    session.corner_index + 1, direction_name(corner_turn),
+                    state['corner_y'])
+                if action_label != session.last_action_label:
+                    print('V3 巡线：{}'.format(action_label))
+                    session.last_action_label = action_label
+                turn_started = True
+                # 转弯两阶段：主转（固定步数开环，接近 90°）→ 精修（竖线
+                # 正对即停）。转弯中间新直道被误判成横条、heading 不可用，
+                # 故主转只看标定角度；精修阶段竖线竖直、heading 可靠。
+                # 第 2/3/4 弯在转弯前先前进（横条驱动：走到横条消失为止，
+                # 步数自适应），把转身支点推进到路口（横条深度信号被身体
+                # 遮挡时会偏早触发）。主转与前进由转弯路由逐帧下发，精修
+                # 由后续帧反复调用推进。
+                main_steps = (CORNER_MAIN_STEPS_LEFT if corner_turn < 0
+                              else CORNER_MAIN_STEPS_RIGHT)
+                session.turn_active = True
+                session.turn_corner = corner_turn
+                session.turn_steps = 0
+                session.turn_main_steps_total = main_steps
+                session.turn_fine_remaining = CORNER_FINE_MAX_STEPS
+                session.turn_main_issued = False
+                session.turn_small_streak = 0
+                session.turn_streak_base_error = 0.0
+                session.turn_pre_forward_remaining = (
+                    CORNER_PRE_TURN_FORWARD_MAX_STEPS
+                    if (session.corner_index < len(CORNER_PRE_TURN_FORWARD)
+                        and CORNER_PRE_TURN_FORWARD[session.corner_index])
+                    else 0)
+                decision.label = '路口{}向{}转（转弯前横条驱动前进）'.format(
+                    session.corner_index + 1, direction_name(corner_turn))
+                return decision
+            else:
+                # 转弯顺序表已用完（到终点），不再理会路口特征，继续直行。
+                action = FORWARD_ACTION
+                action_label = '路口顺序已完成，直行'
+        elif state['horizontal_corner']:
+            # 横条存在（接近路口或转弯后残留）：heading 被横条干扰，转向
+            # 修正会原地打转。改为横向对中：红线中心偏右→右移、偏左→左移；
+            # 已对中则前进（接近路口或走出路口），让横条自然变化。
+            if abs(center_error) >= CENTER_DEADBAND:
+                action = (LATERAL_RIGHT_ACTION if center_error > 0
+                          else LATERAL_LEFT_ACTION)
+                action_label = '路口横移向{}'.format(
+                    direction_name(1 if center_error > 0 else -1))
+            else:
+                action = FORWARD_ACTION
+                action_label = '路口前进'
+        elif abs(heading) >= HEADING_TURN_THRESHOLD:
+            path_direction = 1 if heading > 0 else -1
+            turn_direction = path_direction
+            turn_error = abs(heading)
+            action_label = '实时方向修正执行向{}'.format(
+                direction_name(turn_direction))
+        elif state['corner_pending']:
+            action = FORWARD_ACTION
+            action_label = '接近下一路口'
+        elif (abs(center_error) >= CENTER_DEADBAND and
+              abs(heading) <= VERTICAL_HEADING_TOLERANCE):
+            action = (LATERAL_RIGHT_ACTION if center_error > 0
+                      else LATERAL_LEFT_ACTION)
+            action_label = '横移向{}'.format(
+                direction_name(1 if center_error > 0 else -1))
+        else:
+            action = FORWARD_ACTION
+            action_label = '前进'
+
+        if turn_direction != 0:
+            if (turn_direction == session.last_turn_direction and
+                    session.last_turn_error is not None and
+                    turn_error >= session.last_turn_error - TURN_PROGRESS_MIN):
+                session.no_progress_turns += 1
+            else:
+                session.no_progress_turns = 0
+            session.last_turn_direction = turn_direction
+            session.last_turn_error = turn_error
+
+            if session.no_progress_turns >= MAX_NO_PROGRESS_TURNS:
+                if not session.turn_hold_reported:
+                    print('V3 巡线：连续转向未改善，暂停动作等待视觉变化')
+                    session.turn_hold_reported = True
+                decision.wait = 0.05
+                decision.label = '连续转向未改善，暂停'
+                return decision
+
+            # 直行时的实时方向微调用小转角动作，避免转角过大反复过冲
+            action = small_turn_action_for(turn_direction)
+        else:
+            session.last_turn_direction = 0
+            session.last_turn_error = None
+            session.no_progress_turns = 0
+            session.turn_hold_reported = False
+
+        if action_label != session.last_action_label:
+            print('V3 巡线：{} center={:.0f} heading={:.1f}'.format(
+                action_label, center_error, heading))
+            session.last_action_label = action_label
+        if turn_direction != 0:
+            decision.actions = [(action, TURN_ACTION_TIMES, True,
+                                 NORMAL_ACTION_SETTLE)]
+        else:
+            decision.actions = [(action, 1, False, NORMAL_ACTION_SETTLE)]
+            # 前进/横移计入转弯后前进进度（原地小步微调不计入）。
+            if action in (FORWARD_ACTION, LATERAL_LEFT_ACTION,
+                          LATERAL_RIGHT_ACTION):
+                if session.post_turn_progress_steps < POST_TURN_MIN_FORWARD_STEPS:
+                    session.post_turn_progress_steps += 1
+        decision.label = action_label
+        return decision
+
+    # —— 丢线分支 ——
+    # 摄像头首帧到达前不搜索，防止启动站立动作期间机器人先转一步。
+    if not session.ever_seen_line:
+        decision.wait = 0.02
+        return decision
+
+    lost_from = state['last_seen_time'] or session.last_visible_state['last_seen_time']
+    if lost_from == 0:
+        if session.no_line_since == 0:
+            session.no_line_since = now
+        lost_from = session.no_line_since
+    if now - lost_from < LOST_CONFIRM_SECONDS:
+        decision.wait = 0.02
+        return decision
+
+    preferred_direction, source = choose_search_direction(
+        session.last_visible_state, session.corner_index)
+    search_direction, phase, count, limit = session.search.next_turn(
+        preferred_direction)
+    if search_direction == 0:
+        if not session.search_exhausted_reported:
+            print('V3 丢线搜索：正向 3 次、反向 6 次均未找到红线，停止等待')
+            session.search_exhausted_reported = True
+        search_active = False
+        decision.wait = 0.05
+        return decision
+
+    action = turn_action_for(search_direction)
+    print('V3 丢线搜索：{}阶段向{}转 {}/{}（依据：{}）'.format(
+        phase, direction_name(search_direction), count, limit, source))
+    search_active = True
+    decision.actions = [(action, TURN_ACTION_TIMES, True, 0.0)]
+    decision.observe = True
+    decision.search_count = count
+    decision.label = '丢线搜索：{}阶段向{}转 {}/{}'.format(
+        phase, direction_name(search_direction), count, limit)
+    return decision
+
+
+def move():
+    """运动执行器：循环读取视觉状态 → decide_action 决策 → 执行动作。
+
+    决策链本体在 decide_action（纯函数），此处只负责硬件执行与睡眠节奏，
+    与重构前一致：每条动作后 NORMAL_ACTION_SETTLE 睡眠、无进展 0.05s、
+    帧未更新 0.01s、暂停 0.1s、丢线搜索动作后按 SEARCH_OBSERVE_SECONDS 观察。
+    """
+    global turn_started
+    session = PatrolSession()
     while True:
         if not (enter and running):
-            search.reset()
-            search_exhausted_reported = False
-            last_handled_frame = -1
-            last_turn_direction = 0
-            last_turn_error = None
-            no_progress_turns = 0
-            turn_hold_reported = False
-            no_line_since = 0
-            ever_seen_line = False
-            post_turn_active = False
-            post_turn_direction = 0
-            post_turn_clear_frames = 0
-            post_turn_extra_turns = 0
-            last_visible_state = empty_vision_state()
+            session.reset(keep_corner_index=True)
             turn_started = False
             time.sleep(0.1)
             continue
 
         state = get_vision_state()
-        if state['visible']:
-            no_line_since = 0
-            ever_seen_line = True
-            last_visible_state = state
-            if search.active or search.exhausted:
-                print('V3 丢线搜索：重新发现红线，恢复巡线')
-                clear_pending_corner()
-                search.reset()
-                search_exhausted_reported = False
-                last_handled_frame = state['frame_id']
-                time.sleep(0.05)
-                continue
-
-            if state['frame_id'] == last_handled_frame:
-                time.sleep(0.01)
-                continue
-            last_handled_frame = state['frame_id']
-
-            center_error = state['near_x'] - IMAGE_CENTER_X
-            heading = state['heading']
-            action = None
-            action_label = ''
-            turn_direction = 0
-            turn_error = 0
-
-            # 转弯后确认期：转弯刚结束画面里可能仍残留横条（corner_ready 持续
-            # True），直接响应会把残留横条误判成下一个路口导致连续转弯。确认期
-            # 内屏蔽 corner_ready：横条残留说明转弯没转够、朝原方向小步微调；
-            # 横条消失（面对直道）连续数帧后才恢复前进与路口检测。
-            corner_ready_flag = state['corner_ready']
-            if post_turn_active:
-                corner_ready_flag = False
-                if state['horizontal_corner']:
-                    post_turn_clear_frames = 0
-                    if post_turn_extra_turns >= POST_TURN_MAX_EXTRA_TURNS:
-                        post_turn_active = False
-                        print('V3 巡线：转弯后确认超次，恢复正常循迹')
-                    else:
-                        post_turn_extra_turns += 1
-                        # 转弯后横条残留：竖线可见时用 heading 判向；竖线不可见
-                        # （转弯中间）时用横条中点偏移 offset_x 判向，避免盲目
-                        # 前进走出路口（弯2 曾因此前进 4 步走过横条后丢线）。
-                        #   corner_turn*(offset_x)>0 → 没转够 → 续转
-                        #   corner_turn*(offset_x)<0 → 转过 → 回摆
-                        span = state.get('vertical_span', 0.0)
-                        raw_h = state.get('raw_heading', 0.0)
-                        offset_x = state.get('corner_offset_x', 0.0)
-                        if (span >= CORNER_MIN_VERTICAL_SPAN and
-                                abs(raw_h) <= CORNER_EXIT_HEADING_PX):
-                            post_turn_active = False
-                            clear_pending_corner()
-                            print('V3 巡线：转弯后竖线正对，恢复正常循迹')
-                            continue
-                        if span >= CORNER_MIN_VERTICAL_SPAN:
-                            # 竖线可见，用 heading 判向
-                            adjust_direction = (post_turn_direction
-                                                if post_turn_direction * raw_h > 0
-                                                else -post_turn_direction)
-                        else:
-                            # 竖线不可见，用横条偏移判向（offset=0 保守续转）
-                            adjust_direction = (post_turn_direction
-                                                if post_turn_direction * offset_x >= 0
-                                                else -post_turn_direction)
-                        action = small_turn_action_for(adjust_direction)
-                        action_label = '转弯确认微调向{}（{}/{}）'.format(
-                            direction_name(adjust_direction),
-                            post_turn_extra_turns, POST_TURN_MAX_EXTRA_TURNS)
-                        if action_label != last_action_label:
-                            print('V3 巡线：{}'.format(action_label))
-                            last_action_label = action_label
-                        AGC.runActionGroup(action, times=TURN_ACTION_TIMES,
-                                           with_stand=TURN_WITH_STAND)
-                        time.sleep(NORMAL_ACTION_SETTLE)
-                        continue
-                else:
-                    post_turn_clear_frames += 1
-                    if post_turn_clear_frames >= POST_TURN_CLEAR_FRAMES:
-                        post_turn_active = False
-                        clear_pending_corner()
-                        print('V3 巡线：转弯后确认完成，恢复正常循迹')
-
-            if corner_ready_flag:
-                corner_index = get_corner_index()
-                corner_turn = expected_corner_direction(corner_index)
-                if corner_turn != 0:
-                    visual_dir = state.get('corner_direction', 0)
-                    if visual_dir != 0 and visual_dir != corner_turn:
-                        print('V3 方向校验：视觉判向{} 与赛道顺序{} 不一致（offset={:.0f}）'.format(
-                            direction_name(visual_dir), direction_name(corner_turn),
-                            state.get('corner_offset_x', 0.0)))
-                    action_label = '路口{}按顺序执行向{}转 corner_y={:.0f}'.format(
-                        corner_index + 1, direction_name(corner_turn), state['corner_y'])
-                    if action_label != last_action_label:
-                        print('V3 巡线：{}'.format(action_label))
-                        last_action_label = action_label
-                    turn_started = True
-                    # 转弯两阶段：主转（固定步数开环，接近 90°）→ 精修（竖线
-                    # 正对即停）。转弯中间新直道被误判成横条、heading 不可用，
-                    # 故主转只看标定角度；精修阶段竖线竖直、heading 可靠。
-                    main_steps = (CORNER_MAIN_STEPS_LEFT if corner_turn < 0
-                                  else CORNER_MAIN_STEPS_RIGHT)
-                    turn_steps = 0
-                    for _ in range(main_steps):
-                        AGC.runActionGroup(
-                            turn_action_for(corner_turn), times=1,
-                            with_stand=TURN_WITH_STAND)
-                        turn_steps += 1
-                        time.sleep(NORMAL_ACTION_SETTLE)
-                    for _ in range(CORNER_FINE_MAX_STEPS):
-                        latest = get_vision_state()
-                        vis = latest.get('visible', False)
-                        span = latest.get('vertical_span', 0.0)
-                        raw_h = latest.get('raw_heading', 0.0)
-                        hc = latest.get('horizontal_corner', False)
-                        # 完成：前方竖线存在且已正对。
-                        if (vis and span >= CORNER_MIN_VERTICAL_SPAN and
-                                abs(raw_h) <= CORNER_EXIT_HEADING_PX):
-                            print('V3 转弯精修：第{}步 完成 span={:.0f} raw_h={:.1f}'.format(
-                                turn_steps, span, raw_h))
-                            break
-                        if vis and span >= CORNER_MIN_VERTICAL_SPAN:
-                            # 竖线出现但未正对。符号判据（与 line_seeker 的
-                            # turn_sign*heading<0 等价，因 corner_turn 右=+1、
-                            # 左=-1 恰与 turn_sign 相反）：
-                            #   corner_turn*raw_h>0 → 未转够（线在转弯侧）→ 续转大步
-                            #   corner_turn*raw_h<0 → 转过（线在反侧）→ 反向小步回摆
-                            if corner_turn * raw_h > 0:
-                                print('V3 转弯精修：第{}步 未转够续转 span={:.0f} raw_h={:.1f}'.format(
-                                    turn_steps, span, raw_h))
-                                AGC.runActionGroup(
-                                    turn_action_for(corner_turn), times=1,
-                                    with_stand=TURN_WITH_STAND)
-                            else:
-                                print('V3 转弯精修：第{}步 转过回摆 span={:.0f} raw_h={:.1f}'.format(
-                                    turn_steps, span, raw_h))
-                                AGC.runActionGroup(
-                                    small_turn_action_for(-corner_turn), times=1,
-                                    with_stand=TURN_WITH_STAND)
-                        elif hc:
-                            # 横条还在：转弯中间竖线不可见、heading 失效，改用
-                            # 横条中点相对主线中心的偏移 offset_x 判向：
-                            #   corner_turn*offset_x > 死区 → 没转够 → 续转大步
-                            #   corner_turn*offset_x < -死区 → 转过 → 回摆小步
-                            #   |offset_x| ≤ 死区 → 横条对中 → 小步续转（保守）
-                            offset_x = latest.get('corner_offset_x', 0.0)
-                            if corner_turn * offset_x > CORNER_DIRECTION_DEADBAND:
-                                print('V3 转弯精修：第{}步 横条偏侧续转 offset={:.0f}'.format(
-                                    turn_steps, offset_x))
-                                AGC.runActionGroup(
-                                    turn_action_for(corner_turn), times=1,
-                                    with_stand=TURN_WITH_STAND)
-                            elif corner_turn * offset_x < -CORNER_DIRECTION_DEADBAND:
-                                print('V3 转弯精修：第{}步 横条反侧回摆 offset={:.0f}'.format(
-                                    turn_steps, offset_x))
-                                AGC.runActionGroup(
-                                    small_turn_action_for(-corner_turn), times=1,
-                                    with_stand=TURN_WITH_STAND)
-                            else:
-                                print('V3 转弯精修：第{}步 横条对中小步续转 offset={:.0f}'.format(
-                                    turn_steps, offset_x))
-                                AGC.runActionGroup(
-                                    small_turn_action_for(corner_turn), times=1,
-                                    with_stand=TURN_WITH_STAND)
-                        else:
-                            # 无横条无竖线：可能转过或短暂丢线，停止精修。
-                            print('V3 转弯精修：第{}步 无线停止 span={:.0f} raw_h={:.1f}'.format(
-                                turn_steps, span, raw_h))
-                            break
-                        turn_steps += 1
-                        time.sleep(NORMAL_ACTION_SETTLE)
-                    turn_started = False
-                    last_turn_completed_at = time.monotonic()
-                    print('V3 巡线：路口{}转弯{}步（主{}步+精修{}步）'.format(
-                        corner_index + 1, turn_steps,
-                        main_steps, turn_steps - main_steps))
-                    post_turn_active = True
-                    post_turn_direction = corner_turn
-                    post_turn_clear_frames = 0
-                    post_turn_extra_turns = 0
-                    advance_corner_index()
-                    clear_pending_corner()
-                    last_turn_direction = 0
-                    last_turn_error = None
-                    no_progress_turns = 0
-                    turn_hold_reported = False
-                    time.sleep(NORMAL_ACTION_SETTLE)
-                    continue
-                else:
-                    # 转弯顺序表已用完（到终点），不再理会路口特征，继续直行。
-                    action = FORWARD_ACTION
-                    action_label = '路口顺序已完成，直行'
-            elif state['horizontal_corner']:
-                # 横条存在（接近路口或转弯后残留）：heading 被横条干扰，转向
-                # 修正会原地打转。改为横向对中：红线中心偏右→右移、偏左→左移；
-                # 已对中则前进（接近路口或走出路口），让横条自然变化。
-                if abs(center_error) >= CENTER_DEADBAND:
-                    action = (LATERAL_RIGHT_ACTION if center_error > 0
-                              else LATERAL_LEFT_ACTION)
-                    action_label = '路口横移向{}'.format(
-                        direction_name(1 if center_error > 0 else -1))
-                else:
-                    action = FORWARD_ACTION
-                    action_label = '路口前进'
-            elif abs(heading) >= HEADING_TURN_THRESHOLD:
-                path_direction = 1 if heading > 0 else -1
-                turn_direction = path_direction
-                turn_error = abs(heading)
-                action_label = '实时方向修正执行向{}'.format(
-                    direction_name(turn_direction))
-            elif state['corner_pending']:
-                action = FORWARD_ACTION
-                action_label = '接近下一路口'
-            elif (abs(center_error) >= CENTER_DEADBAND and
-                  abs(heading) <= VERTICAL_HEADING_TOLERANCE):
-                action = (LATERAL_RIGHT_ACTION if center_error > 0
-                          else LATERAL_LEFT_ACTION)
-                action_label = '横移向{}'.format(direction_name(1 if center_error > 0 else -1))
+        decision = decide_action(state, session, time.monotonic())
+        if decision.wait:
+            time.sleep(decision.wait)
+            continue
+        for action_name, times, with_stand, settle in decision.actions:
+            if with_stand:
+                AGC.runActionGroup(action_name, times=times,
+                                   with_stand=TURN_WITH_STAND)
             else:
-                action = FORWARD_ACTION
-                action_label = '前进'
-
-            if turn_direction != 0:
-                if (turn_direction == last_turn_direction and
-                        last_turn_error is not None and
-                        turn_error >= last_turn_error - TURN_PROGRESS_MIN):
-                    no_progress_turns += 1
-                else:
-                    no_progress_turns = 0
-                last_turn_direction = turn_direction
-                last_turn_error = turn_error
-
-                if no_progress_turns >= MAX_NO_PROGRESS_TURNS:
-                    if not turn_hold_reported:
-                        print('V3 巡线：连续转向未改善，暂停动作等待视觉变化')
-                        turn_hold_reported = True
-                    time.sleep(0.05)
-                    continue
-
-                # 直行时的实时方向微调用小转角动作，避免转角过大反复过冲
-                action = small_turn_action_for(turn_direction)
-            else:
-                last_turn_direction = 0
-                last_turn_error = None
-                no_progress_turns = 0
-                turn_hold_reported = False
-
-            if action_label != last_action_label:
-                print('V3 巡线：{} center={:.0f} heading={:.1f}'.format(
-                    action_label, center_error, heading))
-                last_action_label = action_label
-            if turn_direction != 0:
-                AGC.runActionGroup(
-                    action, times=TURN_ACTION_TIMES,
-                    with_stand=TURN_WITH_STAND)
-            else:
-                AGC.runActionGroup(action, times=1)
-            time.sleep(NORMAL_ACTION_SETTLE)
-            continue
-
-        # 摄像头首帧到达前不搜索，防止启动站立动作期间机器人先转一步。
-        if not ever_seen_line:
-            time.sleep(0.02)
-            continue
-
-        lost_from = state['last_seen_time'] or last_visible_state['last_seen_time']
-        if lost_from == 0:
-            if no_line_since == 0:
-                no_line_since = time.time()
-            lost_from = no_line_since
-        if time.time() - lost_from < LOST_CONFIRM_SECONDS:
-            time.sleep(0.02)
-            continue
-
-        preferred_direction, source = choose_search_direction(
-            last_visible_state, get_corner_index())
-        search_direction, phase, count, limit = search.next_turn(preferred_direction)
-        if search_direction == 0:
-            if not search_exhausted_reported:
-                print('V3 丢线搜索：正向 3 次、反向 6 次均未找到红线，停止等待')
-                search_exhausted_reported = True
-            time.sleep(0.05)
-            continue
-
-        action = turn_action_for(search_direction)
-        print('V3 丢线搜索：{}阶段向{}转 {}/{}（依据：{}）'.format(
-            phase, direction_name(search_direction), count, limit, source))
-        AGC.runActionGroup(
-            action, times=TURN_ACTION_TIMES,
-            with_stand=TURN_WITH_STAND)
-        if observe_for_line(SEARCH_OBSERVE_SECONDS):
-            print('V3 丢线搜索：第 {} 次转向后发现红线'.format(count))
+                AGC.runActionGroup(action_name, times=times)
+            if settle:
+                time.sleep(settle)
+        if decision.observe:
+            if observe_for_line(SEARCH_OBSERVE_SECONDS):
+                print('V3 丢线搜索：第 {} 次转向后发现红线'.format(
+                    decision.search_count))
+        if decision.settle_after:
+            time.sleep(decision.settle_after)
 
 
-motion_thread = threading.Thread(target=move)
-motion_thread.daemon = True
-motion_thread.start()
+if HARDWARE_AVAILABLE:
+    motion_thread = threading.Thread(target=move)
+    motion_thread.daemon = True
+    motion_thread.start()
+else:
+    motion_thread = None
 
 
-def run(img):
+_save_debug_warned = False
+
+
+def _save_debug_frame(frame):
+    """把当前校正帧写入 DEBUG_SAVE_DIR（调试用；异常只告警一次）。"""
+    global _save_debug_warned
+    try:
+        if not os.path.isdir(DEBUG_SAVE_DIR):
+            os.makedirs(DEBUG_SAVE_DIR)
+        path = os.path.join(DEBUG_SAVE_DIR, 'patrol_%06d.jpg' % _frame_id)
+        cv2.imwrite(path, frame)
+    except Exception as exc:
+        if not _save_debug_warned:
+            print('RedLinePatrolV3：调试帧保存失败（只告警一次）：{}'.format(exc),
+                  flush=True)
+            _save_debug_warned = True
+
+
+def run(img, now=None):
+    """视觉分析主入口。now 为时间戳（默认真实单调时间）。
+
+    离线模拟器按"帧号/fps"传入虚拟时间，使 corner_pending 锁存等时间逻辑
+    可确定性回放；机器人上不传参，行为与之前完全一致。
+    """
     global _vision_state, _frame_id
     global _corner_pending, _corner_pending_y, _corner_pending_last_seen
     global _corner_direction, _corner_offset_x
     global _last_corner_debug_time
     global line_center_x, line_lost_time, approach_active, corner_ready
+
+    if now is None:
+        now = time.monotonic()
 
     if not enter:
         return img
@@ -925,7 +1204,6 @@ def run(img):
         analysis = analyze_path_samples(samples)
         cv2.drawContours(display, [contour], -1, (0, 0, 255), 2)
 
-    now = time.time()
     global _last_corner_debug_time
     if analysis is not None and now - _last_corner_debug_time >= CORNER_DEBUG_INTERVAL:
         _last_corner_debug_time = now
@@ -983,6 +1261,13 @@ def run(img):
                 'corner_offset_x': _corner_offset_x,
                 'sample_count': analysis['sample_count'],
                 'confidence': confidence,
+                # 调试可视化扩展字段（decide_action 不使用，仅供离线模拟器绘制）：
+                'samples': samples,
+                'max_width': analysis['max_width'],
+                'max_width_y': analysis['max_width_y'],
+                'max_width_left_x': analysis['max_width_left_x'],
+                'max_width_right_x': analysis['max_width_right_x'],
+                'max_width_fill_ratio': analysis['max_width_fill_ratio'],
             }
         else:
             if line_center_x != -1:
@@ -1010,6 +1295,9 @@ def run(img):
     cv2.line(display, (IMAGE_CENTER_X, VISION_TOP_Y),
              (IMAGE_CENTER_X, FRAME_SIZE[1] - 1), (255, 0, 0), 1)
 
+    if SAVE_DEBUG_FRAMES and _frame_id % DEBUG_SAVE_EVERY_N == 0:
+        _save_debug_frame(frame)
+
     if (source_width, source_height) != FRAME_SIZE:
         display = cv2.resize(display, (source_width, source_height),
                              interpolation=cv2.INTER_LINEAR)
@@ -1017,6 +1305,10 @@ def run(img):
 
 
 if __name__ == '__main__':
+    if not HARDWARE_AVAILABLE:
+        print('RedLinePatrolV3：离线模式无法独立运行相机循环，请改用 '
+              'test_programs_NoUseInMain/redline_route_debug.py 离线复盘')
+        sys.exit(0)
     param_data = np.load(calibration_param_path + '.npz')
     mtx = param_data['mtx_array']
     dist = param_data['dist_array']

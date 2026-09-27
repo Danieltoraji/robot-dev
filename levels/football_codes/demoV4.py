@@ -146,6 +146,13 @@ class PatrolEndDetector:
             self.foot_absent_since = None
             return False
 
+        # 丢线搜索进行中不判定候选终点：搜索转向期间整体丢线是预期状态，
+        # 终点判定会把还没搜完的搜索打断。
+        if getattr(redline, "search_active", False):
+            self.absent_since = None
+            self.foot_absent_since = None
+            return False
+
         # 转弯刚结束的空窗期：红线仍停在转弯后的前方、尚未压到脚下，
         # 这段时间禁止判定候选终点，避免转弯一结束就被误判。
         if now - getattr(redline, "last_turn_completed_at", 0.0) < self.TURN_END_COOLDOWN_S:

@@ -48,7 +48,7 @@ TARGET_COLOR = "blue"
 # 标定好的蓝色 LAB 阈值(由 test_programs_NoUseInMain/blue_cube_lab_calibration.py 标定)
 # 直接写死在代码里, 不再依赖 lab_config.yaml 里的 blue 项
 BLUE_LAB_MIN = [0, 0, 0]
-BLUE_LAB_MAX = [99, 125, 125]
+BLUE_LAB_MAX = [153, 123, 125]
 DEFAULT_TARGET_TAG_ID = 38
 FRAME_SIZE = (320, 240)
 CENTER_X = 350
@@ -90,6 +90,8 @@ PLACE_FINAL_STEPS = 1
 # Head scanning.
 HEAD_STEP_X = 15
 HEAD_STEP_Y = 15
+HEAD_SCAN_LEFT = 300    # 头扫左极限(相对servo2脉冲, 原200)
+HEAD_SCAN_RIGHT = 500   # 头扫右极限(相对servo2脉冲, 原400)
 INIT_HEAD_PITCH = 1100  # 初始化时头部俯仰中位(低头的中间参数, 原为yaml servo1)
 
 # 夹爪闭合程度: 1.0=最紧(8=0,16=1000), 0.5=半开, 0=全开(500)
@@ -100,17 +102,19 @@ LOCK_SERVOS = {"6": 700, "7": 820, "8": int(500 - 500*GRIP_SCALE), "14": 300, "1
 CAM_SIZE = (640, 480)
 
 # ---- 红色胶带巡线(参考 TonyPi/Functions/VisualPatrol.py) ----
-LINE_CENTER_X = 320            # 巡线画面中心(640 宽)
-LINE_TURN_THRESHOLD = 55       # |dx|>55 才动作(借鉴RedLinePatrol)
+LINE_CENTER_X = 340            # 巡线画面中心(640 宽)
+LINE_TURN_THRESHOLD = 59       # |dx|>59 才动作(借鉴RedLinePatrol)
 SEARCH_LINE_ALIGN_THRESHOLD = 40  # search_line对正阈值(看到红线后转到|dx|<40才开始巡线)
 LINE_LOST_TIMEOUT = 2.0        # 相机无帧超时(秒)
 LINE_LOST_HOLD = 1.5           # 丢线后保持方向前进的秒数(不立即转)
 MAX_LOST_TURNS = 10            # 保持超时后左大转找的最大次数
-VERTICAL_LINE_RATIO = 2.0      # 高宽比>=此值视为线竖直(平行), 用平移不用转身
-LINE_ROI = [                   # 上中下三段 ROI (y1, y2, x1, x2, 权重), 越靠脚边权重越大
+MAX_CONSEC_MOVES = 2           # 同方向连续平移上限, 超过强制前进一步重判(打断卡尔曼滞后过冲链条)
+VERTICAL_ANGLE_TOL = 25       # 红线主轴与竖直方向夹角<=此值(度)视为线竖直, 用平移不用转身(方向判据, 与线宽/距离无关)
+LINE_ROI = [                   # 三段 ROI (y1, y2, x1, x2, 权重), 越靠脚边权重越大
+    # 调整: 去掉最下段(440-480, 脚下区域基本看不到线), 在中间段上方补一段(300-340)
     (240, 280, 0, 640, 0.1),
-    (340, 380, 0, 640, 0.3),
-    (440, 480, 0, 640, 0.6),
+    (300, 340, 0, 640, 0.3),
+    (340, 380, 0, 640, 0.6),
 ]
 # HSV 红色双段阈值(红色横跨0°, 两段合并; S/V排除黑白线)
 RED_H_LOW1, RED_H_HIGH1 = 0, 10
@@ -125,7 +129,9 @@ KF_DIST_Q, KF_DIST_R = 0.002, 0.01
 KF_OFFSET_Q, KF_OFFSET_R = 0.002, 0.01
 KF_ANGLE_Q, KF_ANGLE_QV, KF_ANGLE_R = 5.0, 1.0, 10.0
 KF_AREA_Q, KF_AREA_R = 100.0, 500.0
-KF_LINE_Q, KF_LINE_R = 1.0, 10.0
+KF_LINE_Q, KF_LINE_R = 30.0, 10.0
+# 巡线中心滤波: 巡线循环每执行一个动作(~1.2s)才更新一次滤波, Q=1时增益仅~0.24、
+# 稳态滞后~60px, 机器人按滞后值决策导致平移过冲之字形; Q=30增益~0.63, 滞后降到~12px
 
 # ---- 标定配置加载(calib_config.json 由 tools/calib_tuner.py 生成) ----
 # 白名单: 允许被配置文件覆盖的模块常量
@@ -134,6 +140,7 @@ CALIB_CONST_KEYS = [
     "RED_H_LOW1", "RED_H_HIGH1", "RED_H_LOW2", "RED_H_HIGH2",
     "RED_S_LOW", "RED_S_HIGH", "RED_V_LOW", "RED_V_HIGH",
     "COLOR_AREA_MIN", "CENTER_X",
+    "HEAD_SCAN_LEFT", "HEAD_SCAN_RIGHT",
     "COLOR_FAR_Y", "COLOR_NEAR_Y", "COLOR_TOO_NEAR_Y",
     "COLOR_X_TURN", "COLOR_X_LARGE", "COLOR_X_FINE",
     "BOARD_DEPTH_M", "TAG_PLACE_NEAR_M", "TAG_PLACE_FAR_M", "TAG_PLACE_BIG_M",
@@ -142,7 +149,8 @@ CALIB_CONST_KEYS = [
     "END_YAW_LOWER", "END_YAW_UPPER", "WALK_STEPS", "MAX_TURN",
     "PICK_FINAL_STEPS", "PLACE_FINAL_STEPS", "MAX_PICK_RETRIES", "STEP4_MAX_FORWARDS",
     "LINE_CENTER_X", "LINE_TURN_THRESHOLD", "SEARCH_LINE_ALIGN_THRESHOLD",
-    "VERTICAL_LINE_RATIO", "LINE_LOST_TIMEOUT", "LINE_LOST_HOLD", "MAX_LOST_TURNS",
+    "VERTICAL_ANGLE_TOL", "LINE_LOST_TIMEOUT", "LINE_LOST_HOLD", "MAX_LOST_TURNS",
+    "MAX_CONSEC_MOVES",
     "KF_CX_Q", "KF_CX_R", "KF_CY_Q", "KF_CY_R",
     "KF_DIST_Q", "KF_DIST_R", "KF_OFFSET_Q", "KF_OFFSET_R",
     "KF_ANGLE_Q", "KF_ANGLE_QV", "KF_ANGLE_R",
@@ -418,7 +426,7 @@ class SortingTask:
                     self.actions.run(turn_action, times=2, lock=lock)
                 elif self.head_turn == "left_right":
                     self.x_dis += self.d_x
-                    if self.x_dis > self.servo2 + 400 or self.x_dis < self.servo2 - 200:
+                    if self.x_dis > self.servo2 + HEAD_SCAN_RIGHT or self.x_dis < self.servo2 - HEAD_SCAN_LEFT:
                         self.head_turn = "up_down"
                         self.d_x = -self.d_x
                 elif self.head_turn == "up_down":
@@ -842,10 +850,23 @@ class SortingTask:
                 weight_sum += r[4]
                 box[:, 1] = box[:, 1] + r[0]
                 cv2.drawContours(display, [box], -1, (0, 0, 255), 2)
-                if r[4] >= 0.5:
-                    bw, bh = cv2.boundingRect(cnt_large)[2], cv2.boundingRect(cnt_large)[3]
-                    if bh / max(bw, 1) >= VERTICAL_LINE_RATIO:
-                        self.line_is_vertical = True
+        # 竖直判定: 用三段ROI合并区域的红线轮廓PCA主轴方向(与竖直夹角<=VERTICAL_ANGLE_TOL).
+        # 单带只有40px高, 轮廓被带宽截断, 线宽>40px时截断块主轴反而变水平;
+        # 合并区域足够高(140px), 主轴方向才反映线真实方向, 且与线宽/距离无关.
+        # (之前高宽比判据在近处宽线时比值仅~1.1, 永远判不竖直)
+        _y1 = min(r[0] for r in LINE_ROI)
+        _y2 = max(r[1] for r in LINE_ROI)
+        _mcnts = cv2.findContours(mask[_y1:_y2, :], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_L1)[-2]
+        _mlarge, _ = self._get_area_max_contour(_mcnts)
+        if _mlarge is not None:
+            _m = cv2.moments(_mlarge)
+            if _m["m00"] > 0:
+                _mu11 = _m["mu11"] / _m["m00"]
+                _mu20 = _m["mu20"] / _m["m00"]
+                _mu02 = _m["mu02"] / _m["m00"]
+                _angle = math.degrees(0.5 * math.atan2(2.0 * _mu11, _mu20 - _mu02))
+                if abs(_angle) >= 90.0 - VERTICAL_ANGLE_TOL:
+                    self.line_is_vertical = True
         if weight_sum > 0:
             line_cx = int(self.kf_line_cx.update(centroid_x_sum / weight_sum))
             cv2.circle(display, (line_cx, 460), 8, (0, 255, 255), -1)
@@ -861,6 +882,8 @@ class SortingTask:
         self.lost_turns = 0
         line_lost_time = None
         no_frame_start = None
+        move_dir = 0      # 最近一次平移方向(+1右/-1左), 0=无
+        move_streak = 0   # 同方向连续平移次数(防过冲)
         while steps < max_steps:
             ok, frame = self.camera.read()
             if not ok or frame is None:
@@ -892,6 +915,7 @@ class SortingTask:
                 if time.time() - line_lost_time < LINE_LOST_HOLD:
                     self.actions.run("go_forward_one_step")
                     steps += 1
+                    move_dir, move_streak = 0, 0
                     log.info("follow_line: 丢线保持前进 step=%d/%d", steps, max_steps)
                 else:
                     self.lost_turns += 1
@@ -908,16 +932,31 @@ class SortingTask:
             if abs(dx) <= LINE_TURN_THRESHOLD:
                 self.actions.run("go_forward_one_step")
                 steps += 1
+                move_dir, move_streak = 0, 0
                 log.info("follow_line: 前进 step=%d/%d dx=%d", steps, max_steps, dx)
             elif self.line_is_vertical:
                 # 线竖直(平行): 用平移, 不转身(避免过冲)
-                self.actions.run("right_move" if dx > 0 else "left_move")
-                log.info("follow_line: 平移 dx=%d (平行)", dx)
+                mdir = 1 if dx > 0 else -1
+                if mdir == move_dir:
+                    move_streak += 1
+                else:
+                    move_dir, move_streak = mdir, 1
+                if move_streak > MAX_CONSEC_MOVES:
+                    # 连续平移超限仍没居中: 多半是滤波滞后已过冲, 强制前进一步重判
+                    self.actions.run("go_forward_one_step")
+                    steps += 1
+                    move_dir, move_streak = 0, 0
+                    log.info("follow_line: 连续平移%d次强制前进 step=%d/%d", MAX_CONSEC_MOVES, steps, max_steps)
+                else:
+                    self.actions.run("right_move" if dx > 0 else "left_move")
+                    log.info("follow_line: 平移 dx=%d (平行) %d/%d", dx, move_streak, MAX_CONSEC_MOVES)
             elif dx > 0:
                 self.actions.run("turn_right_small_step")
+                move_dir, move_streak = 0, 0
                 log.info("follow_line: 右转 dx=%d", dx)
             else:
                 self.actions.run("turn_left_small_step")
+                move_dir, move_streak = 0, 0
                 log.info("follow_line: 左转 dx=%d", dx)
             time.sleep(0.01)
         self.set_head_center(duration=300)
@@ -962,7 +1001,7 @@ class SortingTask:
                     log.info("search_line: 第%d次看到红线但未竖直, 继续右转找正面", turns + 1)
                 self.actions.run(move_action)
                 turns += 1
-                time.sleep(0.3)
+                time.sleep(0.1)  # 判断间隔(原0.3, 缩短加快找线)
                 continue
             # 未看到红线
             if found and last_side != 0:
@@ -973,7 +1012,7 @@ class SortingTask:
             else:
                 self.actions.run("turn_right_small_step")  # 小转弯找红线(避免转过头)
             turns += 1
-            time.sleep(0.3)
+            time.sleep(0.1)  # 判断间隔(原0.3, 缩短加快找线)
         if found:
             self.follow_line(max_steps, stop_on_blue=False, label="to_end")
             return True
@@ -1229,7 +1268,8 @@ def parse_args():
     parser.add_argument("--pick-action", default="move_up", help="existing action group used to pick the sponge")
     parser.add_argument("--target-tag", type=int, default=DEFAULT_TARGET_TAG_ID, help="AprilTag ID on the target board")
     parser.add_argument("--end-tag", type=int, default=26, help="终点tag id, 放置后走到该tag(0=禁用)")
-    parser.add_argument("--post-pick-left-turns", type=int, default=9)
+    parser.add_argument("--post-pick-left-turns", type=int, default=15,
+                        help="抓取后左转次数(按新路线调整为15)")
     parser.add_argument("--post-pick-forward-steps", type=int, default=5)
     parser.add_argument("--back-steps-after-place", type=int, default=12, help="放置后后退步数(退远一点才够转身找到身后红线)")
     # 红色胶带巡线
@@ -1237,7 +1277,7 @@ def parse_args():
     parser.add_argument("--line-search-turns", type=int, default=30, help="放置后右转找红线最多几次(看到即停)")
     parser.add_argument("--line-final-steps", type=int, default=10, help="放置后沿红线走到终点的步数")
     parser.add_argument("--line-head-delta", type=int, default=60, help="巡线时低头角度(相对servo1, 60=看远)")
-    parser.add_argument("--pick-area-threshold", type=float, default=3500.0,
+    parser.add_argument("--pick-area-threshold", type=float, default=4762.0,
                         help="海绵面积达到此值即视为足够近, 触发抓取")
     parser.add_argument("--pick-y-threshold", type=int, default=350,
                         help="海绵cy达到此值即视为足够近, 触发抓取")
