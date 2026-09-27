@@ -8,7 +8,7 @@
   对准  可见目标时按像素 yaw 转（批量小转 + 在线 EMA 估计步长，`_turn_to_face_target`）
   接近  按框宽/色占比分档前压，顺带厘米级横移纠偏（`_walk_closer`）
   到达  整帧色占比"出现→回落"判到位 + 前压兜底（`_walk_until_underfoot`）
-  确认  蹭步（后退 3.2cm + 前进 2.0cm）压过格心，确认微动开关（`_press_switch`）
+  确认  蹭步（后退 3.2cm + 前进 2.652cm）压过格心，确认微动开关（`_press_switch`）
 
 到达判据为什么用"峰值跟踪 + 相对跌落"而不是绝对阈值：参考实现的每色阈值
 （0.002~0.17）在本机俯角下判不到（实测峰值仅 0.13）；峰值/跌落是**尺度无关**的
@@ -45,6 +45,8 @@ from levels.nine_grid_shared import (
     RIGHT_MOVE_CM,
     TURN_LEFT_DEG,
     TURN_RIGHT_DEG,
+    TURN_LEFT_SMALL_DEG,
+    TURN_RIGHT_SMALL_DEG,
     action_name_cn,
 )
 
@@ -96,33 +98,41 @@ SMALL_TURN_MAX_STEPS = 6      # 一轮小转批量上限
 #   相关背景：评审《分区控制律与地图核验方案》Q2 —— "作为伺服增益无所谓（闭环
 #   吸收），但不要用它去反推角度数值"。
 # 对准死区 = **一个真实动作分辨率**（2026-09-13 真机"在死区里打转"复盘）：
-# 现场实测小转一次 ≈10°（目视；打滑本就大，不可能更准），而旧死区收到 3.5°
-# **小于一个步长** → 每轮都规划 1 步、每步过冲 6~10°、永远进不了死区：
+# 现场实测小转一次 左 8.625°/右 5.200°（2026-09-25 现场量得，取代此前的"目视
+# ≈10°"），而旧死区收到 3.5° **小于一个步长** → 每轮都规划 1 步、每步过冲
+# 6~10°、永远进不了死区：
 #     yaw +4° →（转 1 步，实际 -10°）→ -6° →（转 1 步）→ +4° → … 无限振荡
 # 6 轮后对准放弃 → 回到搜索再转 → 现场看到的就是"在死区莫名其妙打转"，
 # 最后转向叠加盲走把机器人带出场地（2026-09-13 手工重跑实录）。
-# 结论：**死区必须 ≥ 一个步长**（12° ≈ 10° + 打滑裕量），不追求度数精度。
-# 也试过"用在线单步估计自适应取死区"（clip(1.2×估计, 4°, 12°)）：仿真里小转被
-# 地面吞掉后估计崩到 0.8°，死区跟着收到 4° → 与 22° 大转步长严重失配 → 反而
-# 把标称场景（无变形的基线）打挂（面板5 未确认）。**现场只有一个可靠数字：
-# 小转一步 ≈10°，所以死区就取一个步长，不自适应**。
+# 结论：**死区必须 ≥ 一个步长**（12° ≥ 左转 8.625° + 打滑裕量），不追求度数精度。
+# 也试过"用在线单步估计自适应取死区"（clip(1.2×估计, 4°, 12°)）：估计一旦崩到
+# 0.8°，死区跟着收到 4° → 与 22° 大转步长严重失配 → 反而把标称场景（无变形的
+# 基线）打挂（面板5 未确认）。**现场只有一个可靠数字：小转一步多大，所以死区就
+# 取一个步长，不自适应**。
+# ⚠️ 已知遗留（现场测量文档 §2 的判读，**尚未落地**）：死区 12° 是**右转**一步
+# 5.2° 的 2.3 倍，右转时"一步跨不出死区"⇒ 该文档建议压到 4~5°。那是一次独立的
+# 策略改动（会动到整族阈值），不在"小转角对齐标定"这次改动的范围内。
 # 落点精度交给低头段的**厘米级横移纠偏**（ARRIVE_SIDE_VIA_SIDESTEP：
 # 2.2cm/步）+ 920px 交棒点——角度的分辨率被机械步长卡死，位置的分辨率没有。
 ALIGN_DEAD_ZONE_DEG = 12.0        # 对准死区（≥ 一个真实小转步长）
 BIG_TURN_DEAD_ZONE_DEG = 30.0         # 大/小转角分界（参考 BIG_TURN_THRESHOLD=30）
-# **真机小转一步的真实角度（现场目视实测 ≈10°，2026-09-13；带打滑裕量取 11°）**
+# **真机小转一步的真实角度**（2026-09-25 起取现场实测值：左 8.625 / 右 5.200，
+# 见 `levels/nine_grid_shared.py` 的单一真源；此前写的是"目视 ≈10°、裕量取 11°"）。
+# 左右不对称 ⇒ 这条不变量取**较大者**（死区 ≥ 大步长 ⇒ 自然也 ≥ 小步长）。
 # 只用于"死区 ≥ 一个步长"这条不变量的自检，**不参与任何控制计算**。
 # 为什么单独立成一个常量：现场唯一可靠的数字就是"小转一步多大"，而它决定了
 # 死区的下限。详见文件末尾 `_check_align_invariant()`——死区小于一个步长会产生
 # "规划 1 步 → 过冲 → 反向再规划 1 步 → 再过冲"的极限环（现场"在死区里莫名
 # 打转"+6 轮后对准放弃→回搜索再转）。这条不变量以前只写在注释里，结果死区被
 # 改成 3.5°（远小于 10° 的步长）而没有任何东西拦住——现在由代码强制。
-SMALL_TURN_STEP_DEG = 11.0
+SMALL_TURN_STEP_DEG = max(TURN_LEFT_SMALL_DEG, TURN_RIGHT_SMALL_DEG)
 # 小转角闭环的规划下限（°/步）：规划步数 n = floor(|yaw| / max(EMA估计, 此值))。
-# 为什么需要下限：真机/仿真都出现"小转被地面吞掉"→ EMA 估计崩到 0.3°/次 →
-# n 被算成 SMALL_TURN_MAX_STEPS，一次请求 6 步 → 过冲 → 再算 n → 振荡。
-# 有下限后最多请求 6 小步（≈12°），且**每轮都重新拍帧复测 yaw**，过冲由下
-# 一轮吸收——收敛靠闭环，不靠这个常数准。
+# 为什么需要下限：曾出现"小转被地面吞掉"→ EMA 估计崩到 0.3°/次 → n 被算成
+# SMALL_TURN_MAX_STEPS，一次请求 6 步 → 过冲 → 再算 n → 振荡。
+# ⚠️ 2026-09-25 起"被地面吞掉"已不在仿真模型里（现场 20 步极差只有 25°/2°，
+# 实测没有这回事），但这条下限保留作保险：它不改变正常情形（估计 8.6/5.2 远大于
+# 0.8），只在估计异常时才起作用。有下限后最多请求 6 小步，且**每轮都重新拍帧
+# 复测 yaw**，过冲由下一轮吸收——收敛靠闭环，不靠这个常数准。
 SMALL_TURN_MIN_STEP_DEG = 0.8
 # 到达触发：目标框宽（px）——"目标已进入 ~35cm"的**相对深度**代理
 # （2026-09-11 由 820 收紧到 920，真机"踩不到微动开关"的根因之一）。
@@ -146,7 +156,7 @@ SMALL_TURN_MIN_STEP_DEG = 0.8
 #     （实测 box 902px、占比 0.0996、未裁切），低头段一开始就有视觉反馈。
 # 框宽不是精细距离（近距接近饱和），精细到达仍由低头颜色"峰值→回落"判定。
 ARRIVE_BOX_PX = 920.0
-BATCH_MAX_STEPS = 5         # 远距批量上限（5×2cm=10cm，仍是小步幅）
+BATCH_MAX_STEPS = 5         # 远距批量上限（5×2.652≈13cm，仍是小步幅）
 # 低头到达判据（**尺度无关**版本，2026-09-11 实测重设计）：
 # 参考实现用每色绝对占比阈值（0.002~0.17），但我们的相机俯角大、色块占比峰值
 # 只有 ~0.13（实测红1：0.047 → 峰值 0.130 → 0.015），照抄阈值会永远判不到
@@ -209,8 +219,8 @@ ARRIVE_MAX_STEPS = 30       # 低头段迭代上限（**一次尝试**的上限�
 #     名义原语  4 种子 22/28  → **28/28**， 拍照 1132→892， 落点最大 45.0→5.7cm；
 #     超半格落点 4/3 → **0/0**。
 ARRIVE_PRESS_MAX_CM = 60.0
-ARRIVE_PRESS_COARSE_STEPS = 3   # 占比还在涨时每段步数（3×2cm=6cm，赶路）
-ARRIVE_PRESS_FINE_STEPS = 1     # 到峰/过峰后每段步数（2cm，精压）
+ARRIVE_PRESS_COARSE_STEPS = 3   # 占比还在涨时每段步数（3×2.652≈8cm，赶路）
+ARRIVE_PRESS_FINE_STEPS = 1     # 到峰/过峰后每段步数（2.652cm，精压）
 # ---- 到达到达判断条件（2026-09-13 假到达根因修复，语义修正） ----
 # 背景（真机"到 2 之后找 3 异常"的正解所在，实测复现）：形变阶跃 +15° 场景里
 # 面板 3 **在离格心 89.5cm 处被判"到达"**。抓到的当帧证据是：
@@ -251,22 +261,24 @@ ARRIVE_MIN_BOX_COVER = 0.08   # 证据区域面积占画幅比下限（假到达
 # 前压物理合理性上限（与视觉判据**独立**的第二道防线）：交棒 ≈35cm（见
 # ARRIVE_BOX_PX）+ 一格 34cm ≈ 70cm —— 一次接近里前压超过这个距离，说明
 # "落下去的"是更远处的东西，不是目标被压过。它只用**本格内累积的前压量**
-# （每格到达后 _reanchor_pose 重置，格内只累积几步 2cm 的模型误差），
+# （每格到达后 _reanchor_pose 重置，格内只累积几步 2.65cm 的模型误差），
 # 因此**不受长期位姿漂移影响**，可以放心用来否决视觉判据。
 ARRIVE_PRESS_PLAUSIBLE_CM = 70.0
 # 死推兜底（15/12cm → 6/5cm）：只在**分段前压已执行完**之后使用。判据收紧到
-# 微动开关真实有效区：面板 33cm 的中心 2/3 ≈ ±5.5cm；蹭步（back3.2+forward2.0）
-# 净 -1.2cm，故纵向 ≤6cm、横向 ≤5cm 才算"蹭步后仍能压到开关"。旧值 15cm 会把
+# 微动开关真实有效区：面板 33cm 的中心 2/3 ≈ ±5.5cm；蹭步（back3.2+forward2.65）
+# 净 -0.55cm，故纵向 ≤6cm、横向 ≤5cm 才算"蹭步后仍能压到开关"。旧值 15cm 会把
 # "离格心 15cm"也判成到位（真机现象：日志判成功、按钮没响、白丢 10 分）。
 ARRIVE_FALLBACK_CM = 6.0    # 视觉判据走不完时，死推距离兜底（纵向 cm）
 ARRIVE_FALLBACK_SIDE_CM = 5.0   # 同上（横向 cm）
 # 死推到位即停压（2026-09-13 形变阶跃场景新增的**第二个独立判据**）：
 # "颜色峰值回落"在相机俯仰被地板形变改掉时会失效（deform 阶跃 +15° 实测：
 # 前压 44cm 占比仍不回落 → 该判据根本发不出声），而**格内相对死推距离**
-# （每格到达后由 _reanchor_pose 重置，格内只累积几步 2cm 的模型误差）与俯仰
+# （每格到达后由 _reanchor_pose 重置，格内只累积几步 2.65cm 的模型误差）与俯仰
 # 无关。任一判据成立即判到位，遥测里写清是哪一条（诚实遥测）。
-# 取 2.0cm：蹭步 = back3.2 + forward2.0（净 -1.2cm），停在格心前 2cm、蹭步后
-# 再退 1.2cm ⇒ 落点 ≈ 格心 -3.2cm，仍在开关有效区（±5.5cm）内。
+# 取 2.0cm：蹭步 = back3.2 + forward2.65（净 -0.55cm），停在格心前 2cm、蹭步后
+# 再退 0.55cm ⇒ 落点 ≈ 格心 -2.55cm，仍在开关有效区（±5.5cm）内。
+# ⚠️ 这个 2.0cm 是**独立的停止距离**，不随单步实测值变（蹭步用的是
+# FORWARD_ONE_STEP_CM，落点因此随实测值移动，上面的换算按 2.652cm 计）。
 ARRIVE_STOP_FORWARD_CM = 2.0
 
 # =====================================================================
@@ -280,7 +292,9 @@ ARRIVE_STOP_FORWARD_CM = 2.0
 TARGET_LOST_TOLERATE = 4
 
 # 纠横：**每次最多 3 步（6.6cm），且"看到色块之后"也继续纠**（2026-09-13 实测）。
-# ① 执行方式用横移而不是小转：小转 2° 在 35cm 上前压只能挪 1.2cm，纠 7cm 要 6 次；
+# ① 执行方式用横移而不是小转：小转一步 5.2~8.6° 在 35cm 上前压只能挪
+# 35·sin5.2° ≈ 3.2cm（右转）~5.3cm（左转），而横移一步就是 2.2cm、方向直接可控；
+# 纠 7cm 偏差横移 3 步 vs 小转 2 次（且每次都要重新对准），横移更细更稳；
 # ② 窗口不限制在"看到色块之前"：形变随机游走场景实测，把窗口收回
 #    peak < COLOR_SEEN_MIN 后，面板 6/7 直接丢（占比已在涨、横偏还没纠完就
 #    开始前压 → 压出去时偏半个开关区）。这与现场"踩不到微动开关"同源。
@@ -290,15 +304,16 @@ SIDE_MAX_CORRECTIONS = 4     # 低头段横向纠偏次数上限（防抖动）
 NO_PROGRESS_BOX_PX = 5.0          # 前进无效判据（参考 proximity_change<5）
 SIDE_TOL_CM = 3.0            # 低头段横向容差（由 dx/box_w*PANEL_WIDTH_CM 换算）
 # 纠横执行方式开关（可回退）：True = 横移（left/right_move，cm 级、直接消
-# 偏差）；False = 旧行为（turn_*_small_step，度级——小转 2° 在 35cm 上前压
-# 只能挪 35·sin2° ≈ 1.2cm，纠 10cm 偏差要 8 次，等于没纠）。
+# 偏差）；False = 旧行为（turn_*_small_step，度级——小转一步 5.2~8.6° 在 35cm
+# 上前压只能挪 35·sin5.2° ≈ 3.2cm，纠 10cm 偏差要 3~4 次，且每次都要重对准）。
 # 换算式 dx_cm = (px − W/2)/box_w · PANEL_WIDTH_CM 是投影不变量（抗形变），
 # sim 实测精度：真值横偏 5/10cm（@30cm）→ 估 4.7/9.2cm。
 ARRIVE_SIDE_VIA_SIDESTEP = True
 ARRIVE_SIDE_MAX_STEPS = 3    # 单次纠横步数上限（3×2.2cm≈6.6cm，防纠过头）
 FIND_MAX_ROUNDS = 4       # 搜索轮次上限（每轮 = 头部五档扫 + 转一步）
 FIND_BLIND_CM = 25.0      # 盲走判据：死推纵向大于此值时先走近再由视觉接管
-FIND_BLIND_MAX_STEPS = 10  # 单轮盲走上限（10×2cm=20cm）
+FIND_BLIND_MAX_STEPS = 10  # 单轮盲走上限（10×2.652≈26.5cm；2026-09-25 前按
+                           # 名义 2cm 估作 20cm，实测步长更大 ⇒ 同样步数走得更远）
 # 单格盲走**总量**上限（2026-09-13 真机"其它异常行动"）：搜索靠"死推提示"决定
 # 往哪转/往哪走，而提示来自死推位姿——位姿在长时间盲走+转向后会发散（仿真形变
 # 阶跃场景实测：一次失败的搜索盲走约 1m，随后位姿与真相差 111.9cm）。盲走越多
@@ -414,12 +429,15 @@ class NineGridThreeStageLevel(NineGridShared):
         if self._attempt_stuck:
             return False
         if digit in self.digit_cell:
-            fwd, lat, _b = self.target_relative(digit)
-            if abs(fwd) <= ARRIVE_FALLBACK_CM and abs(lat) <= 20.0:
-                print(f"[对准] 目标{digit}不可见，但按动作推算已到位"
-                      f"（纵向 {fwd:+.1f}cm、横向 {lat:+.1f}cm）→ 交由低头档颜色判据裁决")
-                self._target_seen = True
-                return True
+            rel = self.target_relative(digit)
+            if rel is not None:
+                fwd, lat, _b = rel
+                if abs(fwd) <= ARRIVE_FALLBACK_CM and abs(lat) <= 20.0:
+                    print(f"[对准] 目标{digit}不可见，但按动作推算已到位"
+                          f"（纵向 {fwd:+.1f}cm、横向 {lat:+.1f}cm）"
+                          f"→ 交由低头档颜色判据裁决")
+                    self._target_seen = True
+                    return True
         print(f"[对准] 目标{digit}反复丢失，本轮对准收手（稍后换办法重试本格）")
         return False
     def _find_target_panel(self, digit, pitch=PITCH_NAV, head=None):
@@ -542,18 +560,21 @@ class NineGridThreeStageLevel(NineGridShared):
             # 按死推提示转向（提示无效时固定左转）：**按提示大小转足**，
             # 一次转 1~5 个大转步（22~129°）——动作不花帧，只有头部扫花帧，
             # 这样"目标在身后 180°"也能两轮内覆盖到。
-            hint = (self.target_relative(digit)[2]
-                    if digit in self.digit_cell else 0.0)
+            hint_rel = (self.target_relative(digit)
+                        if digit in self.digit_cell else None)
+            hint = hint_rel[2] if hint_rel is not None else 0.0
             if abs(hint) < 5.0:
                 hint = -TURN_LEFT_DEG      # 负 = 目标在左侧 → 左转
             k = int(np.clip(round(abs(hint) / TURN_RIGHT_DEG), 1, 5))
             self._act("turn_right" if hint > 0 else "turn_left", k)
             frames += 1
             # 盲走近目标（死推指引，动作不花帧）：地板形变会把可见地面带整体
-            # 推走（±15° → 可见带在 0~50cm 与 19~184cm 之间摆动），此时目标
+            # 推走（±15° → 可见带在 0~50cm 与 19~184cm 间摆动），此时目标
             # 可能压根不在任何俯仰档的视野里，只能先走近再由视觉接管。
-            if digit in self.digit_cell:
-                fwd = self.target_relative(digit)[0]
+            fwd_rel = (self.target_relative(digit)
+                       if digit in self.digit_cell else None)
+            if fwd_rel is not None:
+                fwd = fwd_rel[0]
                 if fwd > FIND_BLIND_CM:
                     if blind_cm >= FIND_BLIND_TOTAL_CM:
                         print(f"[搜索] 面板{digit} 按动作推算已盲走累计 {blind_cm:.0f}cm 仍未入"
@@ -581,7 +602,8 @@ class NineGridThreeStageLevel(NineGridShared):
         死区外反复过冲 → _big_turn 判"振荡"后干脆**不动** → 对准循环空转
         （日志连打"大转修正 yaw -34.2°"却没有任何动作）→ 丢目标 → 重搜。
         "走到数字 2 之后找数字 3 异常"与"其它异常行动"都出自这里。
-        仿真标定的"小转 1.7°/次"只作规划参考（且有下限保护），现场以闭环
+        仿真标定的"小转 1.7°/次"（2026-09-25 起：现场实测左 8.625°/右 5.200°）
+        只作规划参考（且有下限保护），现场以闭环
         收敛为准：不依赖固定 °/次 常数，估计偏大偏小都由下一轮复测吸收。
         first_seen：调用方刚拍到的那一帧（搜索/接近的观测）可直接复用，
         省一次拍照（真机 ~0.7s/张）。
@@ -775,8 +797,9 @@ class NineGridThreeStageLevel(NineGridShared):
         由出现到消失"这一**机器人与色块的相对几何关系**，与相机高度/俯仰
         无关 → 抗地板形变。
         **横向纠偏是厘米级的**（2026-09-13 接线修正）：dx/box_w×PANEL_WIDTH_CM
-        是投影不变量，换算成横向厘米后用 left/right_move 一步 2.2cm 直接消掉，
-        而不是"小转 1 步"（2° 在 35cm 上只挪 1.2cm，纠 7cm 要 6 次＝等于没纠）。
+        是投影不变量，换算成横向厘米后用 left/right_move 一步 2.2~2.5cm 直接消掉，
+        而不是"小转 1 步"（一步 5.2~8.6° 在 35cm 上只挪 3.2~5.3cm，纠 7cm 要
+        2~3 次，且每次都要重新对准）。
         纠偏**不再限制在"见到颜色之前"**：交棒点死区 12° → 横向残余可达
         35·tan12° ≈ 7cm，这段正是"踩不到微动开关"的来源；只要还在前进前压
         阶段，就允许继续纠（总次数上限 SIDE_MAX_CORRECTIONS）。
@@ -949,9 +972,9 @@ class NineGridThreeStageLevel(NineGridShared):
                         print(f"[到达] 按动作推算已到位（纵向 {fwd_now:+.1f} "
                               f"横向 {lat_now:+.1f}cm）→ 判定到达")
                         return True
-                # 步长自适应：占比**还在涨**时用 3 步批量（6cm）赶路，一旦不再涨
-                # （到峰/过峰）改单步（2cm）精停。实测：用"与峰值比"判据会
-                # 在爬升段误判成"接近峰值"而一路 2cm 挪（占比 0.06→0.13 花了
+                # 步长自适应：占比**还在涨**时用 3 步批量（≈8cm）赶路，一旦不再涨
+                # （到峰/过峰）改单步（2.652cm）精停。实测：用"与峰值比"判据会
+                # 在爬升段误判成"接近峰值"而一路单步挪（占比 0.06→0.13 花了
                 # 18 次迭代＝低头段占了全程 61% 的拍照）。
                 rising = prev_ratio is None or ratio >= prev_ratio
                 prev_ratio = ratio
@@ -969,7 +992,14 @@ class NineGridThreeStageLevel(NineGridShared):
                   f"已前压 {press_cm:.0f}cm）")
             # 兜底：视觉判据没走完（例如峰值后占比掉得不够）时，用**死推距离**
             # 复核——位姿每格到达后已重置，短程死推（≤1格）精度足够。
-            fwd, lat, _b = self.target_relative(digit)
+            # ⚠️ 没有地图（布局扫失败/被关掉）时 target_relative 返回 None：
+            #    这条兜底只能弃权，不能崩（2026-09-28 修）。
+            rel = self.target_relative(digit)
+            if rel is not None:
+                fwd, lat, _b = rel
+            else:
+                print("[到达] 无格心映射（布局扫失败/已关）→ 死推距离兜底弃权")
+                return False
             if abs(fwd) <= ARRIVE_FALLBACK_CM \
                     and abs(lat) <= ARRIVE_FALLBACK_SIDE_CM:
                 self._note_dead_reckoning_hit("fallback", digit, fwd, lat)

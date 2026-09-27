@@ -15,9 +15,10 @@
 
 仿真建模了什么 / 没建模什么
 --------------------------
-建模：场地几何（33.33cm 格、位置 6 恒空）、面板与黑字尺寸、真实相机内参+
-径向畸变、画幅裁切、动作打滑（前进 ±8~15%、横移 ±20%、大转 ±10%、
-小转 max(0, N(2.0,1.5)) 经常被"地面吞掉"）。
+建模：场地几何（33.33cm 格）、面板与数字尺寸（字体渲染，随机 90°×k
+朝向）、真实相机内参+径向畸变、画幅裁切、动作打滑（前进 ±8~15%、横移 ±20%、
+大转 ±10%、**小转按现场实测值左 8.625°/右 5.200° 各 ±12%**——左右不对称是现场
+真实特性，见 `levels/nine_grid_shared` 的单一真源）。
 未建模：真机拍照耗时（2026-09-13 现场实测 fswebcam 2592x1944 -S 3 = 0.62s/张、
 走代码路径 capture_frame() = 0.70s/张；**本仿真把帧当瞬时**）、舵机到位时间/抖动、
 光照与白平衡对 HSV 的影响、相机-机体真实偏移（本模块 CAM_BODY_OFFSET=0）、
@@ -57,12 +58,17 @@ import cv2
 
 from core.camera_config import (
     CAMERA_INTRINSIC, CAMERA_DISTORTION, HEAD_CENTER, SERVO_DEG_PER_US,
-    CAM_PITCH_MOUNT_OFFSET_DEG, CAM_HEIGHT_STANDING_CM,
+    CAM_PITCH_MOUNT_OFFSET_DEG,
 )
 from core.ground_homography import grid_cell_center
 from core.robot_core import RobotState
 from levels.nine_grid import NineGridLevel
-from levels.nine_grid_shared import DISABLED_ACTIONS, action_name_cn
+from levels.nine_grid_shared import (
+    BACK_ONE_STEP_CM, CAM_HEIGHT_CM, DISABLED_ACTIONS, FORWARD_ONE_STEP_CM,
+    LEFT_MOVE_CM, NO_LAYOUT_ENV_VAR, RIGHT_MOVE_CM, TURN_LEFT_DEG,
+    TURN_LEFT_SMALL_DEG, TURN_RIGHT_DEG, TURN_RIGHT_SMALL_DEG,
+    action_name_cn, layout_enabled, print_layout,
+)
 from levels.nine_grid_three_stage import NineGridThreeStageLevel
 from vision.nine_grid_detector import COLOR_TO_ID
 
@@ -71,7 +77,6 @@ from vision.nine_grid_detector import COLOR_TO_ID
 # =====================================================================
 FRAME_W, FRAME_H = 2592, 1944
 PANEL_HALF_CM = 14.0        # 面板半边 14cm（33cm 格减缝）
-DIGIT_HALF_CM = (4.0, 6.0)  # 黑色数字块半尺寸
 # ---- 仿真侧保险丝（见模块头说明；关卡不再自己放弃任何一格） ----
 # 取值：常规整局 ~200~600 张；留 5 倍余量，只拦"真的停不下来"的实验。
 SIM_FUSE_CAPTURES = 3000
@@ -99,66 +104,87 @@ PANEL_BGR = {COLOR_TO_ID[c]: cv2.cvtColor(np.full((1, 1, 3), hsv, np.uint8),
                                           cv2.COLOR_HSV2BGR)[0, 0].tolist()
              for c, hsv in COLOR_HSV.items()}
 
-# 缺省仿真布局：位置6(左下)恒空，位置8空，其余 1..7（固定"随机"布局）
+# 缺省仿真布局：位置8空，其余 1..7（固定"随机"布局）
 SIM_LAYOUT = {0: 5, 1: 2, 2: 7, 3: 1, 4: 4, 5: 6, 6: None, 7: 3, 8: None}
 
 # =====================================================================
-# 面板数字：**画真字形**（2026-09-25）
+# 面板数字：**用字体画**（2026-09-25 用户裁定；替换掉"现场照片裁贴图"那版）
 # =====================================================================
-# 旧行为是把数字画成一块**纯黑实心矩形**（`fillPoly(..., (0,0,0))`）。它让
-# **数字识别链在仿真里没有信号**：同一批仿真帧上 SVM 与颜色主判的一致率只有
-# 5.4%（≈随机），而"格 4 被判成数字 1"这类现场日志既复现不了也验证不了。
+# 为什么不再用现场照片裁出来的字形贴图（旧实现，已删）：
+#   1. 裁出来的墨迹**带着那张照片的透视斜切**——再投影到地面等于斜切两次；
+#   2. 渲染时掩膜被强行塞进固定 8×12cm 方框 ⇒ 每个数字的宽高比被各自拉坏
+#      （而 `digit_recognizer.normalize_mask` 明确把**宽高比**当判据）；
+#   3. 裁切样本会混进面板边缘的阴影弧带（旧资产的 d4 根本不是数字，是弧带）；
+#   4. 现场帧没拍到干净样本的数字只能凑合（旧资产里 d4 的 n_clean==0）。
+# 字体渲染没有上述任何一个问题：字形**正立、无斜切、宽高比原生**，且 1..7
+# 全部可画，不依赖任何外部资产。
 #
-# 字形来源 = 现场照片（`tools/gen_ninegrid_glyph_assets.py` 从
-# `tests/fixtures/field_photos/` 提取），因此仿真画的数字与真机**同源**：
-# 数字判据在仿真里的结论才谈得上迁移到真机。
-#
-# 朝向（用户 2026-09-25 裁定）："现场字形朝向随机，不需要考虑这一点，并将
-# 仿真器的朝向也作为随机的" ⇒ 资产里**不存**朝向，渲染时按面板格位**确定性
-# 随机**转 90°×k（用固定 seed，保证同一局可复现）。
-GLYPH_ASSET_PATH = os.path.join(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))), "models", "nine_grid", "digit_glyphs.npz")
+# 朝向（用户 2026-09-25 裁定，保留）："现场字形朝向随机，并将仿真器的朝向也
+# 作为随机的" ⇒ 按面板格位**确定性随机**转 90°×k（固定 seed ⇒ 同一局可复现）。
+# ⚠️ 随机的是**旋转**（贴纸真的可能被转 90° 摆放），**不是镜像**——现场不可能
+# 出现印反的数字（历史 bug：贴图角点序与世界 y 反向，见 `_glyph_quad`）。
+GLYPH_FONT = cv2.FONT_HERSHEY_DUPLEX   # 粗笔画无衬线，接近现场印刷体
+GLYPH_FONT_SCALE = 3.0
+GLYPH_FONT_THICKNESS = 9               # ≈ 字高的 14%（现场笔画/字高实测 ~0.15）
 GLYPH_ROTATE_SEED = 20260925     # 面板朝向的随机种子（固定 ⇒ 可复现）
-GLYPH_DIGIT_SIZE_CM = DIGIT_HALF_CM     # 数字块尺寸（与真值同源，8×12cm）
-_GLYPH_CACHE = None
-_GLYPH_FAIL_WARNED = False
+# 数字墨迹的**高度**（正立时沿面板纵向）；宽度按字形自身宽高比。28cm 面板上
+# 取 10.5cm 的依据：现场 44 个未裁切面板实测"墨迹高 / 色块高"中位 **0.38**
+# ⇒ 0.38×28 ≈ 10.6cm（用同一个量法在仿真帧上量，字高 12cm 时该比值 0.41、
+# 黑字占比 digit_evidence 0.106，而现场中位只有 0.071 ⇒ 12cm 偏大）。
+# ⚠️ 这个尺寸不是"随便定的"：统一决策在**面板 4**上的到位判定对字的大小很敏感
+# （实测字高 8/10.5/12cm ⇒ 整局拍照 726/809/1631 张，面板 4 尝试 1/2/5 次）。
+DIGIT_HEIGHT_CM = 10.5
+_GLYPH_CACHE = {}
+
+
+def glyph_mask(digit):
+    """数字 → 二值掩膜（白=墨迹，**紧裁到墨迹外框**，不归一化宽高比）
+
+    紧裁是刻意的：宽高比是数字判据的一部分（"1" 就该是细高的），缩放交给
+    投影那一端（`glyph_block_half_cm` 只钉高度，宽度跟字形走）。
+    """
+    g = _GLYPH_CACHE.get(int(digit))
+    if g is not None:
+        return g
+    canvas = np.zeros((400, 400), np.uint8)
+    txt = str(int(digit))
+    (_tw, th), _base = cv2.getTextSize(txt, GLYPH_FONT, GLYPH_FONT_SCALE,
+                                       GLYPH_FONT_THICKNESS)
+    cv2.putText(canvas, txt, (40, 40 + th), GLYPH_FONT, GLYPH_FONT_SCALE,
+                255, GLYPH_FONT_THICKNESS, cv2.LINE_AA)
+    ys, xs = np.nonzero(canvas > 127)
+    if len(xs) == 0:               # 字体不可用（理论到不了这里）
+        return None
+    g = (canvas[ys.min():ys.max() + 1, xs.min():xs.max() + 1] > 127
+         ).astype(np.uint8)
+    _GLYPH_CACHE[int(digit)] = g
+    return g
 
 
 def glyph_table():
-    """载入渲染用字形表 {digit: 二值掩膜(白=墨迹)}；缺资产时**显式告警**并返回 {}
-
-    ⚠️ 不静默退化：缺资产会让面板上的数字消失（检测器依然能按颜色找到面板，
-    但"数字到达判断条件 / 形状仲裁 / 数字判据"全部失去输入）——那正是本模块要修的
-    那类病。故只告警 + 返回空表，由 `_draw_panel` 退回黑块，并在 stdout 留痕。
-    """
-    global _GLYPH_CACHE, _GLYPH_FAIL_WARNED
-    if _GLYPH_CACHE is not None:
-        return _GLYPH_CACHE
+    """{digit: 二值掩膜(白=墨迹)}（1..7；老接口名，测试与审计脚本都读它）"""
     table = {}
-    data = None
-    try:
-        data = np.load(GLYPH_ASSET_PATH, allow_pickle=False)
-        for k in data.files:
-            if len(k) == 2 and k[0] == "d" and k[1].isdigit():
-                table[int(k[1])] = (data[k] > 0).astype(np.uint8)
-    except (OSError, ValueError, KeyError) as e:
-        if not _GLYPH_FAIL_WARNED:
-            _GLYPH_FAIL_WARNED = True
-            print(f"[仿真] ⚠ 数字字形资产不可用({e})：面板数字将退回黑块，"
-                  f"数字识别链在仿真里**没有信号**。生成："
-                  f"python tools/gen_ninegrid_glyph_assets.py --write")
-        table = {}
-    missing = [d for d in range(1, 8) if d not in table]
-    if table and missing:
-        print(f"[仿真] ⚠ 字形资产缺数字 {missing}：这些面板会画黑块")
-    if table and data is not None:
-        thin = [d for d in range(1, 8)
-                if int(data.get(f"{d}_n_clean", np.array([1]))[0]) == 0]
-        if thin:
-            print(f"[仿真] ⚠ 字形资产里数字 {thin} 只有裁切样本（现场帧没拍到完整"
-                  f"面板），字形质量存疑——建议现场补拍后重跑 gen_ninegrid_glyph_assets")
-    _GLYPH_CACHE = table
+    for d in range(1, 8):
+        m = glyph_mask(d)
+        if m is not None:
+            table[d] = m
     return table
+
+
+def glyph_block_half_cm(digit, cell):
+    """该面板数字块的世界**半尺寸** (hx, hy) cm
+
+    高度恒为 `DIGIT_HEIGHT_CM`，宽度 = 高度 × 字形自身宽高比；转了 90°×k 之后
+    宽高**互换**（物理上就是那张贴纸转了 90°）。数字块的世界尺寸因此随数字变化，
+    不再把"1"撑成 8cm 宽的黑板砖。
+    """
+    g = glyph_mask(digit)
+    asp = (g.shape[1] / float(g.shape[0])) if g is not None else 0.6
+    h = DIGIT_HEIGHT_CM
+    w = h * asp
+    if glyph_rotate_k(cell) % 2:
+        w, h = h, w
+    return w / 2.0, h / 2.0
 
 
 def glyph_rotate_k(cell):
@@ -234,16 +260,23 @@ def _project_quad(R, C, cx, cy, hx, hy):
     return None if poly is None else np.round(poly).astype(np.int32)
 
 
-def _glyph_quad(R, C, cx, cy, digit):
-    """数字块的**四角点**（原生 px，顺序 TL,TR,BR,BL）→ (4,2) float32 或 None
+def _glyph_quad(R, C, cx, cy, digit, cell):
+    """数字块的**四角点**（原生 px）→ (4,2) float32 或 None
 
     与 `_project_quad` 同一套投影/守卫，但返回的是**未裁剪的四角点**（裁剪后的
     多边形不能用来做透视变换——那会把字形拉伸到错误的位置）。
     任一角点不合法（跑到相机平面附近/画幅外很远）就返回 None：该面板只画色块。
+
+    ★ 角点顺序 = **掩膜的栅格序**（TL,TR,BR,BL），且 TL 必须是"站在入口看这块
+    面板时的左上角"：数字的上沿在**远处**（世界 +y）、左边在世界 −x。
+    历史 bug（2026-09-25 体检发现）：这里曾经按 [(-x,-y), (+x,-y), (+x,+y),
+    (-x,+y)] 给点，即掩膜 TL 落到**近边**（图像左下）⇒ 每个数字都被画成
+    **上下镜像**（"7" 看起来像 "L"、"5" 像 "2"），而现场不可能出现印反的数字。
+    因此顺序写成 [(-x,+y), (+x,+y), (+x,-y), (-x,-y)]，并有单测钉住。
     """
-    hx, hy = GLYPH_DIGIT_SIZE_CM
+    hx, hy = glyph_block_half_cm(digit, cell)
     pts = []
-    for dx, dy in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)):
+    for dx, dy in ((-hx, hy), (hx, hy), (hx, -hy), (-hx, -hy)):
         pc = R @ (np.array([cx + dx, cy + dy, 0.0]) - C)
         if pc[2] <= 0.05:
             return None
@@ -265,16 +298,16 @@ def _glyph_quad(R, C, cx, cy, digit):
 
 
 def _draw_glyph(frame, R, C, cell, digit, cx, cy):
-    """在 already-drawn 的色块上画**真字形**（黑字）
+    """在 already-drawn 的色块上画**数字**（黑字，字体渲染）
 
-    实现 = 把字形掩膜透视变换到数字块四角点，再把"掩膜为真"的像素涂黑。
-    **没有逐像素 Python 循环**（那是 26s/帧那条退化路径的同类写法）。
+    实现 = 把字形掩膜（按格位朝向转 90°×k）透视变换到数字块四角点，再把
+    "掩膜为真"的像素涂黑。**没有逐像素 Python 循环**（那是 26s/帧那条退化
+    路径的同类写法）。
     """
-    table = glyph_table()
-    g = table.get(int(digit))
+    g = glyph_mask(digit)
     if g is None:
         return False
-    quad = _glyph_quad(R, C, cx, cy, digit)
+    quad = _glyph_quad(R, C, cx, cy, digit, cell)
     if quad is None:
         return False
     k = glyph_rotate_k(cell)
@@ -346,7 +379,7 @@ def _frame_truth(R, C, layout):
         cx, cy = grid_cell_center(cell)
         quads = {}
         for name, (hx, hy) in (("full", (PANEL_HALF_CM, PANEL_HALF_CM)),
-                               ("digit", GLYPH_DIGIT_SIZE_CM)):
+                               ("digit", glyph_block_half_cm(digit, cell))):
             poly = _project_quad_raw(R, C, cx, cy, hx, hy)
             if poly is None:
                 continue
@@ -401,7 +434,7 @@ def _frame_truth(R, C, layout):
 class SimNineGridRobot(RobotState):
     """九宫格仿真机器人：场地系位姿 + 打滑噪声运动 + 合成相机"""
 
-    CAM_HEIGHT = CAM_HEIGHT_STANDING_CM   # 与 camera_config 同源（站立相机高度）
+    CAM_HEIGHT = CAM_HEIGHT_CM   # 与关卡同源（levels.nine_grid_shared 的实测值）
     CAM_BODY_OFFSET = 0.0  # 仿真中相机即机体中心（关卡常量另算，端到端容差内）
 
     def __init__(self, layout=SIM_LAYOUT, seed=3, viewer=None, deform=None,
@@ -525,25 +558,36 @@ class SimNineGridRobot(RobotState):
         fwd = np.array([np.sin(th), np.cos(th)])
         right = np.array([np.cos(th), -np.sin(th)])
         slip = self.rng.normal
+        # ★ 所有平移/转向量都**导入**自 `levels/nine_grid_shared`（现场实测值，
+        # 单一真源），不再手抄名义值——历史 bug：仿真抄的是 2.0/1.9/2.0°，而成
+        # 品真机是 2.652/2.497/8.625|5.200 ⇒ "仿真跑的是一个不存在的机器人"。
+        # 打滑系数取 `tools/ab_ninegrid.REAL` 那套"现场实测原语"的同一组数
+        # （平移 6%、后退 15%、大转 10%、小转 12%）：现场 20 步/10 步的**组间**
+        # 极差折合 1.7%~4.5%，平移取 6% 略保守（只有总量数据，无法分辨每步抖动）。
         # bearing 约定右正（见 core/ground_homography）：左转 = heading 减小
         if name == "go_forward":
+            # 本关卡禁用的大步幅动作（见 DISABLED_ACTIONS）；量级沿用 5cm 旧值，
+            # 现场未实测——关卡永远不会下发它，只在"白名单硬门"测试里用到。
             self.pos += fwd * 5.0 * (1 + slip(0, 0.08))
         elif name == "go_forward_one_step":
-            self.pos += fwd * 2.0 * (1 + slip(0, 0.15))
+            self.pos += fwd * FORWARD_ONE_STEP_CM * (1 + slip(0, 0.06))
         elif name == "back_one_step":
-            self.pos -= fwd * 3.2 * (1 + slip(0, 0.15))
+            self.pos -= fwd * BACK_ONE_STEP_CM * (1 + slip(0, 0.15))
         elif name == "left_move":
-            self.pos -= right * 1.9 * (1 + slip(0, 0.20))
+            self.pos -= right * LEFT_MOVE_CM * (1 + slip(0, 0.06))
         elif name == "right_move":
-            self.pos += right * 2.2 * (1 + slip(0, 0.20))
+            self.pos += right * RIGHT_MOVE_CM * (1 + slip(0, 0.06))
         elif name == "turn_left":
-            self.heading -= 22.0 * (1 + slip(0, 0.10))
+            self.heading -= TURN_LEFT_DEG * (1 + slip(0, 0.10))
         elif name == "turn_right":
-            self.heading += 25.7 * (1 + slip(0, 0.10))
+            self.heading += TURN_RIGHT_DEG * (1 + slip(0, 0.10))
         elif name == "turn_left_small_step":
-            self.heading -= max(0.0, self.rng.normal(2.0, 1.5))
+            # 现场实测（同一真源）：左手两套舵机/连杆与右手不同，左右差 66% 是
+            # 真实特性。旧模型 `max(0, N(2.0,1.5))` 还额外造出 9% 的"这一步原地
+            # 不动"，而现场 20 步极差只有 25°/2°——没有"被地面吞掉"这回事。
+            self.heading -= TURN_LEFT_SMALL_DEG * (1 + slip(0, 0.12))
         elif name == "turn_right_small_step":
-            self.heading += max(0.0, self.rng.normal(2.0, 1.5))
+            self.heading += TURN_RIGHT_SMALL_DEG * (1 + slip(0, 0.12))
         elif name == "stand":
             pass
         else:
@@ -578,10 +622,11 @@ class SimNineGridRobot(RobotState):
         if panel is not None:
             cv2.fillPoly(frame, [np.round(panel).astype(np.int32)],
                          PANEL_BGR[digit])
-        # 数字：**真字形**（现场照片同源）；资产不可用时退回黑块，并由
-        # `glyph_table()` 在 stdout 显式告警（不静默降级）。
+        # 数字：字体渲染（见文件头"面板数字"）。字体画不出来（理论上不会）时
+        # 退回黑块——宁可画个块，也不让面板看起来"没有数字"。
         if not _draw_glyph(frame, R, C, cell, digit, cx, cy):
-            block = _project_quad(R, C, cx, cy, *GLYPH_DIGIT_SIZE_CM)
+            block = _project_quad(R, C, cx, cy,
+                                  *glyph_block_half_cm(digit, cell))
             if block is not None:
                 cv2.fillPoly(frame, [np.round(block).astype(np.int32)], (0, 0, 0))
 
@@ -594,7 +639,7 @@ SimRun = namedtuple("SimRun", "robot level stats")
 
 
 def random_layout(seed):
-    """由 seed 生成合法随机布局：位置 6 恒空，7 个数字占其余 8 格中的 7 格"""
+    """由 seed 生成合法随机布局：7 个数字占 9 格中的 7 格（留 2 个空位）"""
     rng = np.random.RandomState(seed)
     cells = [c for c in range(9) if c != 6]
     chosen = list(rng.permutation(cells)[:7])
@@ -607,12 +652,16 @@ def random_layout(seed):
 
 def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
                    deform=None, three_stage=False,
-                   fuse_captures=None, fuse_actions=None):
+                   fuse_captures=None, fuse_actions=None, no_layout=False):
     """跑一遍完整关卡（布局扫→1..7），不做断言；返回 SimRun(robot, level, stats)
 
     两种决策办法各是一个模块，这里按 `three_stage` 选：
       · False（默认）= levels/nine_grid.py 统一决策（三档分区 + 一个循环）；
       · True         = levels/nine_grid_three_stage.py 三段式（现场发货的稳定版）。
+
+    no_layout=True：短路掉全部布局流程（置 NINEGRID_NO_LAYOUT 环境变量，关卡侧
+    由 nine_grid_shared.layout_enabled() 统一判定）。用于回归"关掉布局还能不能
+    逐格走完"，此时 `layout_ok` 无意义（digit_cell 必然为空）。
 
     stats 键：decision / ok_all / results / layout_ok / digit_cell / truth /
               captures / actions / action_counts / small_turn_deg /
@@ -626,6 +675,12 @@ def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
             SimFuseTripped（仿真侧保护，不是关卡策略）；这里捕获并把原因写进
             stats["fuse_tripped"]，照常返回结果。
     """
+    from levels.nine_grid_shared import NO_LAYOUT_ENV_VAR, layout_enabled
+    no_layout = bool(no_layout) or not layout_enabled()
+    if no_layout:
+        # 常量为 False 时环境变量写不写都关着；no_layout=True 时补上环境变量，
+        # 好让日志/子进程看到同一个开关（环境变量是"只减不增"的临时关闭位）。
+        os.environ.setdefault(NO_LAYOUT_ENV_VAR, "1")
     robot = SimNineGridRobot(layout=layout, seed=seed, viewer=viewer,
                              deform=deform, fuse_captures=fuse_captures,
                              fuse_actions=fuse_actions)
@@ -648,11 +703,14 @@ def run_simulation(layout=SIM_LAYOUT, seed=3, quiet=False, viewer=None,
 
     truth = {d: c for c, d in layout.items() if d is not None}
     used = {a for a, _ in robot.action_log}
+    layout_ran = layout_enabled()      # 跑完再问一次：布局流程到底跑没跑
     stats = {
         "decision": "三段式" if three_stage else "统一决策",
         "ok_all": bool(ok_all),
         "results": list(getattr(level, "results", [])),
+        # 短路布局时 digit_cell 必然为空 ⇒ layout_ok 无意义（用 layout_ran 区分）
         "layout_ok": level.digit_cell == truth,
+        "layout_ran": layout_ran,
         "digit_cell": dict(level.digit_cell),
         "truth": truth,
         "captures": robot.n_captures,
@@ -681,11 +739,29 @@ def _action_counts_cn(counts):
     return "、".join(action_name_cn(a, n) for a, n in items)
 
 
+def _run_ok(stats):
+    """退出码判据：7/7 到位，（布局流程跑过时）还要求布局识别正确
+
+    短路布局时 `digit_cell` 必然为空、`layout_ok` 恒 False，那不是失败——
+    这种情况只看到位情况（`ok_all`）。
+    """
+    return bool(stats["ok_all"] and
+                (stats["layout_ok"] or not stats.get("layout_ran", True)))
+
+
 def _print_summary(stats):
     ok_n = sum(1 for _, ok in stats["results"] if ok)
     print(f"[仿真] 决策方式: {stats.get('decision', '?')}")
-    print(f"[仿真] 布局识别: {'成功' if stats['layout_ok'] else '失败'}"
-          f"｜数字→格位: {stats['digit_cell']}")
+    if stats.get("layout_ran", True):
+        print(f"[仿真] 布局识别: {'成功' if stats['layout_ok'] else '失败'}"
+              f"｜数字→格位: {stats['digit_cell']}")
+        if stats.get("layout_ok"):
+            # 给人看的形式：远排在上、0 = 该格没有数字（见 format_layout）
+            print("[仿真] 数字→格位图（远排在上一行、0 = 该格没有数字）：")
+            print_layout(stats["digit_cell"], prefix="[仿真]   ")
+    else:
+        print("[仿真] 布局流程: **已短路**（不扫场/不拟合/不反推位姿）"
+              "｜逐格导航全靠视觉")
     print(f"[仿真] 到位: {ok_n}/{len(stats['results'])}"
           f"｜拍照 {stats['captures']} 张｜动作 {stats['actions']} 次")
     print(f"[仿真] 动作统计: {_action_counts_cn(stats['action_counts'])}")
@@ -720,6 +796,11 @@ def main(argv=None):
                     help="跑**三段式**（现场发货的稳定实现，"
                          "levels/nine_grid_three_stage.py）。不加则跑统一决策"
                          "（三档分区＋一个循环，levels/nine_grid.py）。")
+    ap.add_argument("--no-layout", action="store_true",
+                    help="**短路掉全部布局流程**（等价 NINEGRID_NO_LAYOUT=1）："
+                         "不扫场/不拟合格阵/不自标定/不反推位姿，逐格导航全靠"
+                         "视觉。用于回归'布局定不出来时这一关还跑不跑得起来'。"
+                         "此时逐格正确性看 ok_all，不看 layout_ok。")
     ap.add_argument("--no-ui", action="store_true",
                     help="不开窗（脚本 / CI 用）；默认开窗可视化")
     ap.add_argument("--delay", type=int, default=30,
@@ -728,7 +809,14 @@ def main(argv=None):
                     help="开窗时也跑检测器叠加（慢，整轮约 +25s）")
     args = ap.parse_args(argv)
 
-    print(f"[仿真] 决策方式: {'三段式' if args.three_stage else '统一决策'}")
+    # ★ 短路布局流程（CLI 或环境变量）：必须在创建关卡前置好环境变量——关卡侧
+    #   在 run_level() 里读它（nine_grid_shared.layout_enabled()）。
+    if args.no_layout:
+        os.environ.setdefault(NO_LAYOUT_ENV_VAR, "1")
+    no_layout = not layout_enabled()
+    print(f"[仿真] 决策方式: {'三段式' if args.three_stage else '统一决策'}"
+          + ("｜布局流程: **已短路**（不扫场/不拟合/不反推位姿）"
+             if no_layout else "｜布局流程: 开启"))
     layout = random_layout(args.seed) if args.random_layout else SIM_LAYOUT
     print(f"[仿真] 布局: {layout}")
     deform = None
@@ -763,12 +851,13 @@ def main(argv=None):
         try:
             run = run_simulation(layout=layout, seed=args.seed,
                                  quiet=args.quiet, deform=deform,
-                                 three_stage=args.three_stage)
+                                 three_stage=args.three_stage,
+                                 no_layout=no_layout)
         except Exception as e:            # 布局扫失败等：CLI 友好退出
             print(f"[仿真] 关卡异常: {type(e).__name__}: {e}")
             return 1
         _print_summary(run.stats)
-        return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
+        return 0 if _run_ok(run.stats) else 1
 
     # ---- 开窗模式：按键 与 换 seed 重开 ----
     print("[仿真] 按键：SPACE 暂停／继续｜S 单步放行一帧｜R 换 seed 重开"
@@ -781,7 +870,8 @@ def main(argv=None):
         try:
             run = run_simulation(layout=layout, seed=seed, viewer=viewer,
                                  quiet=args.quiet, deform=deform,
-                                 three_stage=args.three_stage)
+                                 three_stage=args.three_stage,
+                                 no_layout=no_layout)
         except ViewerRestart:
             viewer.close()
             seed += 1
@@ -794,7 +884,7 @@ def main(argv=None):
         try:
             viewer.finish(run.stats)
             viewer.close()
-            return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
+            return 0 if _run_ok(run.stats) else 1
         except ViewerRestart:
             viewer.close()
             seed += 1

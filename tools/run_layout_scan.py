@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(_HERE))
 from core.robot_core import (RobotState, lock_camera_controls,
                                 auto_calibrate_exposure,
                                 CAM_AUTO_EXPOSURE_ENABLED)
-from levels.nine_grid_shared import NineGridShared, PITCH_NAV
+from levels.nine_grid_shared import NineGridShared, PITCH_NAV, print_layout
 
 
 def main(argv=None):
@@ -101,6 +101,14 @@ def main(argv=None):
                      else round(float(level.pose[2]) * 57.29578, 1)),
         "pitch_offset_deg": round(float(level._pitch_offset_deg), 1),
         "cam_height_cm": round(float(level._cam_height_cm), 1),
+        # 相机高度来源（2026-09-27）："像素域精定" = 自标定过了像素门且落在
+        # 实测值附近；"实测回退" = 用卷尺实测常数（见核对报告-2026-09-27）。
+        # 现场判读：出现"实测回退"不是失败，但说明这局的**距离尺度没被自标定
+        # 验证过**，量距离类结论要打问号（导航/到达判决不读它）。
+        "height_source": (None if level._last_fit is None
+                          else level._last_fit.height_source),
+        "calib_ok": (None if level._last_fit is None
+                     else bool(level._last_fit.calib_ok)),
         "effective_pitch_deg_nav": round(float(level._effective_pitch_deg(PITCH_NAV)), 1),
         "cell_conflict": sorted(int(v) for v in (level.cell_conflict or ())),
         "frames": dict(level.phase_frames or {}),
@@ -117,13 +125,17 @@ def main(argv=None):
     print("\n================ 布局扫描结论 ================")
     if rc == 0:
         print(f"数字→格: {out['digit_cell']}")
+        print("数字→格位（远排在上一行、0 = 该格没有数字）：")
+        print_layout(out["digit_cell"], prefix="  ")
         print(f"格→数字: {out['cell_digit']}   格6是否被占: "
               f"{'是（与规则冲突，需核对标号约定）' if 6 in cell_digit else '否'}")
         print(f"位姿: ({out['pose'][0]}, {out['pose'][1]}) "
               f"航向 {out['pose_deg']}°" if out["pose"] else "位姿: 无")
         print(f"自标定: 安装偏移 {out['pitch_offset_deg']:+.1f}° / 高度 "
               f"{out['cam_height_cm']:.0f}cm（导航档有效俯角 "
-              f"{out['effective_pitch_deg_nav']:.1f}°）")
+              f"{out['effective_pitch_deg_nav']:.1f}°）"
+              f"｜高度来源: {out['height_source'] or '无（未跑布局扫）'}"
+              f"{'（自标定通过像素门）' if out['calib_ok'] else '（用卷尺实测值）'}")
         print(f"仲裁冲突格: {out['cell_conflict']}")
     else:
         print(f"失败（rc={rc}）: {err}")

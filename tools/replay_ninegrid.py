@@ -24,8 +24,8 @@
     板南侧机位、朝北：远排 = 紫6 / 粉7 / 空，中排 = 蓝5 / 黄3 / 橙2，
     近排 = 绿4 / 空(被机身遮挡) / 红1
     → 数字→格 = PHOTO_TRUTH（见下）
-注意：**该机位下"位置6 被绿4 占据"是预期现象**（机位不在入口侧，或标号
-约定与裁判 .ino 不同），真机从入口进场时扫描结果必须满足"格6 恒空"。
+注意：**位置 6 可以被面板占据**（"格6 恒空"这条规则已取消，2026-09-28
+现场确认），结果里 6 出现在任何格位都属正常。
 """
 
 import argparse
@@ -41,7 +41,7 @@ import cv2
 
 from core.camera_config import HEAD_CENTER
 from levels.nine_grid_shared import (
-    NineGridShared, PITCH_NAV, PITCH_DOWN,
+    NineGridShared, PITCH_NAV, PITCH_DOWN, print_layout,
 )
 
 # 现场照片读图真值（板南侧机位；见模块 docstring）
@@ -232,15 +232,17 @@ def main(argv=None):
         return 1
     dt = time.time() - t0
     print(f"[replay] 布局: {level.digit_cell}")
+    print("[replay] 数字→格位（远排在上一行、0 = 该格没有数字）：")
+    print_layout(level.digit_cell, prefix="[replay]   ")
     print(f"[replay] 自标定: 安装偏移 {level._pitch_offset_deg:+.1f}° / 高度 "
-          f"{level._cam_height_cm:.0f}cm")
+          f"{level._cam_height_cm:.0f}cm"
+          f"（{getattr(level._last_fit, 'height_source', '无')}）")
     print(f"[replay] 位姿自举: ({level.pose[0]:.1f},{level.pose[1]:.1f}) "
           f"航向 {level.pose[2] * 180.0 / 3.141592653589793:.1f}°")
     print(f"[replay] 拍照 {robot.captures} 张（复用 {robot.reused} 次）"
           f"耗时 {dt:.1f}s")
     if 6 in level.digit_cell.values():
-        print("[replay] 注意：结果里位置6 被占——该机位不在入口侧（或标号约定"
-              "不同）时属预期；真机入口侧扫描必须满足格6 恒空")
+        print("[replay] 提示：位置6 有面板属正常——\"格6 恒空\"这条规则已取消")
 
     if args.expect:
         ok = level.digit_cell == PHOTO_TRUTH

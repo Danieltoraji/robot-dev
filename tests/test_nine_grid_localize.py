@@ -130,6 +130,13 @@ def test_unclipped_center_model_exact():
 def test_clipped_prediction_inside_image():
     """裁切预测边界条件：脚下只余贴底细条/贴边极限，远距为画内点
 
+    ⚠️ 2026-09-27 改（相机高度 56→**实测 33.9cm**，见
+    docs/关卡算法/彩色数字九宫格-nine_grid/核对报告-2026-09-27-相机高度自标定.md）：
+    高度降低 39% 后相机把地面看得更近，"多近才出画"这条边界跟着变——原来按
+    56cm 写的"导航档站在面板中心必定完全出画"已不成立（33.9cm 时面板还在画内
+    偏下）。所以这里不再钉死一个位置，而是**按当前几何反解出画边界**再验证钳位，
+    这样换相机高度/换档位时测试仍然成立。
+
     阈值按"安装偏移 + 高度 56cm"的几何：
       - 站在面板中心 pitch1040：可见地面带起点 ≈3.3cm，面板前缘 14cm 可见
         → 裁切质心预测 (1283, 1734) 在画内靠底；面板中心投影 y=2004 已出画；
@@ -147,8 +154,14 @@ def test_clipped_prediction_inside_image():
         f"站在面板中心时裁切预测应在画内靠底，实际 {on_panel}"
     assert center_px[1] > 1944, \
         f"站在面板中心时面板中心投影应已出画（下沿外），实际 {center_px}"
-    # 导航档站在面板中心：面板完全在视野外 → 钳到画幅的极限点（不返回 None）
-    outside = clipped_centroid(center, 50.0, 50.0, 0.0, PITCH_NAV)
+    # 导航档、面板中心出画：裁切预测仍必须在画幅内（贴底细条，不能返回画外点）
+    sliver = clipped_centroid(center, 50.0, 50.0, 0.0, PITCH_NAV)
+    assert sliver is not None and 0 <= sliver[0] <= 2592 \
+        and 1944 * 0.85 <= sliver[1] <= 1944, \
+        f"面板中心出画时裁切预测应落在画幅内靠底，实际 {sliver}"
+    # 完全出画（面板在机器人**身后**）：钳到画幅底边的极限点（不返回 None——
+    # 数值雅可比需要连续）。用 bearing=180 构造，与相机高度无关，换档位也成立。
+    outside = clipped_centroid(center, 50.0, 30.0, np.radians(180.0), PITCH_NAV)
     assert outside is not None, "画外预测应给连续极限点而非 None"
     assert 0 <= outside[0] <= 2592 and 1944 - 1.0 <= outside[1] <= 1944, \
         f"完全出画时应钳到画幅底边，实际 {outside}"
@@ -158,7 +171,8 @@ def test_clipped_prediction_inside_image():
     assert 0 <= far[0] <= 2592 and 0 <= far[1] < 1944 - 100, \
         f"远距预测点应在画内偏上: {far}"
     print(f"  裁切预测边界：脚下贴底细条({int(on_panel[1])}px，中心投影 "
-          f"{int(center_px[1])}px 出画)，画外极限({outside[0]:.0f},{outside[1]:.0f})，"
+          f"{int(center_px[1])}px 出画 / 导航档裁切 {sliver[1]:.0f}px 仍在画内)，"
+          f"画外极限({outside[0]:.0f},{outside[1]:.0f})，"
           f"远距画内 ({far[0]:.0f},{far[1]:.0f}) ✓")
 
 
