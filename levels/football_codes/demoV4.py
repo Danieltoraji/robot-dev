@@ -37,18 +37,24 @@ PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-try:
-    # 用 Functions.RedLinePatrolV3 导入，确保它能按原文件逻辑找到
-    # Functions.CameraCalibration.CalibrationConfig。
-    from Functions import RedLinePatrolV3 as redline
-except ImportError:
-    # 兼容从其他目录启动的情况。
-    import RedLinePatrolV3 as redline
+# 支持从 Robot_control_self_module/levels/football_codes 直接运行：TonyPi
+# 框架目录提供 hiwonder SDK 与 Functions 包（CameraCalibration 等）。在
+# TonyPi 目录下运行时该路径已在 sys.path 中，此块自动跳过。
+_TONYPI_DIR = '/home/pi/TonyPi'
+if os.path.isdir(_TONYPI_DIR) and _TONYPI_DIR not in sys.path:
+    sys.path.insert(0, _TONYPI_DIR)
 
 try:
-    from Functions.patrol_end_recovery import PatrolEndRecoveryController
+    # 优先本地同目录导入（Robot_control_self_module 副本为唯一真源）；
+    # 本地缺失时回退 Functions（TonyPi 框架运行路径）。
+    import RedLinePatrolV3 as redline
 except ImportError:
+    from Functions import RedLinePatrolV3 as redline
+
+try:
     from patrol_end_recovery import PatrolEndRecoveryController
+except ImportError:
+    from Functions.patrol_end_recovery import PatrolEndRecoveryController
 
 
 class PatrolEndDetector:
@@ -66,8 +72,9 @@ class PatrolEndDetector:
     # 尚未压到脚下，这段时间禁止判定候选终点，避免转弯一结束就被误判。
     TURN_END_COOLDOWN_S = 2.5
 
-    def __init__(self, end_confirm_s=0.8):
+    def __init__(self, end_confirm_s=0.8, min_corner_index=3):
         self.end_confirm_s = max(0.0, float(end_confirm_s))
+        self.min_corner_index = max(0, int(min_corner_index))
         self.seen_line = False
         self.absent_since = None
         self.foot_absent_since = None
@@ -139,6 +146,18 @@ class PatrolEndDetector:
         # 启动时如果相机暂时没有拍到红线，不允许直接判定到达终点。
         if not self.seen_line:
             return False
+
+        # 进度门限（M9）：顺序表完成足够多的弯之前，中途离线不得判定候选
+        # 终点。260927 实车：弯2 后侧冲出赛道触发终点复核，恢复流程在画面
+        # 左边缘红线处左右横移震荡。若漏弯导致真到终点时进度不足，可用
+        # --patrol-end-min-corner-index 调低，或置 0 关闭此门限。
+        try:
+            if redline.get_corner_index() < self.min_corner_index:
+                self.absent_since = None
+                self.foot_absent_since = None
+                return False
+        except Exception:
+            pass
 
         # 直角弯处理或弯前接近阶段的丢线由巡线逻辑自己恢复。
         if getattr(redline, "turn_started", False) or getattr(redline, "approach_active", False):
@@ -270,7 +289,9 @@ def run_red_line_stage(args):
             flush=True,
         )
 
-        end_detector = PatrolEndDetector(args.patrol_end_confirm_seconds)
+        end_detector = PatrolEndDetector(
+            args.patrol_end_confirm_seconds,
+            min_corner_index=args.patrol_end_min_corner_index)
         end_recovery = PatrolEndRecoveryController(
             redline=redline,
             execute_actions=args.run,
@@ -327,8 +348,8 @@ def run_red_line_stage(args):
                     # 漏掉的直角弯已经由原巡线闭环完成。清空候选终点的
                     # 丢线计时，继续第一阶段，避免本帧立即再次触发终点复核。
                     end_detector = PatrolEndDetector(
-                        args.patrol_end_confirm_seconds
-                    )
+                        args.patrol_end_confirm_seconds,
+                        min_corner_index=args.patrol_end_min_corner_index)
                     last_status = None
                     print(
                         "[RedLinePatrolV3] 已恢复漏识别直角弯，继续巡线",
@@ -461,6 +482,13 @@ def parse_args():
         type=float,
         default=0.8,
         help="脚下近处 ROI 连续无红线后，额外确认多久才切换",
+    )
+    parser.add_argument(
+        "--patrol-end-min-corner-index",
+        type=int,
+        default=3,
+        help="终点判定的进度门限：完成至少该数量的直角弯后才允许判定候选"
+        "终点（防中途离线误判；漏弯场景可调低或置 0 关闭）",
     )
     parser.add_argument(
         "--patrol-end-tag-confirm-frames",

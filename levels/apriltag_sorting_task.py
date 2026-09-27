@@ -109,6 +109,8 @@ LINE_LOST_TIMEOUT = 2.0        # 相机无帧超时(秒)
 LINE_LOST_HOLD = 1.5           # 丢线后保持方向前进的秒数(不立即转)
 MAX_LOST_TURNS = 10            # 保持超时后左大转找的最大次数
 MAX_CONSEC_MOVES = 2           # 同方向连续平移上限, 超过强制前进一步重判(打断卡尔曼滞后过冲链条)
+FOLLOW_CONFIRM_S = 2.0         # 巡线确认等待秒(静置后判断线是否竖直, 防转身后画面甩动误判)
+FOLLOW_MAX_ADJUST = 30         # 未竖直时的调整次数上限, 超限直接直行
 VERTICAL_ANGLE_TOL = 25       # 红线主轴与竖直方向夹角<=此值(度)视为线竖直, 用平移不用转身(方向判据, 与线宽/距离无关)
 LINE_ROI = [                   # 三段 ROI (y1, y2, x1, x2, 权重), 越靠脚边权重越大
     # 调整: 去掉最下段(440-480, 脚下区域基本看不到线), 在中间段上方补一段(300-340)
@@ -150,7 +152,7 @@ CALIB_CONST_KEYS = [
     "PICK_FINAL_STEPS", "PLACE_FINAL_STEPS", "MAX_PICK_RETRIES", "STEP4_MAX_FORWARDS",
     "LINE_CENTER_X", "LINE_TURN_THRESHOLD", "SEARCH_LINE_ALIGN_THRESHOLD",
     "VERTICAL_ANGLE_TOL", "LINE_LOST_TIMEOUT", "LINE_LOST_HOLD", "MAX_LOST_TURNS",
-    "MAX_CONSEC_MOVES",
+    "MAX_CONSEC_MOVES", "FOLLOW_CONFIRM_S", "FOLLOW_MAX_ADJUST",
     "KF_CX_Q", "KF_CX_R", "KF_CY_Q", "KF_CY_R",
     "KF_DIST_Q", "KF_DIST_R", "KF_OFFSET_Q", "KF_OFFSET_R",
     "KF_ANGLE_Q", "KF_ANGLE_QV", "KF_ANGLE_R",
@@ -874,17 +876,19 @@ class SortingTask:
         return -1, display
 
     def follow_line(self, max_steps: int, stop_on_blue: bool = False, label: str = ""):
-        """沿红线走: 低头看红线, |dx|<=threshold前进, 否则转身. 退出: 走满max_steps/看见蓝海绵/红线丢失超时"""
-        log.info("follow_line %s: max_steps=%d stop_on_blue=%s", label, max_steps, stop_on_blue)
+        """确认式直行循迹: 静置FOLLOW_CONFIRM_S秒后判断线是否竖直;
+        竖直则一次直行max_steps步; 否则按dx调整朝向再静置重判, 循环"""
+        log.info("follow_line %s: confirm=%.1fs straight=%d stop_on_blue=%s",
+                 label, FOLLOW_CONFIRM_S, max_steps, stop_on_blue)
         self.set_head(self.servo2, self.servo1 + self.line_head_delta, duration=400)
         time.sleep(0.5)
         steps = 0
         self.lost_turns = 0
-        line_lost_time = None
         no_frame_start = None
-        move_dir = 0      # 最近一次平移方向(+1右/-1左), 0=无
-        move_streak = 0   # 同方向连续平移次数(防过冲)
-        while steps < max_steps:
+        adjust_count = 0
+        while True:
+            # 静置确认期: 等画面稳定后再判断(转身/调整后画面会甩动)
+            time.sleep(FOLLOW_CONFIRM_S)
             ok, frame = self.camera.read()
             if not ok or frame is None:
                 if no_frame_start is None:
@@ -892,7 +896,6 @@ class SortingTask:
                 if time.time() - no_frame_start > LINE_LOST_TIMEOUT:
                     log.info("follow_line: 相机长时间无帧, 停")
                     break
-                time.sleep(0.02)
                 continue
             no_frame_start = None
             frame = cv2.remap(frame, self.mapx, self.mapy, cv2.INTER_LINEAR)
@@ -908,57 +911,32 @@ class SortingTask:
                 snap_path = "/home/pi/codes/pictures/line_%s.jpg" % time.strftime("%H%M%S")
                 os.makedirs("/home/pi/codes/pictures", exist_ok=True)
                 cv2.imwrite(snap_path, line_display)
+            if line_cx >= 0 and self.line_is_vertical:
+                # 线竖直确认: 一次直行max_steps步, 结束循迹
+                log.info("follow_line: 线竖直确认, 直行%d步", max_steps)
+                self.actions.run("go_forward_one_step", times=max_steps)
+                steps += max_steps
+                break
+            # 未竖直: 调整后重新静置判断
+            if adjust_count >= FOLLOW_MAX_ADJUST:
+                log.info("follow_line: 调整%d次仍未确认竖直, 直行%d步", adjust_count, max_steps)
+                self.actions.run("go_forward_one_step", times=max_steps)
+                steps += max_steps
+                break
+            adjust_count += 1
             if line_cx < 0:
-                # 丢线: LINE_LOST_HOLD秒内保持方向前进, 超时才左转找
-                if line_lost_time is None:
-                    line_lost_time = time.time()
-                if time.time() - line_lost_time < LINE_LOST_HOLD:
-                    self.actions.run("go_forward_one_step")
-                    steps += 1
-                    move_dir, move_streak = 0, 0
-                    log.info("follow_line: 丢线保持前进 step=%d/%d", steps, max_steps)
-                else:
-                    self.lost_turns += 1
-                    if self.lost_turns > MAX_LOST_TURNS:
-                        log.info("follow_line: 丢线转%d次未找回停", MAX_LOST_TURNS)
-                        break
-                    log.info("follow_line: 丢线左大转找 %d/%d", self.lost_turns, MAX_LOST_TURNS)
-                    self.actions.run("turn_left")
-                time.sleep(0.01)
-                continue
-            line_lost_time = None
-            self.lost_turns = 0
-            dx = line_cx - LINE_CENTER_X
-            if abs(dx) <= LINE_TURN_THRESHOLD:
-                self.actions.run("go_forward_one_step")
-                steps += 1
-                move_dir, move_streak = 0, 0
-                log.info("follow_line: 前进 step=%d/%d dx=%d", steps, max_steps, dx)
-            elif self.line_is_vertical:
-                # 线竖直(平行): 用平移, 不转身(避免过冲)
-                mdir = 1 if dx > 0 else -1
-                if mdir == move_dir:
-                    move_streak += 1
-                else:
-                    move_dir, move_streak = mdir, 1
-                if move_streak > MAX_CONSEC_MOVES:
-                    # 连续平移超限仍没居中: 多半是滤波滞后已过冲, 强制前进一步重判
-                    self.actions.run("go_forward_one_step")
-                    steps += 1
-                    move_dir, move_streak = 0, 0
-                    log.info("follow_line: 连续平移%d次强制前进 step=%d/%d", MAX_CONSEC_MOVES, steps, max_steps)
-                else:
-                    self.actions.run("right_move" if dx > 0 else "left_move")
-                    log.info("follow_line: 平移 dx=%d (平行) %d/%d", dx, move_streak, MAX_CONSEC_MOVES)
-            elif dx > 0:
-                self.actions.run("turn_right_small_step")
-                move_dir, move_streak = 0, 0
-                log.info("follow_line: 右转 dx=%d", dx)
+                # 丢线: 左大转找回
+                self.lost_turns += 1
+                if self.lost_turns > MAX_LOST_TURNS:
+                    log.info("follow_line: 丢线转%d次未找回停", MAX_LOST_TURNS)
+                    break
+                log.info("follow_line: 丢线左大转找 %d/%d", self.lost_turns, MAX_LOST_TURNS)
+                self.actions.run("turn_left")
             else:
-                self.actions.run("turn_left_small_step")
-                move_dir, move_streak = 0, 0
-                log.info("follow_line: 左转 dx=%d", dx)
-            time.sleep(0.01)
+                self.lost_turns = 0
+                dx = line_cx - LINE_CENTER_X
+                self.actions.run("turn_right_small_step" if dx > 0 else "turn_left_small_step")
+                log.info("follow_line: 未竖直(dx=%d) 小步转调整 %d/%d", dx, adjust_count, FOLLOW_MAX_ADJUST)
         self.set_head_center(duration=300)
         log.info("follow_line %s done: steps=%d", label, steps)
 
@@ -1268,14 +1246,15 @@ def parse_args():
     parser.add_argument("--pick-action", default="move_up", help="existing action group used to pick the sponge")
     parser.add_argument("--target-tag", type=int, default=DEFAULT_TARGET_TAG_ID, help="AprilTag ID on the target board")
     parser.add_argument("--end-tag", type=int, default=26, help="终点tag id, 放置后走到该tag(0=禁用)")
-    parser.add_argument("--post-pick-left-turns", type=int, default=15,
-                        help="抓取后左转次数(按新路线调整为15)")
+    parser.add_argument("--post-pick-left-turns", type=int, default=8,
+                        help="抓取后左转次数(当前8)")
     parser.add_argument("--post-pick-forward-steps", type=int, default=5)
     parser.add_argument("--back-steps-after-place", type=int, default=12, help="放置后后退步数(退远一点才够转身找到身后红线)")
     # 红色胶带巡线
     parser.add_argument("--line-initial-steps", type=int, default=8, help="开机沿红色胶带走几步到海绵区(0=禁用,看见蓝海绵提前停)")
     parser.add_argument("--line-search-turns", type=int, default=30, help="放置后右转找红线最多几次(看到即停)")
-    parser.add_argument("--line-final-steps", type=int, default=10, help="放置后沿红线走到终点的步数")
+    parser.add_argument("--line-final-steps", type=int, default=20,
+                        help="放置后沿红线走到终点的步数(确认线竖直后一次直行的步数)")
     parser.add_argument("--line-head-delta", type=int, default=60, help="巡线时低头角度(相对servo1, 60=看远)")
     parser.add_argument("--pick-area-threshold", type=float, default=4762.0,
                         help="海绵面积达到此值即视为足够近, 触发抓取")

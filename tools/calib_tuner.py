@@ -106,6 +106,8 @@ PARAMS = [
     ("LINE_LOST_TIMEOUT", 4, "NOFRAME_TO_x10", 10, 0, 100, None),
     ("MAX_LOST_TURNS", 4, "MAX_LOST_TURNS", 1, 0, 50, None),
     ("MAX_CONSEC_MOVES", 4, "MAX_CONSEC_MOVES", 1, 1, 10, None),
+    ("FOLLOW_CONFIRM_S", 4, "FOLLOW_CONFIRM_x0.1s", 10, 0, 100, None),
+    ("FOLLOW_MAX_ADJUST", 4, "FOLLOW_MAX_ADJUST", 1, 0, 100, None),
     ("line_head_delta", 4, "LINE_HEAD_DELTA", 1, 0, 500, None),
     # 5 终点 + 动作计数
     ("END_YAW_LOWER", 5, "END_YAW_LO", 1, -90, 180, None),

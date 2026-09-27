@@ -129,10 +129,12 @@ tag 检测不能在 PC 本地做，用模拟值调 tag 阈值最方便）。
 | 参数 | 标定方法 |
 |---|---|
 | `LINE_CENTER_X` | 巡线目标中心 x（当前 340，摄像头偏移时修正） |
-| `LINE_TURN_THRESHOLD` | 蛇形摆动=调高；反应迟钝=调低 |
+| `LINE_TURN_THRESHOLD` | 旧"逐步修正"模式的直行死区；当前巡线为确认式直行，**暂不生效** |
 | `SEARCH_LINE_ALIGN_THRESHOLD` | 放完海绵转身找线时 |dx| 收敛到多少算对正；太小永远对不齐 |
 | `VERTICAL_ANGLE_TOL` | 任一 ROI 带内红线轮廓**主轴方向**与竖直夹角 ≤ 此值判"线竖直"（当前 25°；PCA 方向判据与线宽/距离无关，替代旧的高宽比判据——线近而宽时旧判据永远判不竖直） |
-| `MAX_CONSEC_MOVES` | 同方向连续平移上限（当前 2），超过强制前进一步重判——打断卡尔曼滞后造成的平移过冲之字形 |
+| `MAX_CONSEC_MOVES` | 旧"逐步修正"模式的同方向连续平移上限；当前巡线为确认式直行，**暂不生效** |
+| `FOLLOW_CONFIRM_S` | 巡线确认等待秒（当前 2.0）：静置后判断线是否竖直，防转身后画面甩动误判 |
+| `FOLLOW_MAX_ADJUST` | 未竖直时的调整次数上限（当前 30），超限直接直行 |
 | `LINE_LOST_HOLD/TIMEOUT/MAX_LOST_TURNS` | 按实测转角定"左大转几次能找回线" |
 | `line_head_delta` | 低头角决定红线落在哪几行 ROI，看快照调 |
 
@@ -143,9 +145,9 @@ tag 检测不能在 PC 本地做，用模拟值调 tag 阈值最方便）。
 | `WALK_STEPS / MAX_TURN` | 终点距离 ÷ 实测单步距离 |
 | `PICK_FINAL_STEPS / PLACE_FINAL_STEPS` | 总抓空→加大；总撞上→减小 |
 | `MAX_PICK_RETRIES` | 一般不动 |
-| `post_pick_left_turns / post_pick_forward_steps` | 用实测转角+步长在地图上算"抓取点→Tag 搜索通道"反推（当前左转 20） |
+| `post_pick_left_turns / post_pick_forward_steps` | 用实测转角+步长在地图上算"抓取点→Tag 搜索通道"反推（当前左转 8） |
 | `back_steps_after_place` | 退多远才够转身看到身后红线，实测 |
-| `line_final_steps / line_search_turns` | 终点距离换算 / 找线最多转几次 |
+| `line_final_steps / line_search_turns` | 确认线竖直后一次直行的步数（当前 20）/ 找线右转最多几次（当前 30） |
 
 ### 6.6 卡尔曼（页 6）
 原则：**R（观测噪声）越大越平滑但越滞后；Q（过程噪声）越大越跟手但越抖。**
