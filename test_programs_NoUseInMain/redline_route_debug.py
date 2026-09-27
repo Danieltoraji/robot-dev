@@ -67,7 +67,9 @@ PANEL_THRESHOLD_NAMES = (
     'POST_TURN_MAX_EXTRA_TURNS', 'CORNER_MAIN_STEPS_LEFT',
     'CORNER_MAIN_STEPS_RIGHT', 'CORNER_FINE_MAX_STEPS',
     'CORNER_EXIT_HEADING_PX', 'CORNER_MIN_VERTICAL_SPAN',
-    'CORNER_TRIGGER_CENTER_DEADBAND', 'CORNER_FINE_BAR_MAX_STEPS',
+    'CORNER_TRIGGER_CENTER_DEADBAND', 'CORNER_TRIGGER_DEEP_Y',
+    'CORNER_CONFLICT_MIN_OFFSET', 'CORNER_CONFLICT_HOLD_SECONDS',
+    'CORNER_CONFLICT_DEEP_SECONDS', 'CORNER_FINE_BAR_MAX_STEPS',
     'CORNER_BAR_FREE_REARM_FRAMES',
     'LOST_CONFIRM_SECONDS', 'SEARCH_PRIMARY_MAX_TURNS',
     'SEARCH_REVERSE_MAX_TURNS', 'SEARCH_OBSERVE_SECONDS',
@@ -211,6 +213,12 @@ def draw_overlays(redline, frame, state, decision, session):
     cv2.putText(frame, 'trigger y={}'.format(trigger_y),
                 (width - 135, trigger_y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
                 (0, 255, 255), 1, cv2.LINE_AA)
+    # 横条深度豁免线（corner_y 达到该深度后不再要求近端居中）。
+    deep_y = int(getattr(redline, 'CORNER_TRIGGER_DEEP_Y', 430))
+    cv2.line(frame, (0, deep_y), (width, deep_y), (255, 128, 0), 1)
+    cv2.putText(frame, 'deep y={}'.format(deep_y),
+                (width - 135, deep_y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                (255, 128, 0), 1, cv2.LINE_AA)
     if state.get('corner_ready'):
         cv2.putText(frame, 'CORNER READY y={:.0f}'.format(
             float(state.get('corner_y', 0.0))), (8, height - 10),

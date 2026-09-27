@@ -60,12 +60,13 @@ except ImportError:
 FRAME_SIZE = (640, 480)
 IMAGE_CENTER_X = FRAME_SIZE[0] // 2
 
-# 红色 HSV 双区间
+# 红色 HSV 双区间（260927 用 HSV_threhold_test_program 重新标定：
+# S 下限 0→31 过滤低饱和粉红，H 上界 17→6 收紧色相）
 RED_H_LOW1 = 0
-RED_H_HIGH1 = 17
+RED_H_HIGH1 = 6
 RED_H_LOW2 = 149
 RED_H_HIGH2 = 180
-RED_S_LOW = 0
+RED_S_LOW = 31
 RED_V_LOW = 50
 
 # 视觉区域和轮廓
@@ -89,7 +90,10 @@ SAMPLE_BAND_HEIGHT = 50  # 各采样带等高，用于计算横条填充率
 
 # 正常巡线阈值
 CENTER_DEADBAND = 42              # 近处红线离画面中心超过此值才横移
-HEADING_TURN_THRESHOLD = 5        # 极缓弯也立即转向
+HEADING_TURN_THRESHOLD = 12       # 极缓弯也立即转向；5 曾把直线 heading=6.7/10.4 误判为
+                                  # 需修正（260927 图5/9 回放：原地小步抖动 16 次才暂停）。
+                                  # 直线循迹 heading 正常范围 ±20px，12 仍能纠正明显斜行，
+                                  # 同时忽略轻微透视倾斜。
 HEADING_MAX = 50.0                # heading 绝对值上限；超过视为路口/噪声，置 0 忽略朝向
 HEADING_HINT_THRESHOLD = 25       # 丢线时用最后朝向猜搜索方向的阈值
 VERTICAL_HEADING_TOLERANCE = 5    # 与转向阈值衔接，避免决策死区
@@ -167,6 +171,17 @@ CORNER_FINE_MAX_STEPS = 6         # 精修阶段最多步数（未转够用大�
 # "新直道出现"的退出确认；不再用横条中点偏移判向（偏姿态下符号会反转）。
 CORNER_TRIGGER_CENTER_DEADBAND = 20   # 触发时近端线中心须在画面中心 ±20px 内
                                       #（弯1实测 ±4px；弯2/3/4 触发时 +20~33px，支点偏早）
+CORNER_TRIGGER_DEEP_Y = 430           # 横条深度豁免：横条压到脚下（最底采样带被横条主导，
+                                      # near_x 几何性偏移 +43~+73px，居中判据在此深度必然
+                                      # 失败）时不再要求近端居中，直接允许触发。实拍路口图
+                                      # 2/4/6/8 的 corner_y=441~448；居中门限仍对刚过触发线
+                                      # （350~430）的偏早触发场景生效。
+CORNER_CONFLICT_MIN_OFFSET = 40       # 判向冲突时视觉判向可信所需的最小横条中点偏移（px）
+                                      #（实拍图4/6/8 offset=+43/+38/-52，符号与几何一致）
+CORNER_CONFLICT_HOLD_SECONDS = 2.0    # 判向冲突先横移对中/前进重判的时长：偏姿态下横条中点
+                                      # 偏移符号会反转，摆正后判向恢复即按表转，不急于转
+CORNER_CONFLICT_DEEP_SECONDS = 2.0    # 冲突持续超过此时长且横条深压脚下+判向明确：判定前面
+                                      # 漏了弯、顺序表错位，前移对齐视觉判向（漏弯自愈）
 CORNER_FINE_BAR_MAX_STEPS = 2         # 竖线未出现时，精修最多按查表方向小步续转的次数
                                       #（右小步 5.2°、左小步 8.625°，各方向各用各值）
 CORNER_BAR_FREE_REARM_FRAMES = 5      # 上一弯完成后连续无横条帧数达到此值，
@@ -198,7 +213,10 @@ TURN_RIGHT_SMALL_ACTION = 'turn_right_small_step'
 LATERAL_LEFT_ACTION = 'left_move_fast'
 LATERAL_RIGHT_ACTION = 'right_move_fast'
 NORMAL_ACTION_SETTLE = 1.0        # 每个正常动作单元完成后停 1 秒观察
-MAX_NO_PROGRESS_TURNS = 16        # 小转角修正每次改善的角度更小，需要更多次才能判定"无进展"
+MAX_NO_PROGRESS_TURNS = 6         # 连续小步修正无明显进展达此次数即暂停等待视觉变化。
+                                  # 曾设 16：修正有进展时计数会重置，原地抖动约 16s 才停
+                                  # （260927 图5/9 回放）；6 次足够区分"修正有效"与
+                                  # "原地打转"。
 TURN_PROGRESS_MIN = 3             # 同上，进展阈值相应调小
 TURN_ACTION_TIMES = 1             # 与 cmd_keyboard.py 的 q/e 配置一致
 TURN_WITH_STAND = True
@@ -1027,22 +1045,77 @@ def decide_action(state, session, now):
         # POST_TURN_MIN_FORWARD_STEPS 次，横条自上一弯起连续退场过
         # （corner_rearmed），且近端线已居中（CORNER_TRIGGER_CENTER_DEADBAND：
         # 偏姿态下横条深度信号偏早，弯2/3/4 触发时 nx=+20~33px 而弯1 仅
-        # ±4px，居中门限把支点推回路口）。
+        # ±4px，居中门限把支点推回路口）——或横条已深压脚下（深度豁免：
+        # 近端带被横条主导、near_x 几何性偏移，居中判据必然失败，继续等
+        # 对中只会卡死在路口）。
         if (corner_ready_flag and state['horizontal_corner']
                 and session.post_turn_progress_steps >= POST_TURN_MIN_FORWARD_STEPS
                 and session.corner_rearmed
-                and abs(center_error) <= CORNER_TRIGGER_CENTER_DEADBAND):
+                and (abs(center_error) <= CORNER_TRIGGER_CENTER_DEADBAND
+                     or state['corner_y'] >= CORNER_TRIGGER_DEEP_Y)):
             corner_turn = expected_corner_direction(session.corner_index)
             visual_dir = state.get('corner_direction', 0)
             offset_x = state.get('corner_offset_x', 0.0)
             if corner_turn != 0:
-                if visual_dir != 0 and visual_dir != corner_turn:
-                    # 偏姿态下横条中点偏移符号会反转（260927 回放：右转的
-                    # 弯2/3 全程判左），视觉判向只做记录，不再回退/覆盖
-                    # 顺序表，避免朝错误方向转（回放中曾致 ci 回退 10 次）。
-                    print('V3 方向校验：视觉判向{} 与赛道顺序{} 不一致（offset={:.0f}），忽略视觉判向'.format(
-                        direction_name(visual_dir), direction_name(corner_turn),
-                        offset_x))
+                conflict = (visual_dir != 0 and visual_dir != corner_turn)
+                if conflict:
+                    conflict_seconds = (now - session.bar_dwell_start
+                                        if session.bar_dwell_start else 0.0)
+                    deep_confident = (state['corner_y'] >= CORNER_TRIGGER_DEEP_Y
+                                      and abs(offset_x) >= CORNER_CONFLICT_MIN_OFFSET)
+                    if (deep_confident and
+                            conflict_seconds >= CORNER_CONFLICT_DEEP_SECONDS):
+                        # 漏弯自愈：横条深压脚下、视觉判向明确且与顺序表冲突
+                        # 持续超过 CORNER_CONFLICT_DEEP_SECONDS——前面有弯被
+                        # 漏过，顺序表已错位。把 corner_index 前移对齐视觉判向
+                        #（实拍路口图2/4/6/8 视觉判向全部与赛道几何一致）。
+                        skipped = 0
+                        while (session.corner_index + skipped <
+                               len(CORNER_TURN_SEQUENCE) and
+                               expected_corner_direction(
+                                   session.corner_index + skipped) != visual_dir):
+                            skipped += 1
+                        if (session.corner_index + skipped >=
+                                len(CORNER_TURN_SEQUENCE)):
+                            corner_turn = visual_dir
+                            print('V3 方向校验：顺序表已无匹配{}的弯，'
+                                  '按视觉判向转'.format(
+                                      direction_name(visual_dir)))
+                        else:
+                            session.corner_index += skipped
+                            corner_turn = expected_corner_direction(
+                                session.corner_index)
+                            print('V3 方向校验：冲突持续{:.1f}s，判定漏弯，'
+                                  '跳过{}个弯对齐视觉判向{}（offset={:.0f}）'.format(
+                                      conflict_seconds, skipped,
+                                      direction_name(visual_dir), offset_x))
+                    elif conflict_seconds < CORNER_CONFLICT_HOLD_SECONDS:
+                        # 判向冲突但未达自愈条件：偏姿态下横条中点偏移符号会
+                        # 反转（260927 回放：右转的弯2/3 判左），先横移对中/
+                        # 前进重判，摆正后判向恢复即按表转。
+                        band = (CORNER_TRIGGER_CENTER_DEADBAND
+                                if corner_ready_flag else CENTER_DEADBAND)
+                        if abs(center_error) >= band:
+                            action = (LATERAL_RIGHT_ACTION if center_error > 0
+                                      else LATERAL_LEFT_ACTION)
+                            action_label = '路口判向冲突，横移对中重判'
+                        else:
+                            action = FORWARD_ACTION
+                            action_label = '路口判向冲突，前进重判'
+                        if action_label != session.last_action_label:
+                            print('V3 巡线：{}'.format(action_label))
+                            session.last_action_label = action_label
+                        decision.actions = [(action, 1, False,
+                                             NORMAL_ACTION_SETTLE)]
+                        decision.label = action_label
+                        return decision
+                    else:
+                        # 重判窗口用尽仍冲突且判向不够明确：维持原行为按
+                        # 顺序表转（视觉判向只做记录）。
+                        print('V3 方向校验：判向冲突重判超时，按顺序表向{}转'
+                              '（visual={} offset={:.0f}）'.format(
+                                  direction_name(corner_turn),
+                                  direction_name(visual_dir), offset_x))
                 action_label = '路口{}按顺序执行向{}转 corner_y={:.0f}'.format(
                     session.corner_index + 1, direction_name(corner_turn),
                     state['corner_y'])

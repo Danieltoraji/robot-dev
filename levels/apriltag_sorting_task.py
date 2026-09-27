@@ -112,6 +112,7 @@ MAX_CONSEC_MOVES = 2           # 同方向连续平移上限, 超过强制前进
 FOLLOW_CONFIRM_S = 2.0         # 巡线确认等待秒(静置后判断线是否竖直, 防转身后画面甩动误判)
 FOLLOW_MAX_ADJUST = 30         # 未竖直时的调整次数上限, 超限直接直行
 VERTICAL_ANGLE_TOL = 25       # 红线主轴与竖直方向夹角<=此值(度)视为线竖直, 用平移不用转身(方向判据, 与线宽/距离无关)
+CAMERA_ROLL_DEG = 10.0        # 摄像头滚转标定(以画面最下面为轴, 顺时针为正): 真正正对线时, 线在画面中为"竖直线顺时针旋转10°"(公式角度约-80)
 LINE_ROI = [                   # 三段 ROI (y1, y2, x1, x2, 权重), 越靠脚边权重越大
     # 调整: 去掉最下段(440-480, 脚下区域基本看不到线), 在中间段上方补一段(300-340)
     (240, 280, 0, 640, 0.1),
@@ -119,10 +120,11 @@ LINE_ROI = [                   # 三段 ROI (y1, y2, x1, x2, 权重), 越靠脚�
     (340, 380, 0, 640, 0.6),
 ]
 # HSV 红色双段阈值(红色横跨0°, 两段合并; S/V排除黑白线)
-RED_H_LOW1, RED_H_HIGH1 = 0, 10
-RED_H_LOW2, RED_H_HIGH2 = 160, 180
-RED_S_LOW, RED_S_HIGH = 80, 255
-RED_V_LOW, RED_V_HIGH = 80, 255
+# 2026-09 用 HSV_threhold_test_program 在场地灯光下重标定: S下限31, V下限50
+RED_H_LOW1, RED_H_HIGH1 = 0, 6
+RED_H_LOW2, RED_H_HIGH2 = 149, 180
+RED_S_LOW, RED_S_HIGH = 31, 255
+RED_V_LOW, RED_V_HIGH = 50, 255
 
 # ---- 卡尔曼滤波参数(可被 calib_config.json 覆盖) ----
 KF_CX_Q, KF_CX_R = 1.0, 4.0
@@ -151,7 +153,7 @@ CALIB_CONST_KEYS = [
     "END_YAW_LOWER", "END_YAW_UPPER", "WALK_STEPS", "MAX_TURN",
     "PICK_FINAL_STEPS", "PLACE_FINAL_STEPS", "MAX_PICK_RETRIES", "STEP4_MAX_FORWARDS",
     "LINE_CENTER_X", "LINE_TURN_THRESHOLD", "SEARCH_LINE_ALIGN_THRESHOLD",
-    "VERTICAL_ANGLE_TOL", "LINE_LOST_TIMEOUT", "LINE_LOST_HOLD", "MAX_LOST_TURNS",
+    "VERTICAL_ANGLE_TOL", "CAMERA_ROLL_DEG", "LINE_LOST_TIMEOUT", "LINE_LOST_HOLD", "MAX_LOST_TURNS",
     "MAX_CONSEC_MOVES", "FOLLOW_CONFIRM_S", "FOLLOW_MAX_ADJUST",
     "KF_CX_Q", "KF_CX_R", "KF_CY_Q", "KF_CY_R",
     "KF_DIST_Q", "KF_DIST_R", "KF_OFFSET_Q", "KF_OFFSET_R",
@@ -332,6 +334,7 @@ class SortingTask:
         self.kf_area = Kalman1DConst(0.0, Q=KF_AREA_Q, R=KF_AREA_R)  # area 卡尔曼(像素)
         self.kf_line_cx = Kalman1DConst(LINE_CENTER_X, Q=KF_LINE_Q, R=KF_LINE_R)  # 巡线红线中心x卡尔曼(初始画面中心,防起步假偏移)
         self.line_is_vertical = False  # 巡线平行判定(线竖直时用平移)
+        self.line_aligned = False  # 巡线正对判定(滚转标定: 线在顺时针侧才算正对线)
         self.color_step = 1  # approach_color step状态机(参考官方Transport)
         self.step4_forward_steps = 0  # step4凑近连续前进步数(兜底计数)
         self.pick_retries = 0  # 抓取失败重试计数
@@ -840,6 +843,7 @@ class SortingTask:
         centroid_x_sum = 0.0
         weight_sum = 0.0
         self.line_is_vertical = False
+        self.line_aligned = False
         for r in LINE_ROI:
             sub = mask[r[0]:r[1], r[2]:r[3]]
             cnts = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_L1)[-2]
@@ -869,6 +873,10 @@ class SortingTask:
                 _angle = math.degrees(0.5 * math.atan2(2.0 * _mu11, _mu20 - _mu02))
                 if abs(_angle) >= 90.0 - VERTICAL_ANGLE_TOL:
                     self.line_is_vertical = True
+                # 正对判据(摄像头滚转标定): 正对线=竖直线顺时针CAMERA_ROLL_DEG°(顶端右偏,
+                # 公式角度为负, 约-80); 只接受顺时针侧, 纯竖直(+90)实为CAMERA_ROLL_DEG°未对正
+                if _angle <= -(90.0 - CAMERA_ROLL_DEG - VERTICAL_ANGLE_TOL):
+                    self.line_aligned = True
         if weight_sum > 0:
             line_cx = int(self.kf_line_cx.update(centroid_x_sum / weight_sum))
             cv2.circle(display, (line_cx, 460), 8, (0, 255, 255), -1)
@@ -911,9 +919,9 @@ class SortingTask:
                 snap_path = "/home/pi/codes/pictures/line_%s.jpg" % time.strftime("%H%M%S")
                 os.makedirs("/home/pi/codes/pictures", exist_ok=True)
                 cv2.imwrite(snap_path, line_display)
-            if line_cx >= 0 and self.line_is_vertical:
-                # 线竖直确认: 一次直行max_steps步, 结束循迹
-                log.info("follow_line: 线竖直确认, 直行%d步", max_steps)
+            if line_cx >= 0 and self.line_aligned:
+                # 正对确认(滚转标定): 一次直行max_steps步, 结束循迹
+                log.info("follow_line: 线正对确认(滚转标定), 直行%d步", max_steps)
                 self.actions.run("go_forward_one_step", times=max_steps)
                 steps += max_steps
                 break
@@ -935,8 +943,9 @@ class SortingTask:
             else:
                 self.lost_turns = 0
                 dx = line_cx - LINE_CENTER_X
-                self.actions.run("turn_right_small_step" if dx > 0 else "turn_left_small_step")
-                log.info("follow_line: 未竖直(dx=%d) 小步转调整 %d/%d", dx, adjust_count, FOLLOW_MAX_ADJUST)
+                # 滚转标定: 正对线在顺时针侧(公式负角度), 一律左转(左转→画面顺时针转)把线推向目标侧
+                self.actions.run("turn_left_small_step")
+                log.info("follow_line: 未正对(dx=%d) 左转调整 %d/%d", dx, adjust_count, FOLLOW_MAX_ADJUST)
         self.set_head_center(duration=300)
         log.info("follow_line %s done: steps=%d", label, steps)
 

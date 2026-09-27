@@ -102,6 +102,7 @@ PARAMS = [
     ("LINE_TURN_THRESHOLD", 4, "LINE_TURN_THR", 1, 0, 320, None),
     ("SEARCH_LINE_ALIGN_THRESHOLD", 4, "SEARCH_ALIGN", 1, 0, 320, None),
     ("VERTICAL_ANGLE_TOL", 4, "VERT_ANGLE_TOL_deg", 1, 0, 90, None),
+    ("CAMERA_ROLL_DEG", 4, "CAMERA_ROLL_DEG", 1, 0, 45, None),
     ("LINE_LOST_HOLD", 4, "LOST_HOLD_x10", 10, 0, 100, None),
     ("LINE_LOST_TIMEOUT", 4, "NOFRAME_TO_x10", 10, 0, 100, None),
     ("MAX_LOST_TURNS", 4, "MAX_LOST_TURNS", 1, 0, 50, None),
@@ -249,7 +250,7 @@ def detect_blue_raw(img, v):
 
 
 def detect_red_line_raw(img, v, roi):
-    """复刻主程序 detect_red_line(去掉卡尔曼), 返回(line_cx, vertical, mask)"""
+    """复刻主程序 detect_red_line(去掉卡尔曼), 返回(line_cx, vertical, aligned, mask)"""
     gb = cv2.GaussianBlur(img, (3, 3), 3)
     hsv = cv2.cvtColor(gb, cv2.COLOR_BGR2HSV)
     m1 = cv2.inRange(hsv, np.array([v["RED_H_LOW1"], v["RED_S_LOW"], v["RED_V_LOW"]]),
@@ -263,6 +264,7 @@ def detect_red_line_raw(img, v, roi):
     mask[:, 480:640] = 0
     sx = sw = 0.0
     vertical = False
+    aligned = False
     for r in roi:
         sub = mask[r[0]:r[1], r[2]:r[3]]
         cnts = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_L1)[-2]
@@ -294,8 +296,10 @@ def detect_red_line_raw(img, v, roi):
             angle = math.degrees(0.5 * math.atan2(2.0 * mu11, mu20 - mu02))
             if abs(angle) >= 90.0 - v["VERTICAL_ANGLE_TOL"]:
                 vertical = True
+            if angle <= -(90.0 - v["CAMERA_ROLL_DEG"] - v["VERTICAL_ANGLE_TOL"]):
+                aligned = True
     line_cx = int(sx / sw) if sw > 0 else -1
-    return line_cx, vertical, mask
+    return line_cx, vertical, aligned, mask
 
 
 def simulate_color_at(cx, cy, area, v, step):
@@ -500,7 +504,7 @@ class Tuner:
                 display = canvas
             else:
                 cx, cy, area, blue_mask = detect_blue_raw(img, self.values)
-                line_cx, vertical, red_mask = detect_red_line_raw(img, self.values, self.roi)
+                line_cx, vertical, aligned, red_mask = detect_red_line_raw(img, self.values, self.roi)
                 if self.view == 1:
                     display = cv2.cvtColor(
                         cv2.resize(blue_mask, (img.shape[1], img.shape[0]),
@@ -527,7 +531,7 @@ class Tuner:
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                                     (0, 255, 0) if done else (255, 255, 255), 1)
                         y += 22
-                    cv2.putText(display, "line_cx=%d vertical=%s" % (line_cx, vertical),
+                    cv2.putText(display, "line_cx=%d vert=%s align=%s" % (line_cx, vertical, aligned),
                                 (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 1)
                 cv2.putText(display,
                             "view%d page%d [n/b切图 TAB视图 1-6参数页 s存 p打印 r重置]"

@@ -22,15 +22,18 @@ import glob
 
 # 方式1：直接列出所有图片的完整路径（推荐）
 IMAGE_PATHS = [
-    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940175.jpg",
-    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940176.jpg",
-    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940179.jpg",
-    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940182.jpg",
-    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940190.jpg",
-    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940192.jpg",
-    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940195.jpg",
-    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940207.jpg",
-    "E:/Robot_Competition_others/robot-dev/archive/result/tjz_tracking/photo_tjz_tracking_1788940211.jpg",
+    "E:/Robot_Competition_others/robot-dev/archive/football_samples/1.png",
+    "E:/Robot_Competition_others/robot-dev/archive/football_samples/2.png",
+    "E:/Robot_Competition_others/robot-dev/archive/football_samples/3.png",
+    "E:/Robot_Competition_others/robot-dev/archive/football_samples/4.png",
+    "E:/Robot_Competition_others/robot-dev/archive/football_samples/5.png",
+    "E:/Robot_Competition_others/robot-dev/archive/football_samples/6.png",
+    "E:/Robot_Competition_others/robot-dev/archive/football_samples/7.png",
+    "E:/Robot_Competition_others/robot-dev/archive/football_samples/8.png",
+    "E:/Robot_Competition_others/robot-dev/archive/football_samples/9.png",
+    "E:/Robot_Competition_others/robot-dev/archive/football_samples/11.png",
+    "E:/Robot_Competition_others/robot-dev/archive/football_samples/22.png",
+    "E:/Robot_Competition_others/robot-dev/archive/football_samples/33.png"
 ]
 
 # 方式2：自动读取某个文件夹下的所有图片（取消注释并注释掉上面的列表）
