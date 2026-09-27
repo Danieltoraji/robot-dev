@@ -113,15 +113,22 @@ class GroundHomography:
 
     @classmethod
     def from_pose(cls, cam_xy, cam_z, pitch_pulse, bearing_deg=0.0,
-                  head_pulse=HEAD_CENTER):
+                  head_pulse=HEAD_CENTER, pitch_offset_deg=0.0):
         """由已知相机位姿解析构造 H（无标定文件时的开机自举）
 
-        cam_xy: 光心地面投影 (场地系 cm)；cam_z: 相机高度 cm（实测 ≈39）
+        cam_xy: 光心地面投影 (场地系 cm)；cam_z: 相机高度 cm
         pitch_pulse: 俯仰舵机脉宽（(1500-pulse)*0.09 = 俯角，越小越低头）
+        pitch_offset_deg: 相机相对俯仰舵机的**安装下俯偏移**（度）。
+            有效俯角 = (1500-pulse)*0.09 + pitch_offset_deg。
+            漏掉它会把相机当成比实际"抬得更高"看：可见地面带整体推远，
+            近距离直接看不到（上下楼梯关卡实测：漏掉 19.1° 的偏移时，
+            30cm 会被算成 49cm）。需要按真实几何取值的调用方必须传，
+            缺省 0.0 保持旧语义。
         精度受位姿假设限制（±3cm 级），只够布局扫的格归属判断；
         精确度量用 tools/calib_ninegrid.py 点击标定覆盖。
         """
-        alpha = np.radians((1500 - pitch_pulse) * SERVO_DEG_PER_US)
+        alpha = np.radians((1500 - pitch_pulse) * SERVO_DEG_PER_US
+                           + pitch_offset_deg)
         f = np.radians(bearing_deg)
         sa, ca = np.sin(alpha), np.cos(alpha)
         sf, cf = np.sin(f), np.cos(f)

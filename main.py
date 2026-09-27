@@ -20,6 +20,7 @@ from core.robot_core import RobotState
 from levels import goodluck as level_goodluck
 from levels import nine_grid as level_nine_grid
 from levels import press_button as level_press_button
+from levels import stairs_hurdle as level_stairs_hurdle
 
 
 # =====================================================================
@@ -55,6 +56,15 @@ LEVELS = {
         "module": level_press_button,
         "tag_poses": {},
         "run_level": level_press_button.run_level,
+    },
+    # 上下楼梯与识别跨障：头部单目测距（卷尺标定的相机几何）+ 黑箱动作组，
+    # 不用 AprilTag，tag_poses 留空。
+    # 方案：docs/关卡算法/上下楼梯与识别跨障-stairs_hurdle/完整方案-2026-09-25-流程重制.md
+    # 仿真回归：python tests/test_stairs_hurdle_sim.py
+    "stairs_hurdle": {
+        "module": level_stairs_hurdle,
+        "tag_poses": {},
+        "run_level": level_stairs_hurdle.run_level,
     },
 }
 
