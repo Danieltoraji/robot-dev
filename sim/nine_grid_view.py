@@ -20,7 +20,8 @@
 运行
 ----
     python -m sim.nine_grid_view [--seed N] [--random-layout] [--delay MS]
-                                 [--detect] [--headless]
+                                 [--detect] [--deform SIGMA] [--unified]
+                                 [--headless] [--quiet]
 无图形环境（DISPLAY 不可用 / opencv-headless 构建）时自动退回无头运行，
 等价于 `python -m sim.nine_grid_sim`；也可显式 `--headless`。
 
@@ -35,7 +36,6 @@
 - `--delay 0` 映射为 `waitKey(1)`（`waitKey(0)` 是永久阻塞，不能当"最快"）。
 """
 
-import argparse
 import os
 import sys
 
@@ -46,13 +46,15 @@ import cv2
 import numpy as np
 
 from core.ground_homography import grid_cell_center
-from levels.nine_grid import project_ground_to_pixel
+from levels.nine_grid_shared import project_ground_to_pixel
 from sim.nine_grid_sim import (
     FRAME_H, FRAME_W, PANEL_BGR, PANEL_HALF_CM, SIM_LAYOUT,
     random_layout, run_simulation, _print_summary,
 )
 
-WIN = "nine_grid sim  |  SPACE pause  S step  R restart  Q quit  D detect  +/- speed"
+# 窗口标题与 H 键帮助（ASCII：cv2 画不了中文；中文说明见 main() 启动时的提示）
+WIN = ("nine_grid sim  |  SPACE pause  S step  R restart  Q quit  D detect  "
+       "+/- speed")
 CAM_SCALE = 0.25
 MAP_SIZE = 400
 MAP_MARGIN = 16
@@ -60,8 +62,8 @@ STATUS_H = 52
 GAP = 12
 # 俯视图视野（cm）：略大于场地，让入口(50,-20)也可见
 VIEW_MIN, VIEW_MAX = -25.0, 110.0
-HELP = ("keys: SPACE pause/resume | S step | R restart | Q/ESC quit | "
-        "D toggle detection overlay | +/- speed | H help")
+HELP = ("keys: SPACE pause/resume | S step one frame | R restart | Q/ESC quit | "
+        "D detection boxes on/off | +/- slower/faster | H this help")
 
 
 class ViewerQuit(Exception):
@@ -297,7 +299,7 @@ class NineGridView:
         ok_n = sum(1 for _, ok in stats.get("results", []) if ok)
         banner = (f"done {ok_n}/{len(stats.get('results', []))}  "
                   f"captures={stats.get('captures', 0)}  "
-                  f"layout={'OK' if stats.get('layout_ok') else 'FAIL'}  "
+                  f"layout={'ok' if stats.get('layout_ok') else 'FAIL'}  "
                   f"R restart / Q quit")
         print(f"[view] {banner}")
         if self._last_frame is None:   # 极端情况：还没拍到任何帧
@@ -335,22 +337,22 @@ class NineGridView:
             raise ViewerQuit()
         if key == ord(" "):
             self.paused = not self.paused
-            print(f"[view] {'暂停' if self.paused else '继续'}")
+            print(f"[view] {'已暂停（SPACE 继续，S 单步）' if self.paused else '继续运行'}")
         elif key in (ord("s"), ord("S")):
             self.step_once = True
         elif key in (ord("r"), ord("R")):
             raise ViewerRestart()
         elif key in (ord("d"), ord("D")):
             self.show_detect = not self.show_detect
-            print(f"[view] 检出叠加: {'开' if self.show_detect else '关'}")
+            print(f"[view] 检出框叠加: {'开' if self.show_detect else '关'}")
         elif key in (ord("+"), ord("=")):
             self.delay_ms = min(500, self.delay_ms * 2)
-            print(f"[view] delay={self.delay_ms}ms")
+            print(f"[view] 每帧等待 {self.delay_ms}ms")
         elif key in (ord("-"), ord("_")):
             self.delay_ms = max(1, self.delay_ms // 2)
-            print(f"[view] delay={self.delay_ms}ms")
+            print(f"[view] 每帧等待 {self.delay_ms}ms")
         elif key in (ord("h"), ord("H")):
-            print(f"[view] {HELP}")
+            print(f"[view] 按键说明: {HELP}")
 
     def _detections(self, frame):
         """检出叠加：只在暂停/单步/--detect 时跑检测器（单帧 ~120ms）"""
@@ -400,63 +402,9 @@ def _gui_available():
         return False
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="数字宫格模拟器图形界面")
-    ap.add_argument("--seed", type=int, default=3,
-                    help="动作噪声/随机布局种子（默认 3）")
-    ap.add_argument("--random-layout", action="store_true",
-                    help="由 seed 生成合法随机布局")
-    ap.add_argument("--delay", type=int, default=30,
-                    help="每帧等待 ms（0=最快，映射为 waitKey(1)）")
-    ap.add_argument("--detect", action="store_true",
-                    help="运行中也跑检测器叠加（慢，整轮约 +25s）")
-    ap.add_argument("--headless", action="store_true",
-                    help="不开窗，等价 python -m sim.nine_grid_sim")
-    ap.add_argument("--quiet", action="store_true",
-                    help="吞掉关卡逐行日志（无头/脚本场景）")
-    args = ap.parse_args(argv)
-
-    headless = args.headless or not _gui_available()
-    if headless and not args.headless:
-        print("[view] 未检测到图形界面（DISPLAY 不可用？）——退回无头模式")
-        print("[view] 提示：本命令在 PC 上开窗；SSH 场景请用 --headless，"
-              "或参考 tools/camera_preview.py --stream 的网页流方案")
-
-    seed = args.seed
-    while True:
-        layout = random_layout(seed) if args.random_layout else SIM_LAYOUT
-        if headless:
-            run = run_simulation(layout=layout, seed=seed, quiet=args.quiet)
-            _print_summary(run.stats)
-            return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
-
-        print(f"[view] {HELP}")
-        viewer = NineGridView(delay_ms=args.delay, show_detect=args.detect)
-        try:
-            run = run_simulation(layout=layout, seed=seed, viewer=viewer,
-                                 quiet=args.quiet)
-        except ViewerRestart:
-            viewer.close()
-            seed += 1
-            print(f"[view] 重开：seed={seed}")
-            continue
-        except ViewerQuit:
-            viewer.close()
-            print("[view] 用户退出")
-            return 0
-        try:
-            viewer.finish(run.stats)
-            viewer.close()
-            return 0 if (run.stats["ok_all"] and run.stats["layout_ok"]) else 1
-        except ViewerRestart:
-            viewer.close()
-            seed += 1
-            print(f"[view] 重开：seed={seed}")
-        except ViewerQuit:
-            viewer.close()
-            print("[view] 用户退出")
-            return 0
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    print("本模块只提供绘图与窗口（NineGridView / draw_* / _gui_available）。"
+          "仿真入口已统一到：")
+    print("    python -m sim.nine_grid_sim            # 默认开窗")
+    print("    python -m sim.nine_grid_sim --no-ui    # 无窗口（脚本 / CI）")
+    raise SystemExit(2)

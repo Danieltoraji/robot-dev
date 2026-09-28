@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>robot-dev 机器人侧终端与执行说明</title>
+<style>
+  @page { size: A4; margin: 16mm 14mm; }
+  * { box-sizing: border-box; }
+  body {
+    /* 显式指定，避免正文回退到衬线宋体：微软雅黑 → 等线 → 黑体 */
+    font-family: "Microsoft YaHei", "微软雅黑", "DengXian", "等线", "SimHei", "黑体",
+                 "Segoe UI", sans-serif;
+    font-size: 10.5pt; line-height: 1.65; color: #1a1a1a;
+    margin: 0; padding: 0;
+  }
+  h1, h2, h3, th { font-family: "Microsoft YaHei", "微软雅黑", "DengXian", "等线",
+                   "SimHei", "黑体", "Segoe UI", sans-serif; }
+  h1 { font-size: 19pt; margin: 0 0 4px 0; color: #0b3d63; }
+  .sub { color: #666; font-size: 9.5pt; margin-bottom: 18px;
+         border-bottom: 2px solid #0b3d63; padding-bottom: 10px; }
+  h2 { font-size: 13pt; margin: 20px 0 8px 0; color: #0b3d63;
+       border-left: 4px solid #0b3d63; padding-left: 8px;
+       page-break-after: avoid; }
+  h3 { font-size: 11.5pt; margin: 14px 0 6px 0; color: #14507f;
+       page-break-after: avoid; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 12px 0;
+          font-size: 9.5pt; page-break-inside: avoid; }
+  th, td { border: 1px solid #c3ccd4; padding: 5px 7px; text-align: left;
+           vertical-align: top; }
+  th { background: #eef3f7; font-weight: 600; }
+  code { font-family: Consolas, "Cascadia Mono", monospace;
+         background: #f3f5f7; padding: 1px 4px; border-radius: 3px;
+         font-size: 9.5pt; color: #b03060; }
+  pre { background: #f7f9fb; border: 1px solid #d8e0e6;
+        border-left: 4px solid #4a90c0; padding: 8px 10px;
+        border-radius: 3px; overflow-x: auto; margin: 6px 0 12px 0;
+        page-break-inside: avoid; }
+  pre code { background: none; padding: 0; color: #1a1a1a; font-size: 9pt;
+             line-height: 1.5; }
+  .warn { background: #fff6e5; border-left: 4px solid #e8a33d;
+          padding: 8px 10px; margin: 8px 0 12px 0; page-break-inside: avoid; }
+  .ok  { background: #eef9f0; border-left: 4px solid #3fa85f;
+          padding: 8px 10px; margin: 8px 0 12px 0; page-break-inside: avoid; }
+  .bad { background: #fdeeee; border-left: 4px solid #d9534f;
+          padding: 8px 10px; margin: 8px 0 12px 0; page-break-inside: avoid; }
+  .note { color: #666; font-size: 9pt; }
+  ul { margin: 6px 0 10px 0; padding-left: 20px; }
+  li { margin-bottom: 3px; }
+  .kbd { font-family: Consolas, monospace; background: #eef3f7;
+         border: 1px solid #c3ccd4; border-radius: 3px;
+         padding: 0 4px; font-size: 9.5pt; }
+  .footer { margin-top: 22px; padding-top: 10px; border-top: 1px solid #ccc;
+            color: #777; font-size: 8.5pt; }
+</style>
+</head>
+<body>
+
+<h1>robot-dev 机器人侧终端与执行说明</h1>
+<div class="sub">
+  适用：TonyPi 机器人（<code>raspberrypi-9</code>）与开发 PC 的日常操作<br>
+  整理日期：2026-09-21　|　仓库分支：<code>dxd_nine_grid</code>　|　机器人代码目录：<code>/home/pi/Robot_Competition</code>
+</div>
+
+<h2>0. 一句话总览</h2>
+<p>一共三层“终端”，各管各的：</p>
+<table>
+  <tr><th style="width:22%">层</th><th>是什么</th><th>干什么</th></tr>
+  <tr>
+    <td><b>① PC 终端</b></td>
+    <td>PowerShell 7.6.6（Windows），工作目录 <code>F:\coding\Projects\RoboTrack\robot-dev</code></td>
+    <td>跑 PC 侧脚本：测试、离线分析、以及“指挥机器人”的工具</td>
+  </tr>
+  <tr>
+    <td><b>② 机器人终端</b></td>
+    <td>ssh / 网页终端登入 <code>pi@raspberrypi-9</code>，工作目录 <code>/home/pi/Robot_Competition</code></td>
+    <td>跑关卡、跑现场标定/测量工具、启停 debug 服务</td>
+  </tr>
+  <tr>
+    <td><b>③ PC→机器人 远程层</b></td>
+    <td>PC 上用 Jupyter Contents API / 内核会话远程操作机器人</td>
+    <td>同步代码、远程执行、拉回数据（现场测量主要走这条）</td>
+  </tr>
+</table>
+
+<h2>1. 机器人侧终端的实测环境</h2>
+<table>
+  <tr><th style="width:26%">项</th><th>值</th></tr>
+  <tr><td>主机 / 用户</td><td><code>raspberrypi-9</code> / <code>pi</code></td></tr>
+  <tr><td><b><code>/bin/sh</code></b></td><td><b><code>dash</code>（不是 bash）</b> —— 关键坑，见第 2 节</td></tr>
+  <tr><td>可用 shell</td><td><code>bash</code>（<code>bash --version</code> 正常）</td></tr>
+  <tr><td>我们的工作目录</td><td><code>/home/pi/Robot_Competition</code></td></tr>
+  <tr><td>系统</td><td>Debian GNU/Linux 13 (trixie)，Python 3.13.5</td></tr>
+  <tr><td>Jupyter 服务</td><td><code>jupyter.service</code>（自启），<code>User=pi</code>，<code>WorkingDirectory=/home/pi</code>，监听 <b>8888</b>，密码 <code>pi</code></td></tr>
+  <tr><td>debug 镜像服务</td><td>端口 <b>8081</b>，由 <code>bash debug.sh</code> 启停（<b>不占用摄像头</b>）</td></tr>
+</table>
+<p class="note">※ 本表为 2026-09-21 会话内实测值。撰写本 PDF 时 PC 处于 <code>Tsinghua-Secure</code> 网络、机器人不可达，故未能当场复测；恢复网络后建议复核一遍。</p>
+
+<h2>2. 第一条铁律：shell 脚本一律用 bash</h2>
+<pre><code>bash debug.sh          # ✅ 正确
+./debug.sh             # ✅ 也可以（shebang 是 #!/usr/bin/env bash）
+sh debug.sh            # ❌ dash 不支持 set -u → "Illegal option -"</code></pre>
+
+<div class="bad">
+<b>典型报错（已实际踩到）：</b>
+<pre><code>: invalid option: set: -
+debug.sh: line 5: cd: $'.\r': No such file or directory
+debug.sh: line 9: syntax error near unexpected token `$'in\r''</code></pre>
+两半原因：<br>
+① <code>invalid option: set: -</code> → 用了 <code>sh</code>（dash），不支持 <code>set -u</code>；<br>
+② 满屏 <code>\r</code> → 文件是 <b>CRLF 行尾</b>。Windows 上 <code>core.autocrlf=true</code> 会把工作树 checkout 成 CRLF，而同步工具是逐字节传文件，于是把 CRLF 带上了机器人。<br>
+<b>已修：</b><code>tools/sync_to_robot.py</code> 现在对 <code>.sh</code>/<code>.bash</code> 上传前自动 CRLF→LF 并打印 <code>[行尾]</code> 提示。
+</div>
+
+<h2>3. Python 环境：两个解释器，必须选对</h2>
+<p>机器人上<b>只有一个 Python 二进制（3.13.5）</b>，但有两个不同的“包世界”：</p>
+<table>
+  <tr><th style="width:42%">解释器</th><th>是否可用</th><th>包集合</th></tr>
+  <tr>
+    <td><code>/home/pi/jupyter-env/bin/python3</code></td>
+    <td><b>✅ 我们的代码必须用它</b></td>
+    <td>venv site-packages：<code>numpy 2.5.3</code>、<code>cv2 4.14.0</code>、<code>scipy</code>、<code>matplotlib</code>、<code>scikit-learn</code>、<code>scikit-image</code>、<code>joblib</code>、<code>onnxruntime</code>、<code>apriltag</code>、<code>yaml</code>、<code>serial</code>、<code>hiwonder</code></td>
+  </tr>
+  <tr>
+    <td><code>/usr/bin/python3</code></td>
+    <td>❌ 不要用</td>
+    <td>Debian <code>dist-packages</code>：有 numpy 2.2.4 / cv2 / serial / smbus / RPi，<b>没有 scipy / apriltag / onnxruntime / sklearn</b></td>
+  </tr>
+</table>
+
+<div class="warn">
+<b>容易绕晕的一点：</b><code>/home/pi/jupyter-env/bin/python3</code> <b>是个软链，指向 <code>/usr/bin/python3</code></b> —— 同一个二进制。真正起作用的是 <code>pyvenv.cfg</code>（<code>include-system-site-packages=false</code>），它切换了 <code>sys.path</code>。<br>
+所以<b>“看 <code>which python3</code>”分辨不出来</b>，必须看路径前缀。
+</div>
+
+<h3>用法（二选一）</h3>
+<pre><code>PY=/home/pi/jupyter-env/bin/python3     # 推荐：显式、不依赖 shell 状态
+$PY main.py nine_grid
+
+# 或者先激活 venv
+source /home/pi/jupyter-env/bin/activate
+python main.py nine_grid</code></pre>
+
+<h2>4. Python 文件的执行方式（按用途分四类）</h2>
+<div class="warn">
+<b>先决条件：<code>cd /home/pi/Robot_Competition</code></b><br>
+所有入口都以仓库根为基准，<code>core.paths.RESULT_DIR</code> 也是相对它计算的。
+</div>
+
+<h3>① 关卡入口 <code>main.py</code></h3>
+<pre><code>cd /home/pi/Robot_Competition
+/home/pi/jupyter-env/bin/python3 main.py nine_grid
+/home/pi/jupyter-env/bin/python3 main.py goodluck
+/home/pi/jupyter-env/bin/python3 main.py stairs_hurdle</code></pre>
+<p><code>main.py</code> 的 <code>LEVELS</code> 表只有这三个键。<b><code>line_seeker_tracking</code> 与 <code>apriltag_sorting_task</code> 不在其中</b>，那两个要直接跑文件（见 ③）。</p>
+
+<h3>② <code>tools/</code> 下的工具 —— 直接给文件路径</h3>
+<pre><code>/home/pi/jupyter-env/bin/python3 tools/run_layout_scan.py --no-lock --budget 600 --out m5_pos1.json
+/home/pi/jupyter-env/bin/python3 tools/field_probe_ninegrid.py
+/home/pi/jupyter-env/bin/python3 tools/field_camera_sweep.py --what all
+/home/pi/jupyter-env/bin/python3 tools/diag_arrive.py</code></pre>
+<p>这些脚本自己做了 <code>sys.path.insert</code> 把仓库根加进去，<b>从仓库根跑即可</b>。</p>
+
+<h3>③ <code>levels/</code> 下未注册的关卡 —— 同样直接跑文件</h3>
+<pre><code>/home/pi/jupyter-env/bin/python3 levels/line_seeker_tracking.py
+/home/pi/jupyter-env/bin/python3 levels/apriltag_sorting_task.py</code></pre>
+<p><code>line_seeker_tracking.py</code> 自己会 <code>sys.path.insert</code> 到 <code>vision/</code>（它 <code>from line_detector import ...</code>），不需要额外操心路径。</p>
+
+<h3>④ ❌ 不要用 <code>python -m</code></h3>
+<pre><code>/home/pi/jupyter-env/bin/python3 -m tests.test_nine_grid_sim   # ❌ 必失败</code></pre>
+两个原因：<br>
+① <code>tests/</code> <b>没有 <code>__init__.py</code></b>，不是包；<br>
+② 更坑的是 site-packages 里有个<b>同名 <code>tests</code> 包会遮蔽</b>本仓库的 <code>tests/</code>，报 <code>No module named tests.xxx</code>。<br>
+PC 上同理，一律用文件路径：<code>python tests\test_nine_grid_sim.py</code>
+
+<h2>5. shell 脚本的执行方式</h2>
+<pre><code>cd /home/pi/Robot_Competition
+bash debug.sh              # 启动 debug 镜像 → http://192.168.31.209:8081
+bash debug.sh stop         # 停止
+bash debug.sh status       # 查看状态
+bash debug.sh log          # 查看日志（tail /tmp/debug_server.log）</code></pre>
+<pre><code>tools/train/export_onnx.sh        # 训练相关，需 bash
+tools/train/train_baseline.sh</code></pre>
+<ul>
+  <li>⚠️ <b>别用 <code>sh</code></b>。</li>
+  <li>⚠️ 行尾必须是 <b>LF</b>（同步工具已自动转换）。</li>
+  <li>ℹ️ debug 镜像服务<b>不占用摄像头</b>：全文件无 <code>cv2.VideoCapture</code>，唯一碰设备处是网页按钮触发的 <code>fswebcam</code> 子进程（拍完即退）；后台 watchdog 每 0.5 秒只扫盘分析已有 JPEG。测量期间可以开着，只需别点网页上的拍照按钮。</li>
+</ul>
+
+<h2>6. 两种操作分工（2026-09-23 定稿）</h2>
+
+<div class="ok">
+<b>定稿分工</b>：<b>人</b>全程用 SSH（PowerShell 比网页终端顺手）；<b>AI</b> 用 <code>exec_on_robot.py</code>（Jupyter REST，密码内置，无需额外配置）。
+</div>
+
+<pre><code># ============ 人：SSH（推荐，交互脚本必须走这条）============
+ssh pi@192.168.31.209              # 密码 pi；登录 shell 就是 bash，source 可用
+cd /home/pi/Robot_Competition
+source /home/pi/jupyter-env/bin/activate
+which python                       # 应显示 /home/pi/jupyter-env/bin/python
+
+# ============ AI：exec_on_robot.py（走 Jupyter 内核，非交互）============
+python tools/exec_on_robot.py --cmd "iw dev wlan0 get power_save"
+python tools/exec_on_robot.py --code "print(1+1)"
+python tools/sync_to_robot.py --check
+python tools/pull_from_robot.py --remote "archive/result/measure_frames" --dest "tests/fixtures/field_photos"</code></pre>
+
+<div class="warn">
+<b>⚠️ 内核没有 stdin：交互脚本（带 <code>input()</code> 的）不能走 <code>exec_on_robot.py</code></b><br>
+<code>exec_on_robot.py</code> 走的是 Jupyter <b>内核会话</b>，内核不支持输入请求。凡是停下等输入的脚本
+（<code>_tmp_measure_motion.py</code>、<code>_tmp_dist_sweep.py</code>）走它会直接抛：<br>
+<code>StdinNotImplementedError: raw_input was called, but this frontend does not support input requests.</code><br>
+<b>所以那两个测量脚本必须由人在 SSH 里跑</b>。AI 若需代跑，只能用管道喂 stdin
+（<code>printf '值\n值\n' | python tools/xxx.py</code>），已实测可行，但需要人先把测量值报给 AI。
+</div>
+
+<div class="warn">
+<b>机器人上 <code>python</code> 默认不是 venv</b> —— 这是最容易踩的一条：<br>
+默认 <code>python</code> = <code>/usr/bin/python3</code>，它<b>只有</b> Debian dist-packages
+（numpy / cv2 / serial / smbus / RPi），<b>没有</b> scipy / apriltag / onnxruntime / sklearn，
+我们的代码跑不起来。<br>
+三种解法（任选）：<br>
+① <code>source /home/pi/jupyter-env/bin/activate</code>（SSH/bash 下可用；<b>Jupyter 网页终端是 dash，要用 <code>.</code></b>）；<br>
+② 直接用全路径 <code>/home/pi/jupyter-env/bin/python3 &lt;脚本&gt;</code>（最省心，不依赖 shell 状态）；<br>
+③ 把 venv 的 bin 前置到 PATH（见下）。<br>
+验证：<code>which python</code> 应显示 <code>/home/pi/jupyter-env/bin/python</code>。
+</div>
+
+<div class="ok">
+<b>可选（一劳永逸，改的是机器人 <code>~/.bashrc</code>，不碰仓库代码）</b>：让 SSH 一登录就是 venv。
+<pre><code>echo 'export PATH=/home/pi/jupyter-env/bin:$PATH' &gt;&gt; ~/.bashrc   # 追加前先确认没有重复</code></pre>
+代价：<code>python</code>/<code>pip</code> 全局都指向 venv。只要不装系统级包就没副作用。
+</div>
+
+<div class="warn">
+<b>机器人侧默认 shell 的坑</b>：<br>
+① SSH 登录 shell 是 <b>bash</b>（<code>source</code> 正常）；<b>Jupyter 网页终端是 dash</b>，
+<code>source</code> 会报 <code>source: not found</code> → 用 <code>.</code>；<br>
+② <code>sh debug.sh</code> ❌（<code>set -u</code> 不支持）→ 用 <code>bash debug.sh</code>。
+</div>
+
+<div class="warn">
+<b>PC 侧每个新终端都要先设一次：</b>
+<pre><code>$env:PYTHONIOENCODING='utf-8'</code></pre>
+原因：PowerShell 自报 <code>OutputEncoding = utf-8</code>，但 <code>chcp</code> 仍是 <b>936（GBK）</b>，Python 按代码页决定 stdout 编码。机器人输出里的 <code>⇒</code> / <code>✓</code> 会让 <code>exec_on_robot.py</code> 在<b>回显阶段</b>抛 <code>UnicodeEncodeError</code> —— <b>机器人其实已经执行完，只是输出丢了</b>，容易误判成失败。
+</div>
+
+<h2>7. 速查卡</h2>
+<pre><code># ============ 机器人侧 ============
+cd /home/pi/Robot_Competition
+PY=/home/pi/jupyter-env/bin/python3
+
+$PY main.py nine_grid                         # 跑关卡
+$PY tools/run_layout_scan.py --no-lock --out m5_pos1.json   # 跑工具（给路径，不要 -m）
+bash debug.sh                                 # 跑 shell（不要 sh）
+. /home/pi/jupyter-env/bin/activate           # 激活 venv（不要用 source：dash 不认）
+                                              # 等价且更省心：直接用上面那个 $PY 全路径
+
+# ============ PC 侧 ============
+$env:PYTHONIOENCODING='utf-8'                 # 每个新终端先设一次
+python tools/_tmp_field_session.py --check    # 远程跑机器人脚本（走终端，支持交互）
+python tools/exec_on_robot.py --cmd "..."     # 非交互远程执行（走内核，输出干净）
+python tests\test_nine_grid_sim.py            # 跑测试（给路径，不要 -m）</code></pre>
+
+<h2>8. 故障排查：机器人连不上</h2>
+<div class="ok">
+<b>第一步永远是查 PC 的 WiFi。</b><br>
+必须连 <code>eelab901b</code> 或 <code>eelab901b_2</code>；<b>不能连 <code>Tsinghua-Secure</code></b>（校园网与机器人不在同一广播域，必然连不上）。
+</div>
+<pre><code>netsh wlan show interfaces                     # PC：看当前 SSID
+ping -n 4 192.168.31.209                       # PC：通不通
+Test-NetConnection 192.168.31.209 -Port 8888   # PC：Jupyter 端口
+arp -a | Select-String "192.168.31"            # PC：有没有 ARP 条目</code></pre>
+<table>
+  <tr><th style="width:34%">症状</th><th>结论</th></tr>
+  <tr><td>PC 侧 SSID 不是 <code>eelab901b*</code></td><td><b>先改 WiFi</b>，让其主人手动修正</td></tr>
+  <tr><td><code>无法访问目标主机</code>、ARP 无条目</td><td>设备不在同一广播域（连错网 / 机器人连了副路由）</td></tr>
+  <tr><td>ping 时好时坏、丢包</td><td>机器人 WiFi 省电模式（已关并持久化，换镜像后需重做）</td></tr>
+  <tr><td>一直不通</td><td>机器人没开机（先看灯 / <code>uptime</code>）</td></tr>
+</table>
+
+<div class="footer">
+生成方式：HTML + Edge 无头打印（<code>--headless --print-to-pdf</code>），中文字体为系统「微软雅黑」。<br>
+源文件：<code>docs/机器人终端与执行说明.html</code>　|　如需更新，改源文件后重新打印即可。
+</div>
+
+</body>
+</html>

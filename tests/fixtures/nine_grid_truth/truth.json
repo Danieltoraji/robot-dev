@@ -1,0 +1,1326 @@
+{
+ "note": "nine_grid 可信真值集。口径：12 张现场帧（机器人立于真实九宫格场地），NineGridDetector.detect_panels 检出的全部观测去重后共 73 条；逐张目视裁定真假。判定要点：真面板=色块紧贴印刷黑数字、四周被白色垫板包围；假货=木框/机身/深色地面/电缆等地垫杂物。key = (photo, color, rank)：rank 是该颜色内按 hull 面积降序的名次（与 tools/build_truth_matrix.py 的输出一致，可自校验）。",
+ "false_reasons": {
+  "yellow:147263": "木框：右侧场边木条被暖光染黄，紧贴画面顶边",
+  "green:15615": "机器人自身机身（绿窗观测）",
+  "blue:46241": "机器人机身下方深色地面/桌面（蓝窗观测）",
+  "pink:5070": "红色线缆 + 地垫（粉窗观测）",
+  "red:16023": "地垫边缘 + 红色线缆（红窗观测）"
+ },
+ "rows": [
+  {
+   "color": "blue",
+   "photo": "photo_debug_1790156107865.jpg",
+   "bbox": [
+    0,
+    288,
+    606,
+    438
+   ],
+   "area_work": 44695.5,
+   "h_over_w": 0.723,
+   "clip": 1,
+   "ev": 0.0833,
+   "rank": 2,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 1
+  },
+  {
+   "color": "blue",
+   "photo": "photo_debug_1790156151658.jpg",
+   "bbox": [
+    0,
+    280,
+    572,
+    450
+   ],
+   "area_work": 43723.0,
+   "h_over_w": 0.787,
+   "clip": 1,
+   "ev": 0.0873,
+   "rank": 3,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 2
+  },
+  {
+   "color": "blue",
+   "photo": "photo_debug_1790157205562.jpg",
+   "bbox": [
+    0,
+    280,
+    572,
+    450
+   ],
+   "area_work": 43717.0,
+   "h_over_w": 0.787,
+   "clip": 1,
+   "ev": 0.0874,
+   "rank": 4,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 3
+  },
+  {
+   "color": "blue",
+   "photo": "photo_debug_1790157704626.jpg",
+   "bbox": [
+    0,
+    280,
+    572,
+    450
+   ],
+   "area_work": 43686.5,
+   "h_over_w": 0.787,
+   "clip": 1,
+   "ev": 0.0887,
+   "rank": 5,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 4
+  },
+  {
+   "color": "blue",
+   "photo": "photo_debug_1790156052935.jpg",
+   "bbox": [
+    0,
+    300,
+    556,
+    452
+   ],
+   "area_work": 42820.5,
+   "h_over_w": 0.813,
+   "clip": 1,
+   "ev": 0.0876,
+   "rank": 6,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 5
+  },
+  {
+   "color": "blue",
+   "photo": "photo_debug_1790156042955.jpg",
+   "bbox": [
+    0,
+    302,
+    550,
+    454
+   ],
+   "area_work": 42515.0,
+   "h_over_w": 0.825,
+   "clip": 1,
+   "ev": 0.0846,
+   "rank": 7,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 6
+  },
+  {
+   "color": "blue",
+   "photo": "photo_debug_1790157735342.jpg",
+   "bbox": [
+    1226,
+    112,
+    726,
+    384
+   ],
+   "area_work": 39673.5,
+   "h_over_w": 0.529,
+   "clip": 0,
+   "ev": 0.0866,
+   "rank": 8,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 7
+  },
+  {
+   "color": "blue",
+   "photo": "photo_debug_1790157777856.jpg",
+   "bbox": [
+    234,
+    0,
+    604,
+    312
+   ],
+   "area_work": 22539.0,
+   "h_over_w": 0.517,
+   "clip": 1,
+   "ev": 0.0643,
+   "rank": 9,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 8
+  },
+  {
+   "color": "blue",
+   "photo": "photo_debug_1790157722578.jpg",
+   "bbox": [
+    582,
+    0,
+    638,
+    210
+   ],
+   "area_work": 18964.0,
+   "h_over_w": 0.329,
+   "clip": 1,
+   "ev": 0.0836,
+   "rank": 10,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 9
+  },
+  {
+   "color": "blue",
+   "photo": "photo_debug_1790156017896.jpg",
+   "bbox": [
+    196,
+    1704,
+    380,
+    240
+   ],
+   "area_work": 6552.5,
+   "h_over_w": 0.632,
+   "clip": 1,
+   "ev": 0.0055,
+   "rank": 11,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 10
+  },
+  {
+   "color": "blue",
+   "photo": "photo_1790155997.jpg",
+   "bbox": [
+    8,
+    230,
+    718,
+    414
+   ],
+   "area_work": 46241.0,
+   "h_over_w": 0.577,
+   "clip": 1,
+   "ev": 0.0,
+   "rank": 1,
+   "verdict": "FALSE",
+   "why": "机器人机身下方深色地面/桌面（蓝窗观测）",
+   "n": 11
+  },
+  {
+   "color": "green",
+   "photo": "photo_debug_1790157722578.jpg",
+   "bbox": [
+    0,
+    162,
+    458,
+    444
+   ],
+   "area_work": 25839.5,
+   "h_over_w": 0.969,
+   "clip": 1,
+   "ev": 0.0923,
+   "rank": 1,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 12
+  },
+  {
+   "color": "green",
+   "photo": "photo_1790155997.jpg",
+   "bbox": [
+    0,
+    964,
+    292,
+    484
+   ],
+   "area_work": 24598.0,
+   "h_over_w": 1.658,
+   "clip": 1,
+   "ev": 0.0001,
+   "rank": 2,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 13
+  },
+  {
+   "color": "green",
+   "photo": "photo_debug_1790157735342.jpg",
+   "bbox": [
+    648,
+    0,
+    598,
+    236
+   ],
+   "area_work": 19305.0,
+   "h_over_w": 0.395,
+   "clip": 1,
+   "ev": 0.0955,
+   "rank": 3,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 14
+  },
+  {
+   "color": "green",
+   "photo": "photo_debug_1790156107865.jpg",
+   "bbox": [
+    0,
+    1070,
+    210,
+    546
+   ],
+   "area_work": 19004.5,
+   "h_over_w": 2.6,
+   "clip": 1,
+   "ev": 0.0,
+   "rank": 4,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 15
+  },
+  {
+   "color": "green",
+   "photo": "photo_debug_1790156052935.jpg",
+   "bbox": [
+    0,
+    1098,
+    182,
+    510
+   ],
+   "area_work": 15485.0,
+   "h_over_w": 2.802,
+   "clip": 1,
+   "ev": 0.0,
+   "rank": 6,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 16
+  },
+  {
+   "color": "green",
+   "photo": "photo_debug_1790156042955.jpg",
+   "bbox": [
+    0,
+    1102,
+    178,
+    514
+   ],
+   "area_work": 15233.0,
+   "h_over_w": 2.888,
+   "clip": 1,
+   "ev": 0.0,
+   "rank": 7,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 17
+  },
+  {
+   "color": "green",
+   "photo": "photo_debug_1790157704626.jpg",
+   "bbox": [
+    0,
+    1082,
+    176,
+    520
+   ],
+   "area_work": 14405.0,
+   "h_over_w": 2.955,
+   "clip": 1,
+   "ev": 0.0,
+   "rank": 8,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 18
+  },
+  {
+   "color": "green",
+   "photo": "photo_debug_1790156151658.jpg",
+   "bbox": [
+    0,
+    1082,
+    176,
+    526
+   ],
+   "area_work": 14378.5,
+   "h_over_w": 2.989,
+   "clip": 1,
+   "ev": 0.0,
+   "rank": 9,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 19
+  },
+  {
+   "color": "green",
+   "photo": "photo_debug_1790157205562.jpg",
+   "bbox": [
+    0,
+    1082,
+    176,
+    522
+   ],
+   "area_work": 14364.0,
+   "h_over_w": 2.966,
+   "clip": 1,
+   "ev": 0.0,
+   "rank": 10,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 20
+  },
+  {
+   "color": "green",
+   "photo": "photo_debug_1790157753590.jpg",
+   "bbox": [
+    1850,
+    1778,
+    742,
+    166
+   ],
+   "area_work": 15615.0,
+   "h_over_w": 0.224,
+   "clip": 1,
+   "ev": 0.2054,
+   "rank": 5,
+   "verdict": "FALSE",
+   "why": "机器人自身机身（绿窗观测）",
+   "n": 21
+  },
+  {
+   "color": "orange",
+   "photo": "photo_debug_1790157777856.jpg",
+   "bbox": [
+    1392,
+    532,
+    1094,
+    1046
+   ],
+   "area_work": 152974.5,
+   "h_over_w": 0.956,
+   "clip": 0,
+   "ev": 0.0778,
+   "rank": 1,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 22
+  },
+  {
+   "color": "orange",
+   "photo": "photo_debug_1790156017896.jpg",
+   "bbox": [
+    750,
+    0,
+    1620,
+    580
+   ],
+   "area_work": 146509.5,
+   "h_over_w": 0.358,
+   "clip": 1,
+   "ev": 0.0295,
+   "rank": 2,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 23
+  },
+  {
+   "color": "orange",
+   "photo": "photo_debug_1790157753590.jpg",
+   "bbox": [
+    668,
+    448,
+    978,
+    662
+   ],
+   "area_work": 136968.0,
+   "h_over_w": 0.677,
+   "clip": 0,
+   "ev": 0.081,
+   "rank": 3,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 24
+  },
+  {
+   "color": "orange",
+   "photo": "photo_debug_1790157722578.jpg",
+   "bbox": [
+    1774,
+    618,
+    818,
+    1026
+   ],
+   "area_work": 118263.0,
+   "h_over_w": 1.254,
+   "clip": 1,
+   "ev": 0.0825,
+   "rank": 4,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 25
+  },
+  {
+   "color": "orange",
+   "photo": "photo_debug_1790157704626.jpg",
+   "bbox": [
+    1872,
+    266,
+    720,
+    468
+   ],
+   "area_work": 56011.0,
+   "h_over_w": 0.65,
+   "clip": 1,
+   "ev": 0.0722,
+   "rank": 5,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 26
+  },
+  {
+   "color": "orange",
+   "photo": "photo_debug_1790157205562.jpg",
+   "bbox": [
+    1872,
+    268,
+    720,
+    466
+   ],
+   "area_work": 55957.5,
+   "h_over_w": 0.647,
+   "clip": 1,
+   "ev": 0.0724,
+   "rank": 6,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 27
+  },
+  {
+   "color": "orange",
+   "photo": "photo_debug_1790156151658.jpg",
+   "bbox": [
+    1872,
+    266,
+    720,
+    466
+   ],
+   "area_work": 55935.5,
+   "h_over_w": 0.647,
+   "clip": 1,
+   "ev": 0.0722,
+   "rank": 7,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 28
+  },
+  {
+   "color": "orange",
+   "photo": "photo_debug_1790156052935.jpg",
+   "bbox": [
+    1840,
+    262,
+    740,
+    440
+   ],
+   "area_work": 53620.5,
+   "h_over_w": 0.595,
+   "clip": 1,
+   "ev": 0.0715,
+   "rank": 8,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 29
+  },
+  {
+   "color": "orange",
+   "photo": "photo_debug_1790156107865.jpg",
+   "bbox": [
+    1892,
+    280,
+    700,
+    458
+   ],
+   "area_work": 53405.5,
+   "h_over_w": 0.654,
+   "clip": 1,
+   "ev": 0.0714,
+   "rank": 9,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 30
+  },
+  {
+   "color": "orange",
+   "photo": "photo_debug_1790156042955.jpg",
+   "bbox": [
+    1834,
+    262,
+    740,
+    434
+   ],
+   "area_work": 53209.0,
+   "h_over_w": 0.586,
+   "clip": 0,
+   "ev": 0.0726,
+   "rank": 10,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 31
+  },
+  {
+   "color": "orange",
+   "photo": "photo_1790155997.jpg",
+   "bbox": [
+    2036,
+    302,
+    556,
+    468
+   ],
+   "area_work": 47088.0,
+   "h_over_w": 0.842,
+   "clip": 1,
+   "ev": 0.0629,
+   "rank": 11,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 32
+  },
+  {
+   "color": "orange",
+   "photo": "photo_debug_1790157735342.jpg",
+   "bbox": [
+    0,
+    1320,
+    602,
+    432
+   ],
+   "area_work": 27383.5,
+   "h_over_w": 0.718,
+   "clip": 1,
+   "ev": 0.0,
+   "rank": 12,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 33
+  },
+  {
+   "color": "pink",
+   "photo": "photo_debug_1790157735342.jpg",
+   "bbox": [
+    1750,
+    914,
+    842,
+    856
+   ],
+   "area_work": 118312.5,
+   "h_over_w": 1.017,
+   "clip": 1,
+   "ev": 0.0621,
+   "rank": 1,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 34
+  },
+  {
+   "color": "pink",
+   "photo": "photo_debug_1790157753590.jpg",
+   "bbox": [
+    102,
+    54,
+    576,
+    314
+   ],
+   "area_work": 23647.5,
+   "h_over_w": 0.545,
+   "clip": 0,
+   "ev": 0.0404,
+   "rank": 2,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 35
+  },
+  {
+   "color": "pink",
+   "photo": "photo_debug_1790157722578.jpg",
+   "bbox": [
+    1636,
+    0,
+    628,
+    286
+   ],
+   "area_work": 23366.5,
+   "h_over_w": 0.455,
+   "clip": 1,
+   "ev": 0.0427,
+   "rank": 3,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 36
+  },
+  {
+   "color": "pink",
+   "photo": "photo_debug_1790157704626.jpg",
+   "bbox": [
+    880,
+    0,
+    624,
+    168
+   ],
+   "area_work": 23196.5,
+   "h_over_w": 0.269,
+   "clip": 1,
+   "ev": 0.0223,
+   "rank": 4,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 37
+  },
+  {
+   "color": "pink",
+   "photo": "photo_debug_1790157777856.jpg",
+   "bbox": [
+    1254,
+    0,
+    676,
+    212
+   ],
+   "area_work": 20634.0,
+   "h_over_w": 0.314,
+   "clip": 1,
+   "ev": 0.0492,
+   "rank": 5,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 38
+  },
+  {
+   "color": "pink",
+   "photo": "photo_debug_1790156017896.jpg",
+   "bbox": [
+    0,
+    136,
+    330,
+    322
+   ],
+   "area_work": 14913.5,
+   "h_over_w": 0.976,
+   "clip": 1,
+   "ev": 0.0528,
+   "rank": 6,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 39
+  },
+  {
+   "color": "pink",
+   "photo": "photo_debug_1790156052935.jpg",
+   "bbox": [
+    928,
+    0,
+    540,
+    120
+   ],
+   "area_work": 14691.5,
+   "h_over_w": 0.222,
+   "clip": 1,
+   "ev": 0.0261,
+   "rank": 7,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 40
+  },
+  {
+   "color": "pink",
+   "photo": "photo_debug_1790156151658.jpg",
+   "bbox": [
+    950,
+    0,
+    370,
+    96
+   ],
+   "area_work": 8260.5,
+   "h_over_w": 0.259,
+   "clip": 1,
+   "ev": 0.0345,
+   "rank": 8,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 41
+  },
+  {
+   "color": "pink",
+   "photo": "photo_1790155997.jpg",
+   "bbox": [
+    0,
+    0,
+    298,
+    336
+   ],
+   "area_work": 5070.0,
+   "h_over_w": 1.128,
+   "clip": 1,
+   "ev": 0.0,
+   "rank": 9,
+   "verdict": "FALSE",
+   "why": "红色线缆 + 地垫（粉窗观测）",
+   "n": 42
+  },
+  {
+   "color": "purple",
+   "photo": "photo_debug_1790157735342.jpg",
+   "bbox": [
+    2178,
+    336,
+    414,
+    472
+   ],
+   "area_work": 31617.5,
+   "h_over_w": 1.14,
+   "clip": 1,
+   "ev": 0.15,
+   "rank": 1,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 43
+  },
+  {
+   "color": "purple",
+   "photo": "photo_debug_1790156042955.jpg",
+   "bbox": [
+    236,
+    0,
+    482,
+    200
+   ],
+   "area_work": 14419.0,
+   "h_over_w": 0.415,
+   "clip": 1,
+   "ev": 0.1362,
+   "rank": 2,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 44
+  },
+  {
+   "color": "purple",
+   "photo": "photo_debug_1790156052935.jpg",
+   "bbox": [
+    242,
+    0,
+    482,
+    194
+   ],
+   "area_work": 14150.5,
+   "h_over_w": 0.402,
+   "clip": 1,
+   "ev": 0.1539,
+   "rank": 3,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 45
+  },
+  {
+   "color": "purple",
+   "photo": "photo_debug_1790156107865.jpg",
+   "bbox": [
+    296,
+    0,
+    478,
+    176
+   ],
+   "area_work": 13297.5,
+   "h_over_w": 0.368,
+   "clip": 1,
+   "ev": 0.1542,
+   "rank": 4,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 46
+  },
+  {
+   "color": "purple",
+   "photo": "photo_debug_1790157205562.jpg",
+   "bbox": [
+    264,
+    0,
+    474,
+    168
+   ],
+   "area_work": 12523.5,
+   "h_over_w": 0.354,
+   "clip": 1,
+   "ev": 0.1804,
+   "rank": 5,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 47
+  },
+  {
+   "color": "purple",
+   "photo": "photo_debug_1790157704626.jpg",
+   "bbox": [
+    262,
+    0,
+    476,
+    170
+   ],
+   "area_work": 12503.0,
+   "h_over_w": 0.357,
+   "clip": 1,
+   "ev": 0.1829,
+   "rank": 6,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 48
+  },
+  {
+   "color": "purple",
+   "photo": "photo_debug_1790156151658.jpg",
+   "bbox": [
+    266,
+    0,
+    470,
+    168
+   ],
+   "area_work": 12373.0,
+   "h_over_w": 0.357,
+   "clip": 1,
+   "ev": 0.1768,
+   "rank": 7,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 49
+  },
+  {
+   "color": "purple",
+   "photo": "photo_1790155997.jpg",
+   "bbox": [
+    416,
+    0,
+    458,
+    108
+   ],
+   "area_work": 8503.0,
+   "h_over_w": 0.236,
+   "clip": 1,
+   "ev": 0.0,
+   "rank": 8,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 50
+  },
+  {
+   "color": "red",
+   "photo": "photo_debug_1790156042955.jpg",
+   "bbox": [
+    2168,
+    1050,
+    424,
+    628
+   ],
+   "area_work": 50538.0,
+   "h_over_w": 1.481,
+   "clip": 1,
+   "ev": 0.0507,
+   "rank": 1,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 51
+  },
+  {
+   "color": "red",
+   "photo": "photo_debug_1790156052935.jpg",
+   "bbox": [
+    2174,
+    1052,
+    418,
+    626
+   ],
+   "area_work": 50150.5,
+   "h_over_w": 1.498,
+   "clip": 1,
+   "ev": 0.0494,
+   "rank": 2,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 52
+  },
+  {
+   "color": "red",
+   "photo": "photo_debug_1790157722578.jpg",
+   "bbox": [
+    836,
+    1408,
+    888,
+    416
+   ],
+   "area_work": 47447.5,
+   "h_over_w": 0.468,
+   "clip": 0,
+   "ev": 0.0,
+   "rank": 3,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 53
+  },
+  {
+   "color": "red",
+   "photo": "photo_debug_1790157704626.jpg",
+   "bbox": [
+    2180,
+    1098,
+    412,
+    586
+   ],
+   "area_work": 47076.5,
+   "h_over_w": 1.422,
+   "clip": 1,
+   "ev": 0.0538,
+   "rank": 4,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 54
+  },
+  {
+   "color": "red",
+   "photo": "photo_debug_1790157205562.jpg",
+   "bbox": [
+    2182,
+    1098,
+    410,
+    586
+   ],
+   "area_work": 47015.5,
+   "h_over_w": 1.429,
+   "clip": 1,
+   "ev": 0.0541,
+   "rank": 5,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 55
+  },
+  {
+   "color": "red",
+   "photo": "photo_debug_1790156151658.jpg",
+   "bbox": [
+    2180,
+    1098,
+    412,
+    584
+   ],
+   "area_work": 46990.5,
+   "h_over_w": 1.417,
+   "clip": 1,
+   "ev": 0.0537,
+   "rank": 6,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 56
+  },
+  {
+   "color": "red",
+   "photo": "photo_debug_1790156107865.jpg",
+   "bbox": [
+    2202,
+    1096,
+    390,
+    578
+   ],
+   "area_work": 43655.5,
+   "h_over_w": 1.482,
+   "clip": 1,
+   "ev": 0.0476,
+   "rank": 7,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 57
+  },
+  {
+   "color": "red",
+   "photo": "photo_debug_1790157777856.jpg",
+   "bbox": [
+    660,
+    1456,
+    758,
+    368
+   ],
+   "area_work": 33773.0,
+   "h_over_w": 0.485,
+   "clip": 0,
+   "ev": 0.0,
+   "rank": 8,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 58
+  },
+  {
+   "color": "red",
+   "photo": "photo_1790155997.jpg",
+   "bbox": [
+    2322,
+    1166,
+    270,
+    570
+   ],
+   "area_work": 33085.0,
+   "h_over_w": 2.111,
+   "clip": 1,
+   "ev": 0.0319,
+   "rank": 9,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 59
+  },
+  {
+   "color": "red",
+   "photo": "photo_debug_1790156017896.jpg",
+   "bbox": [
+    1362,
+    524,
+    556,
+    360
+   ],
+   "area_work": 6792.0,
+   "h_over_w": 0.647,
+   "clip": 0,
+   "ev": 0.0,
+   "rank": 11,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 60
+  },
+  {
+   "color": "red",
+   "photo": "photo_debug_1790157735342.jpg",
+   "bbox": [
+    1546,
+    0,
+    1026,
+    316
+   ],
+   "area_work": 16023.0,
+   "h_over_w": 0.308,
+   "clip": 1,
+   "ev": 0.0001,
+   "rank": 10,
+   "verdict": "FALSE",
+   "why": "地垫边缘 + 红色线缆（红窗观测）",
+   "n": 61
+  },
+  {
+   "color": "yellow",
+   "photo": "photo_debug_1790157735342.jpg",
+   "bbox": [
+    494,
+    514,
+    1134,
+    896
+   ],
+   "area_work": 136967.5,
+   "h_over_w": 0.79,
+   "clip": 0,
+   "ev": 0.0779,
+   "rank": 2,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 62
+  },
+  {
+   "color": "yellow",
+   "photo": "photo_debug_1790157704626.jpg",
+   "bbox": [
+    768,
+    242,
+    838,
+    476
+   ],
+   "area_work": 85511.5,
+   "h_over_w": 0.568,
+   "clip": 0,
+   "ev": 0.0706,
+   "rank": 3,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 63
+  },
+  {
+   "color": "yellow",
+   "photo": "photo_debug_1790157205562.jpg",
+   "bbox": [
+    770,
+    242,
+    836,
+    476
+   ],
+   "area_work": 85473.0,
+   "h_over_w": 0.569,
+   "clip": 0,
+   "ev": 0.0705,
+   "rank": 4,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 64
+  },
+  {
+   "color": "yellow",
+   "photo": "photo_debug_1790156151658.jpg",
+   "bbox": [
+    768,
+    242,
+    836,
+    476
+   ],
+   "area_work": 85472.5,
+   "h_over_w": 0.569,
+   "clip": 0,
+   "ev": 0.1724,
+   "rank": 5,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 65
+  },
+  {
+   "color": "yellow",
+   "photo": "photo_debug_1790156107865.jpg",
+   "bbox": [
+    808,
+    256,
+    826,
+    460
+   ],
+   "area_work": 82423.5,
+   "h_over_w": 0.557,
+   "clip": 0,
+   "ev": 0.0702,
+   "rank": 6,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 66
+  },
+  {
+   "color": "yellow",
+   "photo": "photo_debug_1790156052935.jpg",
+   "bbox": [
+    768,
+    246,
+    824,
+    474
+   ],
+   "area_work": 82179.0,
+   "h_over_w": 0.575,
+   "clip": 0,
+   "ev": 0.0703,
+   "rank": 7,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 67
+  },
+  {
+   "color": "yellow",
+   "photo": "photo_debug_1790156042955.jpg",
+   "bbox": [
+    762,
+    246,
+    822,
+    478
+   ],
+   "area_work": 82155.5,
+   "h_over_w": 0.582,
+   "clip": 0,
+   "ev": 0.0708,
+   "rank": 8,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 68
+  },
+  {
+   "color": "yellow",
+   "photo": "photo_1790155997.jpg",
+   "bbox": [
+    918,
+    230,
+    816,
+    474
+   ],
+   "area_work": 80712.0,
+   "h_over_w": 0.581,
+   "clip": 0,
+   "ev": 0.0638,
+   "rank": 9,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 69
+  },
+  {
+   "color": "yellow",
+   "photo": "photo_debug_1790157777856.jpg",
+   "bbox": [
+    564,
+    158,
+    946,
+    592
+   ],
+   "area_work": 71969.0,
+   "h_over_w": 0.626,
+   "clip": 0,
+   "ev": 0.067,
+   "rank": 10,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 70
+  },
+  {
+   "color": "yellow",
+   "photo": "photo_debug_1790156017896.jpg",
+   "bbox": [
+    0,
+    416,
+    656,
+    772
+   ],
+   "area_work": 71608.5,
+   "h_over_w": 1.177,
+   "clip": 1,
+   "ev": 0.0748,
+   "rank": 11,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 71
+  },
+  {
+   "color": "yellow",
+   "photo": "photo_debug_1790157722578.jpg",
+   "bbox": [
+    946,
+    146,
+    946,
+    576
+   ],
+   "area_work": 70337.0,
+   "h_over_w": 0.609,
+   "clip": 0,
+   "ev": 0.067,
+   "rank": 12,
+   "verdict": "TRUE",
+   "why": "",
+   "n": 72
+  },
+  {
+   "color": "yellow",
+   "photo": "photo_debug_1790157753590.jpg",
+   "bbox": [
+    1524,
+    0,
+    876,
+    1738
+   ],
+   "area_work": 147263.0,
+   "h_over_w": 1.984,
+   "clip": 1,
+   "ev": 0.0687,
+   "rank": 1,
+   "verdict": "FALSE",
+   "why": "木框：右侧场边木条被暖光染黄，紧贴画面顶边",
+   "n": 73
+  }
+ ]
+}

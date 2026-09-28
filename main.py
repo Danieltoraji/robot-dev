@@ -19,8 +19,20 @@ from core.paths import RESULT_DIR
 from core.robot_core import RobotState
 from levels import goodluck as level_goodluck
 from levels import nine_grid as level_nine_grid
-from levels import press_button as level_press_button
+from levels import nine_grid_original as level_nine_grid_original
+from levels import nine_grid_three_stage as level_nine_grid_three_stage
 from levels import stairs_hurdle as level_stairs_hurdle
+
+# 机器人智按按钮：**合并后 `levels/press_button.py` 已在本分支存在**（远端 main 带来），
+# 但仍写成"有就注册"：这样换 SD 卡/少同步一个文件时 `import main` 不会直接崩，
+# 注册表里也不会凭空少一条能跑的路线。
+try:
+    from levels import press_button as level_press_button
+except ImportError as _exc:            # 缺该模块时降级（不注册这条路线）
+    level_press_button = None
+    PRESS_BUTTON_SKIP_REASON = str(_exc)
+else:
+    PRESS_BUTTON_SKIP_REASON = None
 
 
 # =====================================================================
@@ -30,7 +42,10 @@ from levels import stairs_hurdle as level_stairs_hurdle
 #   - 把详细日志输出到 archive/result/real_trace_*.txt
 #   - 把定位轨迹保存为 archive/result/real_trajectory_*.png
 # False 时保持原有真机行为，不引入额外依赖。
-TRACE_ENABLED = False
+# 2026-09-11 由 False 改为 True：数字宫格真机跑完整局后暴露出"终点不停/找 3
+# 异常/踩不到微动开关"三类问题，定位这些都只能靠逐动作 trace（PC 仓库是唯一
+# 真源，机器人侧随后同步）。trace 只是额外写两个文件，不影响控制流。
+TRACE_ENABLED = True
 
 
 # =====================================================================
@@ -44,18 +59,23 @@ LEVELS = {
         "run_level": level_goodluck.run_level,
     },
     # 数字宫格：无 AprilTag，用地面单应定位（tag_poses 留空即可）
+    # 两种决策办法各是一个模块，入口名分开，现场跑哪条一眼可辨。
     "nine_grid": {
         "module": level_nine_grid,
         "tag_poses": {},
         "run_level": level_nine_grid.run_level,
     },
-    # 机器人智按按钮：用 AprilTag 但不做 PnP，只按「标签横向位置 + 像素宽度」
-    # 做像素闭环（现场参考实现 robot/press_final.py），tag_poses 留空。
-    # 离线自检：python levels/press_button.py --selftest
-    "press_button": {
-        "module": level_press_button,
+    "nine_grid_three_stage": {
+        "module": level_nine_grid_three_stage,
         "tag_poses": {},
-        "run_level": level_press_button.run_level,
+        "run_level": level_nine_grid_three_stage.run_level,
+    },
+    # 参考原版通关代码（reference code/九宫格视觉导航 的原样接入，常量未重标）。
+    # 与上面两条互不共用代码，只用于对照；详见 levels/nine_grid_original/ 这个包。
+    "nine_grid_original": {
+        "module": level_nine_grid_original,
+        "tag_poses": {},
+        "run_level": level_nine_grid_original.run_level,
     },
     # 上下楼梯与识别跨障：头部单目测距（卷尺标定的相机几何）+ 黑箱动作组，
     # 不用 AprilTag，tag_poses 留空。
@@ -67,6 +87,14 @@ LEVELS = {
         "run_level": level_stairs_hurdle.run_level,
     },
 }
+
+# 机器人智按按钮：模块在就注册（见文件头的 try/except）。
+if level_press_button is not None:
+    LEVELS["press_button"] = {
+        "module": level_press_button,
+        "tag_poses": {},
+        "run_level": level_press_button.run_level,
+    }
 
 
 def main():

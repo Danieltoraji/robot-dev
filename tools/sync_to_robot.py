@@ -6,6 +6,14 @@ sync_to_robot.py —— PC → 机器人代码同步（Jupyter Contents API，�
 机器人端 Jupyter: http://192.168.31.209:8888（密码登录）；
 目标目录: Robot_Competition（即 /home/pi/Robot_Competition）。
 
+⚠️ 2026-09-21 订正：目标根目录原为 Robot_control_self_module，但机器人换 SD 卡
+镜像（Debian 13 / Python 3.13.5）后该目录**不存在**，机器人上实际存放并运行本
+仓库代码的目录是 /home/pi/Robot_Competition（其 main.py/core/levels/vision/
+tools/models 结构与本仓库同源）。若沿用旧默认值，sync 会在 /home/pi 下新建一个
+空目录并写入代码，而机器人仍在跑旧目录 —— 两边分叉、排查方向被带偏。
+换镜像后 robot 上环境已由本轮补齐：fswebcam + scipy/matplotlib/sklearn/
+skimage/joblib/onnxruntime/apriltag（装进 /home/pi/jupyter-env）。
+
 原理：
   1. GET /login 取 _xsrf → POST /login（password）拿会话 cookie；
   2. 遍历本地待同步文件，逐个 GET /api/contents/<path>?content=1 比对字节；
@@ -20,9 +28,15 @@ sync_to_robot.py —— PC → 机器人代码同步（Jupyter Contents API，�
     python tools/sync_to_robot.py --paths core main.py # 只同步指定路径
     python tools/sync_to_robot.py --host http://IP:8888 --password xxx
 
-默认同步集合: main.py + core/ vision/ levels/ tools/ models/
+默认同步集合: main.py + debug.sh + core/ vision/ levels/ tools/ models/
 （sim/ docs/ tests/ archive/ release/ 仅 PC 使用，不进机器人；
-  例外：archive/result/ninegrid_homography.json 是数字宫格运行时标定产物，附加同步。）
+  例外：archive/result/ 下的运行时标定产物按 EXTRA_FILES 附加同步。）
+
+⚠️ 上机前务必干跑 + 忽略本地清单全量重传：
+    python tools/sync_to_robot.py --check                    # 看将传什么
+    python tools/sync_to_robot.py --full                     # 真传（忽略清单）
+   换 SD 卡/重装机器人后**必须加 --full**：archive/sync_manifest.json 会按
+   (size, mtime) 把"本地未变化"的文件全部跳过，机器人侧全空也照样跳过。
 """
 
 import argparse
@@ -49,7 +63,9 @@ DEFAULT_PATHS = ["main.py", "debug.sh", "core", "vision", "levels", "tools", "mo
 # 从镜像目录直接运行 demoV4 时必须有它（.npz 默认被 SKIP_EXTS 跳过）。
 EXTRA_FILES = [
     "archive/result/ninegrid_homography.json",
-    "levels/football_codes2/CameraCalibration/calibration_param.npz",
+    # 上下楼梯与识别跨障：本地系地面单应标定（缺失退回 from_pose 自举，
+    # 测距精度下降到 ±3cm 级）——必须随代码一起上机
+    "archive/result/stairs_hurdle_calib.json",
 ]
 
 SKIP_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", ".zcode", "archive", "release"}
@@ -232,6 +248,16 @@ def main():
             continue
         with open(local_path, "rb") as f:
             data = f.read()
+        # shell 脚本必须 LF 上机：Windows 侧 core.autocrlf=true 会把工作树 checkout
+        # 成 CRLF，而本脚本是**逐字节**传工作树，于是机器人上的 bash 会把 \r 当成
+        # 命令的一部分而语法报错（2026-09-21 实战：`bash debug.sh` 报
+        # "invalid option: set: -"、"cd: $'.\r'"、case 语句语法错误）。
+        # 注意：.py 不需要这样处理——Python 解释器对 CRLF 无感，实测 v3 的
+        # nine_grid/stairs_hurdle 在机器人上 import 与真机运行均正常。
+        if rel.lower().endswith((".sh", ".bash")) and b"\r\n" in data:
+            n_cr = data.count(b"\r\n")
+            data = data.replace(b"\r\n", b"\n")
+            print(f"[行尾] {rel}: CRLF→LF（{n_cr} 处，shell 脚本必须 LF）")
         if len(data) > 80 * 1024 * 1024:
             print(f"[WARN] 超大文件跳过: {rel} ({len(data) // 1024 // 1024}MB)")
             failed += 1

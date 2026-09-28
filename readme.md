@@ -40,6 +40,14 @@ python main.py goodluck --end-at-last-stop
 # 运行数字宫格关卡（真机）
 python main.py nine_grid
 
+# 数字宫格：**短路掉全部布局流程**（不扫场/不拟合/不自标定/不反推位姿，
+# 逐格导航全靠视觉）。布局投票不足时不再终止整局，代价是没有位姿自举。
+NINEGRID_NO_LAYOUT=1 python main.py nine_grid                # 统一决策（最新实现）
+NINEGRID_NO_LAYOUT=1 python main.py nine_grid_three_stage    # 三段式，同样生效
+#   开关的单一真源 = levels/nine_grid_shared.LAYOUT_ENABLED（+ 上面这个环境变量），
+#   装在共用基类 NineGridShared.run_level 里 ⇒ **上面两个入口都吃这个开关**；
+#   仿真侧对应 python -m sim.nine_grid_sim --no-layout（此时命中 7/7 才算通过）。
+
 # 运行模拟器（PC，验证算法）
 python -m sim.goodluck_sim            # goodluck：2D 可视化 + 位姿桩
 python -m sim.nine_grid_sim           # 数字宫格：合成相机图像，跑真实视觉链路

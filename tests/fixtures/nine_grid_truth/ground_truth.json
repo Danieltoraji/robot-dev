@@ -1,0 +1,60 @@
+{
+ "note": "nine_grid 可信真值集。口径：12 张现场帧（机器人立于真实九宫格场地），NineGridDetector.detect_panels 检出的全部观测去重后共 73 条；逐张目视裁定真假。判定要点：真面板=色块紧贴印刷黑数字、四周被白色垫板包围；假货=木框/机身/深色地面/电缆等地垫杂物。key = (photo, color, rank)：rank 是该颜色内按 hull 面积降序的名次（与 tools/build_truth_matrix.py 的输出一致，可自校验）。",
+ "source_frames": "tests/fixtures/nine_grid_truth/*.jpg（21 张，含 9 张被 min_obs=4 滤除的）",
+ "false_observations": [
+  {
+   "color": "yellow",
+   "rank": 1,
+   "photo": "photo_debug_1790157753590.jpg",
+   "area_work": 147263.0,
+   "why": "木框：右侧场边木条被暖光染黄，紧贴画面顶边",
+   "evidence": "h/w=1.98 clip=1 ev=0.069 glyph=0"
+  },
+  {
+   "color": "green",
+   "rank": 5,
+   "photo": "photo_debug_1790157753590.jpg",
+   "area_work": 15615.0,
+   "why": "机器人自身机身（绿窗观测）",
+   "evidence": "h/w=0.22 clip=1 ev=0.205 glyph=0。与下一条 blue:46241 是同一物理物体在两个色窗下各看了一次"
+  },
+  {
+   "color": "blue",
+   "rank": 1,
+   "photo": "photo_1790155997.jpg",
+   "area_work": 46241.0,
+   "why": "机器人机身下方深色地面/桌面（蓝窗观测）",
+   "evidence": "h/w=0.58 clip=1 ev=0.0"
+  },
+  {
+   "color": "pink",
+   "rank": 9,
+   "photo": "photo_1790155997.jpg",
+   "area_work": 5070.0,
+   "why": "红色线缆 + 地垫（粉窗观测）",
+   "evidence": "h/w=1.13 clip=1 ev=0.0"
+  },
+  {
+   "color": "red",
+   "rank": 10,
+   "photo": "photo_debug_1790157735342.jpg",
+   "area_work": 16023.0,
+   "why": "地垫边缘 + 红色线缆（红窗观测）",
+   "evidence": "h/w=0.31 clip=1 ev=0.0001"
+  }
+ ],
+ "summary": {
+  "total": 73,
+  "true": 68,
+  "false": 5,
+  "per_color_true_false": {
+   "blue": [10, 1],
+   "green": [9, 1],
+   "orange": [12, 0],
+   "pink": [8, 1],
+   "purple": [8, 0],
+   "red": [10, 1],
+   "yellow": [11, 1]
+  }
+ }
+}
