@@ -23,16 +23,12 @@ from levels import nine_grid_original as level_nine_grid_original
 from levels import nine_grid_three_stage as level_nine_grid_three_stage
 from levels import stairs_hurdle as level_stairs_hurdle
 
-# 机器人智按按钮：代码在另一条分支（`.worktrees/press_button`，分支
-# dxd_press_button），**本分支的 `levels/` 下没有 press_button.py**，
-# 但机器人上的代码树里有它（那一分支同步过去的）。
-# 所以这里写成"有就注册"：硬 import 会让本分支 `import main` 直接 ImportError，
-# PC 上的自检、`tests/test_nine_grid_original.py::test_registered_in_main` 与
-# trace 复现全部作废；而注册表里少了 press_button 又会把机器人上本来能跑的
-# 那条路线从 `python main.py` 的入口列表里删掉。
+# 机器人智按按钮：**合并后 `levels/press_button.py` 已在本分支存在**（远端 main 带来），
+# 但仍写成"有就注册"：这样换 SD 卡/少同步一个文件时 `import main` 不会直接崩，
+# 注册表里也不会凭空少一条能跑的路线。
 try:
     from levels import press_button as level_press_button
-except ImportError as _exc:            # 本分支没有该模块（机器人上有）
+except ImportError as _exc:            # 缺该模块时降级（不注册这条路线）
     level_press_button = None
     PRESS_BUTTON_SKIP_REASON = str(_exc)
 else:
@@ -81,7 +77,10 @@ LEVELS = {
         "tag_poses": {},
         "run_level": level_nine_grid_original.run_level,
     },
-    # 上下楼梯与识别跨障：无 AprilTag，红色带 + 本地系地面单应
+    # 上下楼梯与识别跨障：头部单目测距（卷尺标定的相机几何）+ 黑箱动作组，
+    # 不用 AprilTag，tag_poses 留空。
+    # 方案：docs/关卡算法/上下楼梯与识别跨障-stairs_hurdle/完整方案-2026-09-25-流程重制.md
+    # 仿真回归：python tests/test_stairs_hurdle_sim.py
     "stairs_hurdle": {
         "module": level_stairs_hurdle,
         "tag_poses": {},
@@ -89,8 +88,7 @@ LEVELS = {
     },
 }
 
-# 机器人智按按钮（模块在另一分支，见文件头的 try/except）：模块在就注册，
-# 不在就不注册——PC 本分支不注册，机器人上注册（保持那边的入口一样多）。
+# 机器人智按按钮：模块在就注册（见文件头的 try/except）。
 if level_press_button is not None:
     LEVELS["press_button"] = {
         "module": level_press_button,

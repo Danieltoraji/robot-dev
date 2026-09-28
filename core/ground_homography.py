@@ -144,6 +144,12 @@ class GroundHomography:
 
         cam_xy: 光心地面投影 (场地系 cm)；cam_z: 相机高度 cm
         pitch_pulse: 俯仰舵机脉宽（(1500-pulse)*0.09 = 俯角，越小越低头）
+        pitch_offset_deg: 相机相对俯仰舵机的**安装下俯偏移**（度）。
+            有效俯角 = (1500-pulse)*0.09 + pitch_offset_deg。
+            漏掉它会把相机当成比实际"抬得更高"看：可见地面带整体推远，
+            近距离直接看不到（上下楼梯关卡实测：漏掉 19.1° 的偏移时，
+            30cm 会被算成 49cm）。需要按真实几何取值的调用方必须传，
+            缺省 0.0 保持旧语义。
         head_in_pose=True（缺省，2026-09-11 起）：把**头部偏航并入相机朝向**
         （相机方位角 = bearing_deg − 头部角，与 levels/nine_grid._camera_rotation
         同一约定）。于是 `from_pose(h, pitch, head_pulse=δ)` +
@@ -153,7 +159,12 @@ class GroundHomography:
         调用方再传同一个 pulse 时差分补偿恒为 0 → 宽扫档（±40.5°/±63°）的观测
         被当成中位档映射，跨帧聚合偏差可达 8cm~1m（布局扫不收敛的直接原因）。
         head_in_pose=False 保留旧的"先按中位档建 H、后续差分补偿"语义。
-        精度受位姿假设限制（±3cm 级），只够布局扫的格归属判断。
+        精度受位姿假设限制（±3cm 级），只够布局扫的格归属判断；
+        精确度量用 tools/calib_ninegrid.py 点击标定覆盖。
+
+        ⚠️ 2026-09-28 合并说明：远端 main 那一版**没有** `head_in_pose`（也没实现），
+        这里保留本分支的实现（九宫格布局扫与三段式的头部偏航补偿都依赖它）；
+        `pitch_offset_deg` 的说明采用远端措辞。
         """
         alpha = np.radians((1500 - pitch_pulse) * SERVO_DEG_PER_US
                            + pitch_offset_deg)

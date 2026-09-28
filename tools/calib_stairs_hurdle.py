@@ -1,8 +1,20 @@
 # -*- coding: utf-8 -*-
 """上下楼梯与识别跨障关卡：机器人本地系地面单应标定（tools/calib_stairs_hurdle.py）
 
-为什么需要它
-------------
+⚠ 2026-09-25：**本工具现场不可执行，已放弃，不要用。**
+--------------------------------------------------------------------
+它要求把红色目标摆在"以**光心地面投影**为原点"的已知本地系坐标上，
+而那个原点现场根本找不到（卷尺/吊线都定不准，相机在机体内部）。
+摆不出已知坐标，就解不了 H。
+
+**不需要它**：相机几何已由 tools/calib_ruler_profile.py 的卷尺标定给出
+（光心离地 33.9cm、安装下俯偏移 19.1°），关卡直接用这两个常数建解析模型，
+实测测距是准的。全 H 只是再精修一层，放弃后没有损失。
+
+保留本文件仅供：已经有已知坐标点阵（例如将来做了机器人定位工装）时使用。
+
+为什么需要它（原始设计意图）
+----------------------------
 关卡的测距/对正依赖"机器人本地系"地面单应（原点=光心地面投影、y=前、
 x=右）。缺省用 GroundHomography.from_pose 解析自举（±3cm 级）；现场用
 本工具做 solve() 全 H 标定，一次性吸收相机高度/俯仰/偏航/横滚零偏。
@@ -12,7 +24,7 @@ x=右）。缺省用 GroundHomography.from_pose 解析自举（±3cm 级）；�
 
 现场操作流程（约 20 分钟）
 ------------------------
-1. 机器人摆到观测姿态：stand，头 pitch=1000（与关卡 PITCH_OBS 一致）、
+1. 机器人摆到观测姿态：stand，头 pitch=1100（与关卡 PITCH_OBS 一致）、
    头部回正（1500）。**之后不要再动俯仰/头部。**
 2. 确定光心地面投影点 O：相机正下方地面位置（卷尺/吊线，从机身参考点量）。
 3. 在 O 周围摆 4~6 个红色目标（胶带片/红色边角料），目标下沿按本地系
@@ -24,15 +36,15 @@ x=右）。缺省用 GroundHomography.from_pose 解析自举（±3cm 级）；�
    可任意移动**（本地系性质），但相机高度/俯仰变了必须重标。
 6. 用 tools/verify_red_distance.py 在**另一个站位**复核测距精度。
 
-用法
-----
-    python tools/calib_stairs_hurdle.py --pitch 1000            # 真机拍照+点击
-    python tools/calib_stairs_hurdle.py --pitch 1000 --image photo.jpg
-    python tools/calib_stairs_hurdle.py --pitch 1000 --image photo.jpg \
+用法（⚠ 已放弃，仅留档；下面命令只在"有已知坐标点阵"时才用得上）
+-----------------------------------------------------------------
+    python tools/calib_stairs_hurdle.py --pitch 1100            # 真机拍照+点击
+    python tools/calib_stairs_hurdle.py --pitch 1100 --image photo.jpg
+    python tools/calib_stairs_hurdle.py --pitch 1100 --image photo.jpg \
         --px "1200,1500; 1500,1600; 900,1700; 1600,1400" \
         --ground "0,25; 10,35; -10,40; 5,55"
 
-交互：左键点击 → u 撤销 → r 重置 → s 保存 → q/ESC 退出
+⚠ `cv2.namedWindow` 在机器人上是 headless，**标定必须在 PC 上用 `--image` 跑**。
 """
 
 import argparse
@@ -58,8 +70,8 @@ SUGGESTED_LAYOUT = [
 
 def parse_args():
     ap = argparse.ArgumentParser(description="上下楼梯跨障关卡本地系单应标定")
-    ap.add_argument("--pitch", type=int, default=1000,
-                    help="俯仰舵机脉宽（须与关卡 PITCH_OBS 一致），默认 1000")
+    ap.add_argument("--pitch", type=int, default=1100,
+                    help="俯仰舵机脉宽（须与关卡 PITCH_OBS 一致），默认 1100")
     ap.add_argument("--head", type=int, default=HEAD_CENTER,
                     help="头部脉宽（标定档），默认 1500（中位）")
     ap.add_argument("--image", default=None,

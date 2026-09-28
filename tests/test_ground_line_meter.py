@@ -182,11 +182,17 @@ def test_climb_bearing_invariance():
 # ---------------------------------------------------------------------
 
 def test_min_visible_ground():
+    # 半视场含畸变为 29.02°（针孔公式 26.49° 低估 2.5°，2026-09-25 纠正），
+    # 故 h=39cm/pitch1000 的可见下界由 13.05cm 修正为 11.16cm。
     d = min_visible_ground_cm(39.0, 1000)
-    assert 12.0 < d < 14.5, f"pitch=1000 可见下界 {d:.2f}cm 不合理"
+    assert 10.5 < d < 12.0, f"pitch=1000 可见下界 {d:.2f}cm 不合理"
     d2 = min_visible_ground_cm(39.0, 950)
     assert d2 < d, "更低头应看得更近"
-    print(f"  可见下界：pitch1000={d:.1f}cm pitch950={d2:.1f}cm ✓")
+    # 安装偏移必须把可见下界推近（相机实际比名义角度更低头）
+    d3 = min_visible_ground_cm(39.0, 1000, pitch_offset_deg=16.0)
+    assert d3 < d * 0.5, f"加安装偏移后可见下界应变近，实际 {d3:.2f}cm"
+    print(f"  可见下界：pitch1000={d:.1f}cm pitch950={d2:.1f}cm "
+          f"含偏移16°={d3:.2f}cm ✓")
 
 
 def test_build_meter_degraded_and_calib():
