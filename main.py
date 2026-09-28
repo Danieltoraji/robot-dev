@@ -6,11 +6,19 @@ RoboTrack 主入口
     python main.py              # 默认运行 goodluck 关卡
     python main.py goodluck     # 显式指定 goodluck 关卡
 
+（没有 --help：关卡名就是第一个位置参数，传个没有的名字会列出当前可用关卡
+并以退出码 1 结束。）
+
 后续新增关卡时：
     1. 在 levels/ 下新建关卡文件（如 levels/new_level.py）
     2. 实现 run_level(state) 入口函数和 tag_poses 赛道数据
     3. 在下方 LEVELS 字典中注册
     4. python main.py new_level 即可运行
+
+注册表里少数几条是"有就注册"（模块能 import 才多一条入口）：press_button、
+line_seeker_tracking、apriltag_sorting_task。后两条顶层 import hiwonder，
+**PC 上必然缺席、只有真机才注册**；缺席原因记在 *_SKIP_REASON 变量里，
+不静默消失。详见下面各自的注释块。
 """
 
 import sys
@@ -33,6 +41,36 @@ except ImportError as _exc:            # 缺该模块时降级（不注册这条
     PRESS_BUTTON_SKIP_REASON = str(_exc)
 else:
     PRESS_BUTTON_SKIP_REASON = None
+
+# 下面两条不是比赛关卡本体，是"独立写法的任务程序"，接进来的目的是让它们和其它
+# 关卡一样有 main.py 统一入口（2026-09-28 用户要求）。共同点：
+#   · **模块本体一行不改**（各自有活跃的现场手调值，整文件覆盖会冲掉别人的改动）；
+#   · 顶层就 `import hiwonder.*`，所以 **PC 上 import 必失败**（真机才有 SDK）
+#     ⇒ 只能"有就注册"，与 press_button 同一套降级写法，PC 上少一条是正常的；
+#   · 都自己开关相机、自己下发动作组，**不读传进来的 state**（state 只用于轨迹记账）；
+#   · 入口签名不同：循迹是 `run_line_tracking()`，抓取是 `main()`（自带 argparse，
+#     现场要传参数就直接跑原文件，别从这里传）。
+# 资源排他：这两条和别的关卡一样独占相机/舵机总线，一次只跑一条。
+
+# 红色路径寻线 + 循迹：levels/line_seeker_tracking.py（入口 run_line_tracking）
+try:
+    from levels import line_seeker_tracking as level_line_seeker_tracking
+except ImportError as _exc:
+    level_line_seeker_tracking = None
+    LINE_SEEKER_SKIP_REASON = str(_exc)
+else:
+    LINE_SEEKER_SKIP_REASON = None
+
+# AprilTag 分拣（抓蓝色海绵 → 放到 Tag 38 板）：levels/apriltag_sorting_task.py
+# 注意它在 import 期就会建 /home/pi/Robot_Competition/levels/ 目录并挂文件日志、
+# import 期还会读同目录 calib_config.json；所以"能 import"本身就等于"这是真机"。
+try:
+    from levels import apriltag_sorting_task as level_apriltag_sorting_task
+except ImportError as _exc:
+    level_apriltag_sorting_task = None
+    APRILTAG_SORTING_SKIP_REASON = str(_exc)
+else:
+    APRILTAG_SORTING_SKIP_REASON = None
 
 
 # =====================================================================
@@ -94,6 +132,41 @@ if level_press_button is not None:
         "module": level_press_button,
         "tag_poses": {},
         "run_level": level_press_button.run_level,
+    }
+
+# 循迹 + AprilTag 分拣：同样"模块在就注册"。
+# 为什么入口要包一层闭包，而不像上面那样直接写 `module.run_level`：
+#   这两条路线的入口函数名不是项目约定的 `run_level`，包一层是为了在**不改模块本体**
+#   的前提下把签名统一成 `run_level(state)`。`state` 按原样收下但不使用：它们自己开关
+#   相机、自己下发动作组，不走 state.act / state.capture_frame。
+def _run_line_seeker_tracking(_state):
+    """循迹（levels/line_seeker_tracking.py）：stand → 寻线 → 沿线走。"""
+    return bool(level_line_seeker_tracking.run_line_tracking())
+
+
+def _run_apriltag_sorting(_state):
+    """Apriltag 分拣（levels/apriltag_sorting_task.py）：抓蓝海绵放 Tag 38 板。
+
+    走它自己的 `main()`（= parse_args + SortingTask.run），也就是命令行直接跑
+    `python3 levels/apriltag_sorting_task.py` 的那条路；要传 `--target-tag` 之类
+    参数请直接跑原文件。
+    """
+    level_apriltag_sorting_task.main()
+    return True
+
+
+if level_line_seeker_tracking is not None:
+    LEVELS["line_seeker_tracking"] = {
+        "module": level_line_seeker_tracking,
+        "tag_poses": {},                       # 本路线不用 AprilTag
+        "run_level": _run_line_seeker_tracking,
+    }
+
+if level_apriltag_sorting_task is not None:
+    LEVELS["apriltag_sorting_task"] = {
+        "module": level_apriltag_sorting_task,
+        "tag_poses": {},                       # 任务自带 Tag 路线，不用 main 的赛道数据
+        "run_level": _run_apriltag_sorting,
     }
 
 

@@ -73,6 +73,14 @@ BATCH_FORWARD_MIN_DIST = 15.0      # 距目标 > 此值才启用批量（cm）�
 GO_FORWARD_BATCH_MAX_ANGLE_DEG = 4.0
 
 # =====================================================================
+# 批量转弯参数（"一次定位，多步转向"优化）
+# =====================================================================
+# 需要角度 ≥ 1.5 步时一次连转 times 步，省去连转链中的中间定位（每省一次 ≈2s）。
+# 2026-09-28：步长改为 15°/次后上限由 3 提升到 5（5×15°=75°，单次最多转 75°，
+# 过冲 ≤ 一个步长 = 15°，仍在 ORIENTATION_THRESHOLD 容忍带内，转完一次定位自纠）。
+BATCH_TURN_MAX_TIMES = 5
+
+# =====================================================================
 # 统一路点模型与整条赛道路点表
 # =====================================================================
 # Waypoint(pos, stop, orientation)：
@@ -108,9 +116,20 @@ ROUTE = [
 # 提前结束开关（2026-08-30 提速改造）
 # =====================================================================
 # --end-at-last-stop：走到停靠点4 [74,30] 即结束流程，跳过中间路点④与出口段
-# （出口段日后由其它方法处理）。真机用法：python main.py goodluck --end-at-last-stop
+# （出场段由收尾动作 run_exit_tail 接手）。真机用法：python main.py goodluck --end-at-last-stop
 END_AT_LAST_STOP = "--end-at-last-stop" in sys.argv
 END_AFTER_POS = [74.0, 30.0]  # 提前结束的判定路点（停靠点4）
+
+# ---------------------------------------------------------------------
+# 出场收尾动作（2026-09-28 新增，开环、不定位）
+# ---------------------------------------------------------------------
+# 到达最后一个路点（停靠点4 [74,30]）后：左转 TAIL_TURN_LEFT_TIMES 次
+# （7 × TURN_LEFT_DEG = 105°）→ 前行 TAIL_FORWARD_STEPS 步（3 × FORWARD_CM = 15cm）。
+# 到达停靠点4 时机器人朝南（-y，从 [74,75] 直落下来），左转 105° 后朝东偏北 15°，
+# 前进 15cm 落点约 [88.5, 34]，正对出口方向（出口 x=100, 0≤y≤40）。
+# 这段属于"出场段"：闭环导航在出口边界/贴墙区会触发危险区逃逸，因此用纯动作组开环执行。
+TAIL_TURN_LEFT_TIMES = 7
+TAIL_FORWARD_STEPS = 3
 
 # =====================================================================
 # 动作组参数常量（2026-08-25 实机标定完成）
@@ -123,8 +142,8 @@ FORWARD_ONE_STEP_CM = 2.0  # go_forward_one_step（实测 2.0cm/次）
 BACK_FAST_CM = 3.2  # back_one_step（实测 3.2cm/次）
 LEFT_MOVE_CM = 1.9  # left_move（实测 1.9cm/次）
 RIGHT_MOVE_CM = 2.2  # right_move（实测 2.2cm/次）
-TURN_LEFT_DEG = 22.0  # turn_left（实测 22.0°/次）
-TURN_RIGHT_DEG = 25.7  # turn_right（实测 25.7°/次）
+TURN_LEFT_DEG = 15.0  # turn_left（2026-09-28 重新标定为 15.0°/次，原 22.0°）
+TURN_RIGHT_DEG = 15.0  # turn_right（2026-09-28 重新标定为 15.0°/次，原 25.7°）
 FORWARD_BIAS = 0.0  # 前进方向偏好权重，避免原地转圈
 
 
@@ -261,10 +280,11 @@ def decide_rotation_action(state, target):
     返回 (action_name, times)。
 
     2026-08-25 实机标定后：小步转向（turn_*_small_step）不可靠已弃用，
-    转向只使用 turn_left(22.0°) / turn_right(25.7°)。
-    2026-08-30 提速改造：需要角 ≥ 1.5 步时一次连转 times 步（round 取整，上限 3），
-    省去连转链中的中间定位（每省一次 ≈2s）。过冲 ≤ 一个步长，处于
-    ORIENTATION_THRESHOLD(15°) 容忍内，转完一次定位自纠。
+    转向只使用 turn_left / turn_right（2026-09-28 重新标定为 15.0°/次）。
+    2026-08-30 提速改造：需要角 ≥ 1.5 步时一次连转 times 步（round 取整，
+    上限 BATCH_TURN_MAX_TIMES），省去连转链中的中间定位（每省一次 ≈2s）。
+    过冲 ≤ 一个步长（15°），处于 ORIENTATION_THRESHOLD(≈15°) 容忍内，
+    转完一次定位自纠。
     """
     target = np.array(target, dtype=np.float64)  # 目标朝向
     # 当前朝向到目标朝向的带符号角度差
@@ -278,7 +298,7 @@ def decide_rotation_action(state, target):
         step_deg, name = TURN_LEFT_DEG, "turn_left"
     else:
         step_deg, name = TURN_RIGHT_DEG, "turn_right"
-    times = max(1, min(3, int(round(angle_deg / step_deg))))
+    times = max(1, min(BATCH_TURN_MAX_TIMES, int(round(angle_deg / step_deg))))
     print(f"需转向 {angle_deg:.1f}°（{name}，实测 {step_deg}°/次 × {times}）")
     return name, times
 
@@ -483,6 +503,24 @@ def assert_corridor_clear(polyline, min_dist=CORRIDOR_CLEAR_CM):
 # 关卡入口函数
 # =====================================================================
 
+def run_exit_tail(state):
+    """出场收尾动作（2026-09-28）：左转 TAIL_TURN_LEFT_TIMES 次 → 前行 TAIL_FORWARD_STEPS 步
+
+    到达最后一个路点（停靠点4 [74,30]）后执行的开环动作组：不定位、不闭环，
+    直接把机器人转向出口方向并推进一小段。参数改动只需调 TAIL_* 两个常量。
+    """
+    turn_deg = TAIL_TURN_LEFT_TIMES * TURN_LEFT_DEG
+    fwd_cm = TAIL_FORWARD_STEPS * FORWARD_CM
+    print(f"\n===== 收尾动作：左转 {TAIL_TURN_LEFT_TIMES} 次"
+          f"（{TURN_LEFT_DEG}°/次 ≈ {turn_deg:.0f}°）=====")
+    state.act("turn_left", times=TAIL_TURN_LEFT_TIMES)
+    print(f"===== 收尾动作：前行 {TAIL_FORWARD_STEPS} 步"
+          f"（{FORWARD_CM}cm/步 = {fwd_cm:.0f}cm）=====")
+    state.act("go_forward", times=TAIL_FORWARD_STEPS)
+    print("===== 收尾动作完成 =====")
+    return True
+
+
 def run_level(state):
     """goodluck 关卡主流程：沿 ROUTE 路点串依次导航
 
@@ -499,7 +537,8 @@ def run_level(state):
             return False
         print(f"已{'到达停靠点' if wp.stop > 0 else '通过路点'} {i}：{wp.pos}")
         if END_AT_LAST_STOP and wp.pos == END_AFTER_POS:
-            print("===== --end-at-last-stop 生效：到达最后停靠点，提前结束（出口段交给其它方法）=====")
+            print("===== --end-at-last-stop 生效：到达最后停靠点，提前结束（出场段交给收尾动作）=====")
+            run_exit_tail(state)
             return True
 
     print("===== 全程完成 =====")

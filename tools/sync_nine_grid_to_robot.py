@@ -79,8 +79,14 @@ ROUTE_FILES = [
     "core/robot_core.py",
     "vision/nine_grid_detector.py",
     "vision/digit_recognizer.py",      # 运行期形状仲裁用（match_mask）
+    # ---- main.py 里"有就注册"的两条任务路线（2026-09-28 接入）----
+    # 它们顶层 import hiwonder ⇒ **只有机器人上才会被注册**，PC 上跳过是正常的；
+    # 但真机 main.py 是统一的（本地版），注册表里点名了这两条路线，缺文件就等于
+    # 缺一条能跑的入口，所以跟 nine_grid_three_stage 同样按"main 的依赖"推。
+    "levels/line_seeker_tracking.py",   # 循迹（运行期还要 vision/line_detector.py）
+    "levels/apriltag_sorting_task.py",  # AprilTag 分拣（抓海绵放 Tag 38 板）
     # ---- 入口与 trace ----
-    "main.py",                         # 关卡注册表（含 press_button）+ TRACE_ENABLED
+    "main.py",                         # 关卡注册表（含 press_button + 上面两条）+ TRACE_ENABLED
     "core/trace.py",                   # 九宫格存轨迹图要那三处 getattr 兜底
 ]
 

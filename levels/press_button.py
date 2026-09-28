@@ -169,8 +169,9 @@ target_defaults = dict(
     # "可以按"的距离区间
     press_low_cm=20.0,
     press_high_cm=23.0,
-    # 标签中心离画面中心的容差（px）
-    phase2_center_px=60.0,
+    # 标签中心离画面中心的容差（px）。2026-09-28 现场放宽：原 60px × 1.6 = 96px
+    # （60px @30cm ≈ 2.4°，96px ≈ 3.8° ≈ 1.9cm），偏一点不再触发左右横移
+    phase2_center_px=96.0,
     # 标签法线垂直于视线的容差：视线与法线夹角的余弦要大于它
     #   1.000 = 完全正对；0.985 ≈ 偏 10°；0.966 ≈ 偏 15°
     square_cos_min=0.985,
@@ -582,18 +583,22 @@ def run_level(state):
 
     初始化头部 → 开局 → 前进5步 → 左转5步 → 按第一个按钮 → 后退5步 → 右转5步
               → 按第二个按钮 → 后退5步 → 右转5步
+
+    返回 True = 两个按钮都按下（main.py 拿这个返回值打"完成/失败"横幅）。
+    原来是空 return ⇒ 返回 None ⇒ 按成功了也打"关卡 press_button 失败"。
     """
     init_head(state)
 
     state.act(A_STAND)
     state.act(A_FWD, 5)
     state.act(A_TURN_L, 5)
-    press_button(state, target_ids[0])   # 第一个按钮
+    ok_first = press_button(state, target_ids[0])    # 第一个按钮
     state.act(A_BACK, 5)
     state.act(A_TURN_R, 5)
-    press_button(state, target_ids[1])   # 第二个按钮
+    ok_second = press_button(state, target_ids[1])   # 第二个按钮
     state.act(A_BACK, 5)
     state.act(A_TURN_R, 5)
+    return bool(ok_first and ok_second)
 
 
 def probe(state, tag_ids=target_ids):
