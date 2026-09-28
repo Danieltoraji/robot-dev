@@ -126,7 +126,15 @@ def test_purple_and_arrival_thresholds_are_pinned():
     """
     assert NG.ZONE_PURPLE_HEIGHT == pytest.approx(0.31)
     assert NG.ARRIVE_PURPLE_MIN == pytest.approx(0.35)
-    assert NG.ARRIVE_ORANGE_MAX == pytest.approx(0.10)
+    # ★ 2026-09-28 按**真机四张到达参考帧**重标：橙门 0.10 → **0.30**。
+    #   旧值 0.10 把四个"期望到达"帧全判 ✗（实测橙 0.164~0.252），机器人因此
+    #   永远不判到达。依据见 docs/关卡算法/.../refs/ 与核对报告 §8.4。
+    assert NG.ARRIVE_ORANGE_MAX == pytest.approx(0.30)
+    # ★ 同日按用户要求**短路**两条（0.0 = 关闭，见常量块留档）：
+    #   "整帧占比 ≥0.065" 在 33.9cm 几何下对真到达恒判 ✗；"宽/高 ≤2.15" 的
+    #   真到达簇落到 2.83~3.08（旧门是 h=56cm 时代标的）。
+    assert NG.ARRIVE_MIN_TARGET_COVER == pytest.approx(0.0)
+    assert NG.ARRIVE_MAX_WIDTH_HEIGHT_RATIO == pytest.approx(0.0)
     # 2026-09-25 由 0.25 改为 0.55：该量是**角度量**（同横偏 @4cm/@10cm/@20cm 读数
     # 差 2~3 倍），且面板 28cm 宽于绿走廊（±7cm）⇒ 永远到不了 0.5 以上多少，
     # 0.25 实际只容许 ±1.7cm 横偏而蓝档稳定在 ±5cm。扫门实测 0.25→10/21、
