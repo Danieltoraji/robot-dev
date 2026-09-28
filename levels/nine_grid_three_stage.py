@@ -26,6 +26,8 @@
 ★ 顺序计分 ⇒ 绝不跳格（2026-09-25）：一格没确认就**一直磨这一格**（本模块
 一次尝试内部还有 RETRY_LIMIT 轮；收手后由 run_level 换办法重试本格）。
 时间/拍照数/动作数只打印提醒、不停止，唯一会自己停下来的是离场护栏。
+（★ 2026-09-28 任务范围变更：逐格主流程由 1→7 缩到 **1→4**，见
+levels/nine_grid_shared.py 文件头的"任务范围"常量块 `PANEL_LAST_DIGIT`。）
 
 入口：python main.py nine_grid_three_stage
 """

@@ -140,10 +140,12 @@ while True:
 
 ### 5.3 旋转
 
-- 只用实测可靠的大步转向：`turn_left`（22.0°/次）、`turn_right`（25.7°/次）；
+- 只用实测可靠的大步转向：`turn_left`（15.0°/次）、`turn_right`（15.0°/次）
+  （2026-09-28 重新标定，原 22.0° / 25.7°）；
 - 小步转向（`turn_*_small_step`）已弃用，不再参与决策；
 - 2026-08-30 起支持一次连转：需要角度 ≥ 1.5 步时 `state.act(action, times)`，
-  单次最多连转 3 步，减少中间定位次数。
+  单次最多连转 `BATCH_TURN_MAX_TIMES = 5` 步（2026-09-28 由 3 提升到 5；
+  5 × 15° = 75°），减少中间定位次数。
 
 ### 5.4 平移
 
@@ -183,7 +185,7 @@ while True:
 2. 安全点阈值 = `OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM`；
 3. 保证安全点足够远，避免“已到安全点但还在危险区”的死循环。
 
-### 5.7 提前结束模式
+### 5.7 提前结束模式 + 出场收尾动作
 
 `--end-at-last-stop` 传入时，走到停靠点 4 `[74.0, 30.0]` 即结束，
 跳过中间路点④和出口段。真机用法：
@@ -191,6 +193,18 @@ while True:
 ```bash
 python main.py goodluck --end-at-last-stop
 ```
+
+到达停靠点 4 后由 `run_exit_tail()` 接手出场段（2026-09-28 新增，
+**开环动作组、不定位**，参数为 `TAIL_*` 两个常量）：
+
+| 步骤 | 动作 | 次数 | 角度 / 位移 |
+|------|------|------|-------------|
+| 1 | `turn_left` × `TAIL_TURN_LEFT_TIMES` | 7 | 7 × 15° = 105° |
+| 2 | `go_forward` × `TAIL_FORWARD_STEPS` | 3 | 3 × 5cm = 15cm |
+
+到达停靠点 4 时机器人朝南（`-y`，从 `[74,75]` 直落下来），左转 105° 后朝东偏北 15°，
+再前进 15cm，落点约 `[88.5, 34]`，正对出口方向（出口 `x=100, 0≤y≤40`）。
+出场段之所以开环执行，是因为闭环导航在出口边界/贴墙区会触发危险区逃逸（见 5.6）。
 
 ---
 
@@ -226,9 +240,16 @@ python main.py goodluck --end-at-last-stop
 | `BACK_FAST_CM` | 3.2 cm | `back_one_step` |
 | `LEFT_MOVE_CM` | 1.9 cm | `left_move` |
 | `RIGHT_MOVE_CM` | 2.2 cm | `right_move` |
-| `TURN_LEFT_DEG` | 22.0° | `turn_left` |
-| `TURN_RIGHT_DEG` | 25.7° | `turn_right` |
+| `TURN_LEFT_DEG` | 15.0° | `turn_left`（2026-09-28 重标定，原 22.0°） |
+| `TURN_RIGHT_DEG` | 15.0° | `turn_right`（2026-09-28 重标定，原 25.7°） |
 | `FORWARD_BIAS` | 0.0 | 前进偏好权重 |
+
+### 6.4 出场收尾动作参数（2026-09-28）
+
+| 常量 | 当前值 | 含义 |
+|------|--------|------|
+| `TAIL_TURN_LEFT_TIMES` | 7 | 收尾左转次数（7 × 15° = 105°） |
+| `TAIL_FORWARD_STEPS` | 3 | 收尾前行步数（3 × 5cm = 15cm） |
 
 ---
 

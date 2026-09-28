@@ -15,6 +15,7 @@
 这些**子模块**上（不是包上）——`level.run_level` 读的是自己模块的全局名，
 打在包上会静默失效。全部用桩件（monkeypatch），不碰真相机、不碰硬件、不跑视觉。
 """
+import importlib
 import os
 import sys
 
@@ -111,21 +112,35 @@ def test_registered_in_main():
 
 
 def test_other_levels_untouched():
-    """注册是纯新增：其它四个关卡一个不少，且现行九宫格常量没被动过"""
+    """注册是纯新增：其它关卡一个不少，且现行九宫格常量没被动过"""
     import main
     expected = {
         "goodluck", "nine_grid", "nine_grid_three_stage",
         "nine_grid_original", "stairs_hurdle"}
-    # press_button 的代码在另一条分支（.worktrees/press_button），本分支没有它
-    # ⇒ 本分支不注册；机器人上有该模块 ⇒ 那边多一个 press_button 入口，这不算
-    # "动了别的关卡"。据此按模块是否在来放宽断言（2026-09-27）。
-    try:
-        import levels.press_button  # noqa: F401
-        expected.add("press_button")
-    except ImportError:
-        pass
+    # 注册表里还有一批"有就注册"的路线：模块能 import 才多一条入口。
+    #   · press_button：代码曾在另一条分支（.worktrees/press_button），PC/机器人不同步；
+    #   · line_seeker_tracking / apriltag_sorting_task：顶层 import hiwonder，
+    #     **PC 上必然缺席、只有真机才注册**（2026-09-28 接入，见
+    #     tests/test_main_task_routes.py）。
+    # 这几条在不在这边出现，取决于本机有没有那些模块，都不算"动了别的关卡"，
+    # 所以按模块是否在来放宽断言（2026-09-27 起）。
+    for name, reason_attr in (("press_button", "PRESS_BUTTON_SKIP_REASON"),
+                              ("line_seeker_tracking", "LINE_SEEKER_SKIP_REASON"),
+                              ("apriltag_sorting_task", "APRILTAG_SORTING_SKIP_REASON")):
+        try:
+            importlib.import_module(f"levels.{name}")
+        except ImportError:
+            importable = False
+        else:
+            importable = True
+            expected.add(name)
+        # 跳过原因与注册结果必须自洽：模块在就必须注册且原因为 None，不在就必须
+        # 有原因、且没注册。注意不能用 getattr(main, attr, None) —— "属性不存在"
+        # 和 "属性是 None" 会混成一样，真接错了也看不出来。
+        reason = getattr(main, reason_attr, "<缺失>")
+        assert (reason is None) == importable, f"{name}: 跳过原因与模块可用性对不上"
+        assert (name in main.LEVELS) == importable, f"{name}: 注册结果与模块可用性对不上"
     assert set(main.LEVELS) == expected
-    assert main.PRESS_BUTTON_SKIP_REASON is None or "press_button" not in main.LEVELS
 
     import levels.nine_grid_shared as SH
     assert SH.FORWARD_ONE_STEP_CM == 2.652
