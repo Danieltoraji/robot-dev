@@ -107,14 +107,14 @@ HORIZONTAL_FILL_MIN = 0.30        # 横条采样带填充率下限：单条横�
                                   # 用填充率排除多线跨度被误判成横条。
 CORNER_DIRECTION_DEADBAND = 15    # 横条中点相对主线中心偏移超过此值才判向（否则歧义=0）
 CORNER_TURN_TRIGGER_Y = 350       # 路口特征（横条）下移到该深度即开始转身。
-                                  # 曾设 380：横条在画面底部因透视/裁剪变稀疏（fill_ratio
-                                  # 掉到 0.30 以下被过滤），corner_y 达不到 380 就消失，
-                                  # 机器人横向略偏（横条偏左被裁剪）时转弯完全不触发、冲过路口。
-                                  # 实机数据：接近阶段横条稳定在 ~246，到路口升到 343~388；
-                                  # 曾降到 330 保证在横条饱满时触发，但实测偏早（机器人离弯
-                                  # 还有余量就转身）。最近日志横条在 y≈370 仍能检出
-                                  # （horizontal_seen=True），y≈376 才因填充率不足消失，
-                                  # 故上调到 350 更接近弯再转，同时低于 370 失效点保留余量。
+                                  # 260927 晚实车录像重标定（新 HSV S≥31/H≤6）：横条自
+                                  # y≈190 出现、随接近下移，强弯（1/2）的横条可靠检出到
+                                  # y≈390~400，超过 400 完全消失——理论上可触发更深。
+                                  # 但弯3 的横条整个接近过程最深只到 350（0 帧 ≥355），
+                                  # 触发线高于 350 会漏掉弱横条的弯，故维持 350
+                                  #（曾试 370：弯1/2 在 387~388 触发，弯3 永不触发）。
+                                  # 弱横条大概率是弯2 出弯姿态偏差的产物，rearm 修复后
+                                  # 弯2→3 过渡改善，可再实测决定是否上移。
 CORNER_LATCH_SECONDS = 2.0        # 路口特征短暂漏检时继续保持"已到路口"状态
 CORNER_DEBUG_INTERVAL = 0.5       # 调试打印节流：每隔多久打印一次检测到的最大宽度/行
 
@@ -122,7 +122,9 @@ CORNER_DEBUG_INTERVAL = 0.5       # 调试打印节流：每隔多久打印一�
 # 直接响应会把残留横条误判成下一个路口导致连续转弯。确认期内屏蔽 corner_ready，
 # 横条残留说明转弯没转够、朝原方向小步微调；横条消失（面对直道）连续数帧后恢复。
 POST_TURN_CLEAR_FRAMES = 5        # 连续 horizontal_seen=False 多少帧才认定已面对直道
-POST_TURN_MAX_EXTRA_TURNS = 12    # 竖线可见时最多额外小步微调次数（防卡死）
+POST_TURN_MAX_EXTRA_TURNS = 6     # 竖线可见时最多额外小步微调次数（防卡死）。
+                                  # 曾设 12：260927 晚录像 rh 恒定 ≈-200 时连续
+                                  # 12 次确认微调 ≈103° 失控，转弯后原地打转。
 POST_TURN_MAX_EXTRA_FORWARDS = 8  # 横条残留、竖线未现时最多前进出弯步数（防盲行）
 POST_TURN_MAX_EXTRA_SWINGS = 3    # 前进出弯用尽后横条仍不退场，最多反向回摆小步数
                                   #（转弯过转时把新直道带回视野；竖线一出现即回 heading 闭环）
@@ -165,27 +167,42 @@ CORNER_MAIN_STEPS_RIGHT = 3       # 右转主转步数：3×25.7°≈77°（欠�
                                   # 20s 后侧冲出赛道。旧版 3 步的 231° 过冲源自旧精修的横条
                                   # offset 大步续转，现已禁用（横条分支只同向小步 2 次），
                                   # 3 步可以安全使用。
-CORNER_FINE_MAX_STEPS = 6         # 精修阶段最多步数（未转够用大步，横条残留与转过用小步）
+CORNER_FINE_MAX_STEPS = 10        # 精修阶段最多步数（未转够用大步，横条残留与转过用小步）。
+                                  # 曾设 6：转弯处地面打滑、标称角度实际不到位，需要更多
+                                  # 步数预算才能把新直道带回视野（260927 晚实车）。
 
 # 260927 回放修复：转弯方向的控制权交给标定步数与顺序表，视觉只做触发与
 # "新直道出现"的退出确认；不再用横条中点偏移判向（偏姿态下符号会反转）。
 CORNER_TRIGGER_CENTER_DEADBAND = 20   # 触发时近端线中心须在画面中心 ±20px 内
                                       #（弯1实测 ±4px；弯2/3/4 触发时 +20~33px，支点偏早）
-CORNER_TRIGGER_DEEP_Y = 430           # 横条深度豁免：横条压到脚下（最底采样带被横条主导，
-                                      # near_x 几何性偏移 +43~+73px，居中判据在此深度必然
-                                      # 失败）时不再要求近端居中，直接允许触发。实拍路口图
-                                      # 2/4/6/8 的 corner_y=441~448；居中门限仍对刚过触发线
-                                      # （350~430）的偏早触发场景生效。
+CORNER_TRIGGER_DEEP_Y = 375           # 横条深度豁免：横条压到脚下（最底采样带被横条主导，
+                                      # near_x 几何性偏移：260927 晚录像 350~360 桶平均
+                                      # near_x=391、380~390 桶=412，居中判据在此深度必然
+                                      # 失败）时不再要求近端居中，直接允许触发。曾设 430：
+                                      # 实车录像中横条最深只到 ~390-400，430 永远达不到、
+                                      # 豁免从未生效；下调到 375（紧贴触发线 370 之下），
+                                      # 横条一过触发线即豁免居中。
 CORNER_CONFLICT_MIN_OFFSET = 40       # 判向冲突时视觉判向可信所需的最小横条中点偏移（px）
                                       #（实拍图4/6/8 offset=+43/+38/-52，符号与几何一致）
 CORNER_CONFLICT_HOLD_SECONDS = 2.0    # 判向冲突先横移对中/前进重判的时长：偏姿态下横条中点
                                       # 偏移符号会反转，摆正后判向恢复即按表转，不急于转
 CORNER_CONFLICT_DEEP_SECONDS = 2.0    # 冲突持续超过此时长且横条深压脚下+判向明确：判定前面
                                       # 漏了弯、顺序表错位，前移对齐视觉判向（漏弯自愈）
-CORNER_FINE_BAR_MAX_STEPS = 2         # 竖线未出现时，精修最多按查表方向小步续转的次数
-                                      #（右小步 5.2°、左小步 8.625°，各方向各用各值）
+CORNER_CONFLICT_ALLOW_SKIP = False    # 漏弯自愈总开关。260927 晚实车：弯2 处横条视觉判向左
+                                      #（与实况相反，偏姿态符号反转），深横条+冲突2s 触发
+                                      # 自愈，corner_index 1→3 误跳弯2/3，在物理弯2 位置
+                                      # 转错方向。默认关闭；待视觉判向可靠性重新验证后再开。
+CORNER_FINE_BAR_MAX_STEPS = 4         # 竖线未出现时，精修最多按查表方向小步续转的次数
+                                      #（右小步 5.2°、左小步 8.625°，各方向各用各值）。
+                                      # 曾设 2：转弯处地面打滑、标称角度实际不到位
+                                      # （260927 晚实车），转弯需要更多步数预算。
 CORNER_BAR_FREE_REARM_FRAMES = 5      # 上一弯完成后连续无横条帧数达到此值，
                                       # 才允许触发下一弯（防残留横条串弯）
+CORNER_REARM_SHALLOW_Y = 300          # 转弯后横条重新出现在 ≤此深度（画面较浅处），
+                                      # 视为下一个弯的横条进入视野，允许触发下一弯
+                                      #（残留横条只压在脚下深处；260927 实车弯1 后
+                                      # 弯2 横条立即出现在 y≈200-250 却被"必须退场"
+                                      # 判据误拦，弯2 只横移不转）。
 
 # 转弯节奏与提速：主转开环不看视觉，每步只需等动作完成；精修每步只需
 # 一张新帧（15fps 下足够），正常巡线仍用 NORMAL_ACTION_SETTLE=1.0。
@@ -711,9 +728,10 @@ class PatrolSession:
         self.post_turn_progress_steps = POST_TURN_MIN_FORWARD_STEPS
         self.corner_index = 0
         # 横条退场门限：上一弯完成后需连续 CORNER_BAR_FREE_REARM_FRAMES 帧
-        # 无横条才允许触发下一弯（初始无上一弯，直接允许触发）。
+        # 无横条，或横条浅深度重现（下一弯进入视野），才允许触发下一弯。
         self.corner_rearmed = True
         self.bar_free_frames = 0
+        self.bar_shallow_seen = False
         # 精修横条分支计数：竖线未现时最多同向小步续转 CORNER_FINE_BAR_MAX_STEPS 次
         self.turn_bar_steps = 0
         # M8 路口滞留保护：出弯前进用尽后的反向回摆步数，与正常循迹中横条
@@ -759,6 +777,7 @@ def _finish_turn(session, now, decision):
     # CORNER_BAR_FREE_REARM_FRAMES 帧后由 decide_action 重新允许。
     session.corner_rearmed = False
     session.bar_free_frames = 0
+    session.bar_shallow_seen = False
     session.turn_bar_steps = 0
     session.post_turn_swing_done = 0
     session.bar_dwell_start = 0.0
@@ -813,20 +832,22 @@ def _decide_turn_fine_step(state, session, now, decision):
         # 左=-1 恰与 turn_sign 相反）：
         #   corner_turn*raw_h>0 → 未转够（线在转弯侧）→ 续转大步
         #   corner_turn*raw_h<0 → 转过（线在反侧）→ 反向小步回摆
+        sign_trusted = (span >= CORNER_VERTICAL_SIGN_MIN_SPAN
+                        and abs(raw_h) <= HEADING_MAX)
+        if not sign_trusted:
+            # span 过窄或斜率过大（实车 rh=-412.6 / -228）时符号不可信：
+            # 未转够续转与转过回摆（含小步升级大步）全部禁用，只按查表
+            # 方向小步试探（防 149° 过冲与 103° 回摆失控）。
+            print('V3 转弯精修：第{}步 竖线信号不可信小步试探 span={:.0f} raw_h={:.1f}'.format(
+                session.turn_steps, span, raw_h))
+            session.turn_steps += 1
+            session.turn_fine_remaining -= 1
+            decision.actions = [(small_turn_action_for(session.turn_corner),
+                                 1, True, TURN_FINE_STEP_SETTLE)]
+            decision.label = '转弯精修第{}步（竖线信号不可信，小步试探）'.format(
+                session.turn_steps)
+            return decision
         if session.turn_corner * raw_h > 0:
-            if (span < CORNER_VERTICAL_SIGN_MIN_SPAN
-                    or abs(raw_h) > HEADING_MAX):
-                # span 过窄或斜率过大（实车 rh=-412.6）时符号不可信：只按
-                # 查表方向小步试探，禁止大步续转（防 149° 式过冲）。
-                print('V3 转弯精修：第{}步 竖线信号不可信小步试探 span={:.0f} raw_h={:.1f}'.format(
-                    session.turn_steps, span, raw_h))
-                session.turn_steps += 1
-                session.turn_fine_remaining -= 1
-                decision.actions = [(small_turn_action_for(session.turn_corner),
-                                     1, True, TURN_FINE_STEP_SETTLE)]
-                decision.label = '转弯精修第{}步（竖线信号不可信，小步试探）'.format(
-                    session.turn_steps)
-                return decision
             print('V3 转弯精修：第{}步 未转够续转 span={:.0f} raw_h={:.1f}'.format(
                 session.turn_steps, span, raw_h))
             step_action = turn_action_for(session.turn_corner)
@@ -941,16 +962,25 @@ def decide_action(state, session, now):
             return decision
         session.last_handled_frame = state['frame_id']
 
-        # 横条退场门限（防残留横条串下一弯）：连续无横条达
-        # CORNER_BAR_FREE_REARM_FRAMES 帧后重新允许触发路口。
+        # 横条退场/新生门限（防残留横条串下一弯）：连续无横条达
+        # CORNER_BAR_FREE_REARM_FRAMES 帧，或横条重新出现在浅深度（下一个弯
+        # 的横条从画面上方进入、随接近变深；同一弯的残留横条只压在脚下深
+        # 处，260927 实车：弯1 后弯2 横条立即出现在 y≈200-250，被旧"必须
+        # 退场"判据误拦，导致弯2 只横移不转）后允许触发下一路口。
         if state['horizontal_corner']:
             session.bar_free_frames = 0
+            if 0 < state.get('corner_y', 0) <= CORNER_REARM_SHALLOW_Y:
+                session.bar_shallow_seen = True
         else:
             session.bar_free_frames += 1
         if (not session.corner_rearmed and
-                session.bar_free_frames >= CORNER_BAR_FREE_REARM_FRAMES):
+                (session.bar_free_frames >= CORNER_BAR_FREE_REARM_FRAMES
+                 or session.bar_shallow_seen)):
             session.corner_rearmed = True
-            print('V3 巡线：横条已离开视野，允许触发下一路口')
+            reason = ('横条已离开视野'
+                      if session.bar_free_frames >= CORNER_BAR_FREE_REARM_FRAMES
+                      else '横条浅深度重现')
+            print('V3 巡线：{}，允许触发下一路口'.format(reason))
 
         # 路口滞留保护计时（M8）：正常循迹中（非转弯/非确认期）横条持续
         # 可见的起始时间；横条退场或进入转弯流程即重置。
@@ -980,8 +1010,12 @@ def decide_action(state, session, now):
                 session.post_turn_clear_frames = 0
                 span = state.get('vertical_span', 0.0)
                 raw_h = state.get('raw_heading', 0.0)
-                if span >= CORNER_MIN_VERTICAL_SPAN:
-                    # 竖线可见：heading 判向微调（唯一可信的判向通道）。
+                if (span >= CORNER_VERTICAL_SIGN_MIN_SPAN
+                        and abs(raw_h) <= HEADING_MAX):
+                    # 竖线跨度足够且斜率在可信范围：heading 判向微调（唯一
+                    # 可信的判向通道）。span 过窄或斜率过大时符号不可信
+                    # （260927 晚录像 rh 恒定 ≈-200 被当作"未对齐"连续
+                    # 12 次确认微调 ≈103° 失控），落入下方前进出弯路径。
                     if abs(raw_h) <= CORNER_EXIT_HEADING_PX:
                         session.post_turn_active = False
                         clear_pending_corner()
@@ -1063,7 +1097,7 @@ def decide_action(state, session, now):
                                         if session.bar_dwell_start else 0.0)
                     deep_confident = (state['corner_y'] >= CORNER_TRIGGER_DEEP_Y
                                       and abs(offset_x) >= CORNER_CONFLICT_MIN_OFFSET)
-                    if (deep_confident and
+                    if (CORNER_CONFLICT_ALLOW_SKIP and deep_confident and
                             conflict_seconds >= CORNER_CONFLICT_DEEP_SECONDS):
                         # 漏弯自愈：横条深压脚下、视觉判向明确且与顺序表冲突
                         # 持续超过 CORNER_CONFLICT_DEEP_SECONDS——前面有弯被
@@ -1175,10 +1209,10 @@ def decide_action(state, session, now):
             # 横条存在（接近路口或转弯后残留）：heading 被横条干扰，转向
             # 修正会原地打转。改为横向对中：红线中心偏右→右移、偏左→左移；
             # 已对中则前进（接近路口或走出路口），让横条自然变化。
-            # 接近路口（corner_ready）时用更紧的 CORNER_TRIGGER_CENTER_DEADBAND，
-            # 先把支点摆正再触发，避免弯2/3/4 偏姿态提前转。
-            band = (CORNER_TRIGGER_CENTER_DEADBAND if corner_ready_flag
-                    else CENTER_DEADBAND)
+            # 死区用 CENTER_DEADBAND（42）：曾用更紧的 20，fast 横移步长
+            # 过大、±20 内停不住，行进中左右震荡明显（260927 晚实车）。
+            # 触发居中的 20px 门限（或深度豁免）不变，触发精度不受影响。
+            band = CENTER_DEADBAND
             if abs(center_error) >= band:
                 action = (LATERAL_RIGHT_ACTION if center_error > 0
                           else LATERAL_LEFT_ACTION)

@@ -7,7 +7,7 @@ demoV4.py — 赛道巡线结束后自动进入 Tag 导航/射门流程
 是否进门，直接执行阶段间动作并进入下一阶段。
 
 整体流程：
-    RedLinePatrolV3 红线巡线
+    RedLinePatrolV5 红线巡线
         -> 连续确认看不到红线，只作为候选终点
         -> 停车转头确认 Tag103；若没有 Tag，则后退找回漏识别直角弯
     tag_walk_demo
@@ -16,7 +16,7 @@ demoV4.py — 赛道巡线结束后自动进入 Tag 导航/射门流程
         -> 第二球门完成后沿出口路线离场
 
 注意：
-    1. 不修改 RedLinePatrolV3.py；这里只调用它已有的 init/start/run/stop/exit 接口。
+    1. 不修改 RedLinePatrolV5.py；这里只调用它已有的 init/start/run/stop/exit 接口。
     2. tag_route_demo.py 是路线状态机，实际包含摄像头循环和射门衔接的是 tag_walk_demo.py。
     3. 推荐在机器人上运行：
          sudo systemctl stop tonypi
@@ -37,7 +37,7 @@ PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-# 支持从 Robot_control_self_module/levels/football_codes 直接运行：TonyPi
+# 支持从 Robot_Competition/levels/football_codes 直接运行：TonyPi
 # 框架目录提供 hiwonder SDK 与 Functions 包（CameraCalibration 等）。在
 # TonyPi 目录下运行时该路径已在 sys.path 中，此块自动跳过。
 _TONYPI_DIR = '/home/pi/TonyPi'
@@ -45,11 +45,11 @@ if os.path.isdir(_TONYPI_DIR) and _TONYPI_DIR not in sys.path:
     sys.path.insert(0, _TONYPI_DIR)
 
 try:
-    # 优先本地同目录导入（Robot_control_self_module 副本为唯一真源）；
+    # 优先本地同目录导入（Robot_Competition 副本为唯一真源）；
     # 本地缺失时回退 Functions（TonyPi 框架运行路径）。
-    import RedLinePatrolV3 as redline
+    import RedLinePatrolV5 as redline
 except ImportError:
-    from Functions import RedLinePatrolV3 as redline
+    from Functions import RedLinePatrolV5 as redline
 
 try:
     from patrol_end_recovery import PatrolEndRecoveryController
@@ -65,7 +65,7 @@ class PatrolEndDetector:
       2. 如果脚下 ROI 检测不可用，再退化为整体 line_center_x 连续丢失。
 
     这样即使远处仍能看到红线，只要机器人脚下已经离开赛道，也能进入下一阶段；
-    同时仍会避开直角弯处理期间的短暂丢线。RedLinePatrolV3.py 本身保持不变。
+    同时仍会避开直角弯处理期间的短暂丢线。RedLinePatrolV5.py 本身保持不变。
     """
 
     # 转弯完成后脚下无红线的冷却期（秒）。转弯刚结束红线仍停在转弯后的前方、
@@ -83,7 +83,7 @@ class PatrolEndDetector:
 
     @staticmethod
     def _scale_roi(frame, roi):
-        """把 RedLinePatrolV3 的 640x480 ROI 映射到当前帧尺寸。"""
+        """把 RedLinePatrolV5 的 640x480 ROI 映射到当前帧尺寸。"""
         frame_h, frame_w = frame.shape[:2]
         y0, y1, x0, x1 = roi[:4]
         sx = float(frame_w) / 640.0
@@ -98,7 +98,7 @@ class PatrolEndDetector:
     def detect_foot_line(self, frame):
         """检测脚下近处 ROI 是否存在足够大的红线轮廓。
 
-        优先复用 RedLinePatrolV3.detect_red_line() 的 HSV 和形态学参数，避免
+        优先复用 RedLinePatrolV5.detect_red_line() 的 HSV 和形态学参数，避免
         总控和巡线模块使用两套不一致的红线定义。检测失败时返回 None，届时
         update() 会退化为原来的整体 line_center_x 判断。
         """
@@ -216,13 +216,13 @@ def close_camera(camera):
 
 
 def build_undistort_maps():
-    """加载 RedLinePatrolV3 独立运行入口使用的相机标定映射。"""
+    """加载 RedLinePatrolV5 独立运行入口使用的相机标定映射。"""
     import cv2
     import numpy as np
 
     calibration_param_path = getattr(redline, "calibration_param_path", None)
     if not calibration_param_path:
-        raise RuntimeError("RedLinePatrolV3 未提供 calibration_param_path")
+        raise RuntimeError("RedLinePatrolV5 未提供 calibration_param_path")
 
     param_file = calibration_param_path + ".npz"
     if not os.path.exists(param_file):
@@ -250,7 +250,7 @@ def _install_dry_run_action_logger():
             suffix += " args={}".format(args)
         if kwargs:
             suffix += " kwargs={}".format(kwargs)
-        print("[DRY-RUN][RedLinePatrolV3] {}{}".format(action_name, suffix), flush=True)
+        print("[DRY-RUN][RedLinePatrolV5] {}{}".format(action_name, suffix), flush=True)
 
     redline.AGC.runActionGroup = log_action
     return original
@@ -295,7 +295,7 @@ def run_red_line_stage(args):
         end_recovery = PatrolEndRecoveryController(
             redline=redline,
             execute_actions=args.run,
-            target_tag_ids=(103,),
+            target_tag_ids=(65,2,108,37,),
             tag_confirm_frames=args.patrol_end_tag_confirm_frames,
             head_pan_offset=args.patrol_end_head_pan_offset,
             head_settle_s=args.patrol_end_head_settle_seconds,

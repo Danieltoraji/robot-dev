@@ -45,8 +45,11 @@ DEFAULT_PATHS = ["main.py", "debug.sh", "core", "vision", "levels", "tools", "mo
 # 机器人运行时需要的标定产物：archive/ 默认不同步（PC 专用），这些文件例外。
 # 数字宫格的地面单应按俯仰档存于 archive/result/ninegrid_homography.json，
 # 缺失会退回 from_pose 解析自举（布局归属精度下降）——必须随代码一起上机。
+# football_codes2 的相机标定 npz：CalibrationConfig.py 用相对路径定位到同目录，
+# 从镜像目录直接运行 demoV4 时必须有它（.npz 默认被 SKIP_EXTS 跳过）。
 EXTRA_FILES = [
     "archive/result/ninegrid_homography.json",
+    "levels/football_codes2/CameraCalibration/calibration_param.npz",
 ]
 
 SKIP_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", ".zcode", "archive", "release"}
