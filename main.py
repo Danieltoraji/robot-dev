@@ -19,8 +19,24 @@ from core.paths import RESULT_DIR
 from core.robot_core import RobotState
 from levels import goodluck as level_goodluck
 from levels import nine_grid as level_nine_grid
+from levels import nine_grid_original as level_nine_grid_original
 from levels import nine_grid_three_stage as level_nine_grid_three_stage
 from levels import stairs_hurdle as level_stairs_hurdle
+
+# 机器人智按按钮：代码在另一条分支（`.worktrees/press_button`，分支
+# dxd_press_button），**本分支的 `levels/` 下没有 press_button.py**，
+# 但机器人上的代码树里有它（那一分支同步过去的）。
+# 所以这里写成"有就注册"：硬 import 会让本分支 `import main` 直接 ImportError，
+# PC 上的自检、`tests/test_nine_grid_original.py::test_registered_in_main` 与
+# trace 复现全部作废；而注册表里少了 press_button 又会把机器人上本来能跑的
+# 那条路线从 `python main.py` 的入口列表里删掉。
+try:
+    from levels import press_button as level_press_button
+except ImportError as _exc:            # 本分支没有该模块（机器人上有）
+    level_press_button = None
+    PRESS_BUTTON_SKIP_REASON = str(_exc)
+else:
+    PRESS_BUTTON_SKIP_REASON = None
 
 
 # =====================================================================
@@ -58,6 +74,13 @@ LEVELS = {
         "tag_poses": {},
         "run_level": level_nine_grid_three_stage.run_level,
     },
+    # 参考原版通关代码（reference code/九宫格视觉导航 的原样接入，常量未重标）。
+    # 与上面两条互不共用代码，只用于对照；详见 levels/nine_grid_original/ 这个包。
+    "nine_grid_original": {
+        "module": level_nine_grid_original,
+        "tag_poses": {},
+        "run_level": level_nine_grid_original.run_level,
+    },
     # 上下楼梯与识别跨障：无 AprilTag，红色带 + 本地系地面单应
     "stairs_hurdle": {
         "module": level_stairs_hurdle,
@@ -65,6 +88,15 @@ LEVELS = {
         "run_level": level_stairs_hurdle.run_level,
     },
 }
+
+# 机器人智按按钮（模块在另一分支，见文件头的 try/except）：模块在就注册，
+# 不在就不注册——PC 本分支不注册，机器人上注册（保持那边的入口一样多）。
+if level_press_button is not None:
+    LEVELS["press_button"] = {
+        "module": level_press_button,
+        "tag_poses": {},
+        "run_level": level_press_button.run_level,
+    }
 
 
 def main():

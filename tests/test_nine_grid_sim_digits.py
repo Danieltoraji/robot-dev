@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""仿真器"真字形"渲染与真值层（tests/test_nine_grid_sim_digits.py）
+"""仿真器数字渲染与真值层（tests/test_nine_grid_sim_digits.py）
 
 背景：仿真器曾把面板上的数字画成**纯黑实心矩形**，导致 SVM/形状模板/任何数字判据
-在仿真里都没有输入信号。P0（2026-09-25）改为画**现场照片同源的真字形**并加面板级
-真值（`SimNineGridRobot._last_frame_truth`）。本文件钉住四件事：
+在仿真里都没有输入信号。随后一版改成"现场照片裁出来的字形贴图"，但 2026-09-25
+体检证明那版有三个硬伤：墨迹带着源照片的透视斜切、渲染时被强行塞进固定 8×12cm
+方框（宽高比各数字被拉坏）、且贴图角点序与世界 y 反向 ⇒ **数字被画成上下镜像**
+（现场不可能出现印反的数字）。现在改为**字体渲染**（`sim.nine_grid_sim.glyph_mask`），
+不依赖任何外部资产。
 
+本文件钉住五件事：
 1. **面板上真的有字形**（不是黑块、不是空面板）；
 2. **朝向是"确定性的随机"**——按格位取 k、同一格永远同一个 k（不动动作噪声的
    随机流，否则对照实验不可比）；
-3. **缺资产时显式退化并留痕**（不许静默画成空面板）；
-4. **真值层可用**：格式正确、与渲染一致、且**关卡不消费它**。
+3. **渲染出来的字不许是镜像**（角点序回归护栏，见 `test_rendered_glyph_not_mirrored`）；
+4. **字形不是实心块**（用外框填充率把"字"与"黑砖"分开）；
+5. **真值层可用**：格式正确、与渲染一致、且**关卡不消费它**。
 """
 import os
 import sys
@@ -20,14 +25,30 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import cv2  # noqa: E402
+
 from core.camera_config import HEAD_CENTER  # noqa: E402
-from levels.nine_grid_shared import PITCH_DOWN  # noqa: E402
+from core.ground_homography import grid_cell_center  # noqa: E402
+from levels.nine_grid_shared import PITCH_DOWN, project_ground_to_pixel  # noqa: E402
 import sim.nine_grid_sim as SIM  # noqa: E402
 
 
 def _robot_at_entry():
     r = SIM.SimNineGridRobot()
     r.pos = np.array([50.0, -20.0])
+    r.heading = 0.0
+    r.pitch = PITCH_DOWN
+    r.head = HEAD_CENTER
+    return r
+
+
+def _one_panel_robot(digit, cell=4, dist=45.0):
+    """场地里只放一块面板并正对相机（隔离"这个数字画得对不对"）"""
+    layout = {k: None for k in range(9)}
+    layout[cell] = digit
+    r = SIM.SimNineGridRobot(layout=layout, seed=3)
+    c = grid_cell_center(cell)
+    r.pos = np.array([c[0], c[1] - dist])
     r.heading = 0.0
     r.pitch = PITCH_DOWN
     r.head = HEAD_CENTER
@@ -50,11 +71,7 @@ def test_rotate_k_is_deterministic_and_in_range():
 
 
 def test_panel_has_ink_inside_color_block():
-    """渲染出来的面板里，色块内部应当有**深色墨迹**（真字形）
-
-    判据：在真值给的面板 bbox 内，黑色像素占该 bbox 的 1%~25%。旧的黑块实现
-    也在范围内，所以另有下一条按"墨迹形状"区分块与字。
-    """
+    """渲染出来的面板里，色块内部应当有**深色墨迹**（数字）"""
     r = _robot_at_entry()
     frame = r.capture_frame()
     truth = r._last_frame_truth
@@ -78,40 +95,67 @@ def test_panel_has_ink_inside_color_block():
 
 
 def test_glyph_is_not_a_solid_block():
-    """字形**不是实心块**——用"墨迹的周长/面积"把"字"与"块"分开
+    """字形**不是实心块**——用"墨迹在自身外框里的填充率"把"字"与"黑砖"分开
 
-    实心矩形的紧凑度 4πA/P² ≈ 0.785；笔画字形远低于此（本仓字形实测 ≤0.5）。
-    这条正是 P0 要防的回归：如果哪天资产丢失、代码悄悄退回 `fillPoly(黑块)`，
-    上面那条占比判据仍然通过，只有这一条会红。
+    实心矩形（旧实现的黑块）填充率恒为 1.00；笔画字形实测 0.56~0.69。
+    这条正是 P0 要防的回归：如果哪天渲染悄悄退回 `fillPoly(黑块)`，上面的
+    "深色占比"判据仍然通过，只有这一条会红。
     """
-    import cv2
-    checked = 0
-    for d, m in SIM.glyph_table().items():
-        cnts, _ = cv2.findContours((m * 255).astype(np.uint8),
-                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        assert cnts, f"d{d} 没有轮廓"
-        c = max(cnts, key=cv2.contourArea)
-        a, p = cv2.contourArea(c), cv2.arcLength(c, True)
-        assert a > 0 and p > 0
-        compact = 4.0 * np.pi * a / (p * p)
-        assert compact <= 0.60, (
-            f"d{d} 太像实心块（紧凑度 {compact:.2f}；字形应 ≤0.60）"
-            "——字形资产可能被黑块渲染取代")
-        checked += 1
-    assert checked == 7
+    fill = {d: float(m.mean()) for d, m in SIM.glyph_table().items()}
+    bad = {d: round(v, 2) for d, v in fill.items() if v > 0.80}
+    assert not bad, (f"这些字形太像实心块（外框填充率 {bad}；字形应 ≤0.80）"
+                     "——渲染可能退回了黑块")
 
 
-def test_missing_asset_degrades_loudly(monkeypatch, capsys):
-    """资产不可用时：不抛异常、退回黑块、并**在 stdout 显式告警**（不静默）"""
-    monkeypatch.setattr(SIM, "GLYPH_ASSET_PATH",
-                        os.path.join(os.path.dirname(SIM.GLYPH_ASSET_PATH),
-                                     "__no_such_glyphs__.npz"))
-    monkeypatch.setattr(SIM, "_GLYPH_CACHE", None)
-    monkeypatch.setattr(SIM, "_GLYPH_FAIL_WARNED", False)
-    table = SIM.glyph_table()
-    out = capsys.readouterr().out
-    assert table == {}, "缺资产时应返回空表"
-    assert "字形资产不可用" in out, f"缺资产没有告警：{out!r}"
+def test_rendered_glyph_not_mirrored():
+    """渲染出来的数字**不许是镜像**（历史 bug 的回归护栏）
+
+    判据用**独立于渲染代码**的物理朝向：站在入口看这块面板时，数字的上沿在
+    远处（世界 +y）、左边在世界 −x。据此自己算四角点、自己把帧反投影回
+    "正视画布"，再与字体字形比对：正立（恒等）的 IoU 必须明显高于上下翻。
+
+    曾经这里按 [(-x,-y), (+x,-y), (+x,+y), (-x,+y)] 贴图 ⇒ 每个数字上下颠倒
+    （"7" 看起来像 "L"、"5" 像 "2"），IoU 上下翻 0.85 / 恒等 0.24。
+    """
+    digit, cell = 6, 4      # 6 的正/反立差异最大（实测 IoU 0.80 vs 0.44）
+    g = SIM.glyph_mask(digit)
+    assert g is not None
+    orig_k = SIM.glyph_rotate_k
+    SIM.glyph_rotate_k = lambda c: 0        # 朝向另有一条测试，这里只看镜像
+    try:
+        r = _one_panel_robot(digit, cell)
+        frame = r.capture_frame()
+    finally:
+        SIM.glyph_rotate_k = orig_k
+    hx, hy = SIM.glyph_block_half_cm(digit, cell)
+    cx, cy = grid_cell_center(cell)
+    # 自己定义"站在入口看"的四角点顺序 TL,TR,BR,BL（上=远=+y）
+    world = np.array([[cx - hx, cy + hy], [cx + hx, cy + hy],
+                      [cx + hx, cy - hy], [cx - hx, cy - hy]])
+    pix = project_ground_to_pixel(world, r.pos[0], r.pos[1],
+                                  np.radians(r.heading), r.pitch, r.head)
+    W, H = max(60, g.shape[1] * 4), max(60, g.shape[0] * 4)
+    dst = np.array([[0.0, 0.0], [W - 1.0, 0.0],
+                    [W - 1.0, H - 1.0], [0.0, H - 1.0]], np.float32)
+    Hm = cv2.getPerspectiveTransform(pix.astype(np.float32), dst)
+    flat = cv2.warpPerspective(frame, Hm, (W, H))
+    gray = cv2.cvtColor(flat, cv2.COLOR_BGR2GRAY)
+    _, ink = cv2.threshold(gray, 0, 255,
+                           cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    ink = cv2.erode(ink, np.ones((5, 5), np.uint8))
+    ref = cv2.resize(g * 255, (W, H), interpolation=cv2.INTER_NEAREST)
+
+    def iou(a, b):
+        inter = np.count_nonzero((a > 0) & (b > 0))
+        union = np.count_nonzero((a > 0) | (b > 0))
+        return inter / union if union else 0.0
+
+    same = iou(ref, ink)
+    flip = iou(np.flipud(ref), ink)
+    assert same > 0.6, f"渲染出来的字形与字体字形差太远（IoU {same:.2f}）"
+    assert same > flip + 0.2, (
+        f"数字被画成上下镜像了：恒等 IoU {same:.2f} vs 上下翻 {flip:.2f}"
+        "（检查 `_glyph_quad` 的角点顺序：掩膜 TL 必须落在世界 (−x, +y)）")
 
 
 def test_frame_truth_format_and_consistency():

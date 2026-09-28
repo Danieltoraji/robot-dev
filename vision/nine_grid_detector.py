@@ -75,6 +75,24 @@ PALETTE_JSON_PATH = os.path.join(PROJECT_ROOT, "models", "nine_grid",
                                  "palette.json")
 _PALETTE_OVERRIDE = None       # (生效色数, 路径) —— _active_palette 的缓存
 
+# =====================================================================
+# 各色"够纯"的下限（S%，用于同色候选仲裁的第二级判据）
+# =====================================================================
+# 默认值 = 2026-09-28 现场真样本（未裁切、黑字证据 ≥0.01，共 102 条）S 的 p25；
+# models/nine_grid/palette.json 里存在 "core" 段时整段覆盖（现场复标自动跟着变）。
+#
+# 为什么需要它：木框会被黄/橙色掩膜命中且面积常比真面板还大（实测 93k vs 62k px）。
+# 在 277 个现场观测上量过——**没有任何单一颜色/形状/纹理指标能把真面板与杂物完全
+# 分开**：纯度会被饱和的青色残片骗过（0.977），核心占比会漏掉宽扫档斜视的真面板
+# （5/23 个真样本为 0），贴边也无效（267 个真样本里 134 个贴边）。只有黑字证据
+# 完全分开（真 ≥0.012 / 杂物 ≤0.003），但它有"数字被遮挡"的已知反例。
+# 所以仲裁分三级：黑字证据 → 纯度 → 面积（见 pick_same_color）。
+PALETTE_CORE = {"red": 76.3, "orange": 84.8, "yellow": 64.7, "green": 36.3,
+                "blue": 77.6, "purple": 44.9, "pink": 27.1}
+_CORE_OVERRIDE = None          # —— _active_core 的缓存
+PURITY_MIN = 0.20              # 纯度下限：低于它且无硬证据 ⇒ 该观测不可信
+                               # （青残片实测 0.152~0.169 < 0.20；真面板正常 0.67~1.00）
+
 
 def _active_palette():
     """生效调色板：models/nine_grid/palette.json 存在则覆盖（现场复标产物）"""
@@ -98,6 +116,26 @@ def _active_palette():
         print(f"[调色板] {PALETTE_JSON_PATH} 读取失败({e})，改用代码内置的缺省窗口")
     _PALETTE_OVERRIDE = pal
     return pal
+
+
+def _active_core():
+    """生效的各色"够纯"下限（S%）：palette.json 的 "core" 段存在则覆盖"""
+    global _CORE_OVERRIDE
+    if _CORE_OVERRIDE is not None:
+        return _CORE_OVERRIDE
+    core = dict(PALETTE_CORE)
+    try:
+        import json
+        if os.path.exists(PALETTE_JSON_PATH):
+            with open(PALETTE_JSON_PATH, "r", encoding="utf-8") as f:
+                fitted = json.load(f).get("core", {})
+            for color, w in fitted.items():
+                if color in core and "s_lo" in w:
+                    core[color] = float(w["s_lo"])
+    except (OSError, ValueError, KeyError) as e:
+        print(f"[纯度] {PALETTE_JSON_PATH} 的 core 段读取失败({e})，用内置下限")
+    _CORE_OVERRIDE = core
+    return core
 
 
 def _palette_ranges(color_name, palette=None):
@@ -552,13 +590,14 @@ class PanelObservation:
                  "solidity", "model_digit", "model_conf",
                  "clipped", "hull_centroid_px", "hull_area", "digit_evidence",
                  "shape_digit", "shape_conf", "ambig_color", "ambig_margin_deg",
-                 "ambig_candidates", "hull_poly")
+                 "ambig_candidates", "hull_poly", "purity")
 
     def __init__(self, color, bbox, center_px, area, solidity,
                  model_digit=None, model_conf=0.0, clipped=False,
                  hull_centroid_px=None, hull_area=0.0, digit_evidence=None,
                  shape_digit=None, shape_conf=0.0, ambig_color=None,
-                 ambig_margin_deg=None, ambig_candidates=(), hull_poly=()):
+                 ambig_margin_deg=None, ambig_candidates=(), hull_poly=(),
+                 purity=0.0):
         self.color = color
         self.color_id = COLOR_TO_ID[color]
         self.bbox = bbox                      # (x,y,w,h) 原生像素
@@ -580,6 +619,9 @@ class PanelObservation:
         # 更贴形：bbox 会把色块外的背景一起框进来。诊断/可视化用（debug 页面
         # 画多边形叠加），不参与任何控制判据。
         self.hull_poly = tuple((float(px), float(py)) for px, py in hull_poly)
+        # 纯度（C5）：色块内"够纯"（S ≥ 本色 core 下限）的像素占比。
+        # 同色多候选时的第二级仲裁依据（见 pick_same_color）；单候选不参与决策。
+        self.purity = float(purity)
 
     @property
     def digit(self):
@@ -771,8 +813,18 @@ class NineGridDetector:
             if not keep:
                 self.last_rejected.append((color, (x, y, w, h), ev, why))
                 continue
+            # 纯度（C5）：本色块里 S ≥ 本色 core 下限的像素占比。真面板是平涂
+            # 饱和色（实测 0.67~1.00），现场杂物（木框）"淡而散"（0.00~0.02）；
+            # 但宽扫档斜视的真面板也会掉到 0.00，故只作同色仲裁的第二级。
+            roi_m = mask[y:y + h, x:x + w]
+            n_m = int(np.count_nonzero(roi_m))
+            s_core8 = int(round(_active_core().get(color, 0.0) * 2.55))
+            purity = (float(np.count_nonzero(
+                roi_m & (hsv[y:y + h, x:x + w, 1] >= s_core8))) / n_m
+                if n_m else 0.0)
             raw.append((color, area, (x, y, w, h), main[2], hull,
-                        quad_center(hull), _contour_centroid(hull), clipped, ev))
+                        quad_center(hull), _contour_centroid(hull), clipped, ev,
+                        purity))
 
         # 跨色去重：同区域多色命中时保留面积大者（阈值交界抖动）。
         # 落败色**不丢**：记到胜者的 ambig_color 上——同位置双色命中就是
@@ -793,7 +845,7 @@ class NineGridDetector:
         results = []
         for item in kept:
             (color, area, (x, y, w, h), solidity, _hull, center,
-             hull_centroid, clipped, ev) = item
+             hull_centroid, clipped, ev, purity) = item
             # 颜色歧义度：色块像素的中位 H 距本窗口两侧边界的角度（取小者）。
             # 红↔橙窗口只差 7°，中位 H 贴边就说明光照把贴纸推到了边界。
             mask_full = build_color_mask(hsv, color)
@@ -844,6 +896,7 @@ class NineGridDetector:
                 ambig_margin_deg=amb_margin,
                 ambig_candidates=amb_list,
                 hull_poly=_poly,
+                purity=purity,
             )
             if arbitrate:
                 roi = work[y:y + h, x:x + w]
@@ -961,6 +1014,59 @@ def digit_evidence_ok(area, clipped, evidence):
     if evidence >= DIGIT_EVIDENCE_MIN:
         return True, ""
     return True, "clipped" if clipped else "low_evidence"
+
+
+def evidence_strong(obs):
+    """黑字证据是否硬到可以"定颜色身份"：算了、且 ≥ DIGIT_EVIDENCE_MIN
+
+    ⚠️ **不要**用 `PanelObservation.has_digit_evidence()` 代替它：那个方法是
+    "看起来像印刷面板"的**软判据**，贴边 / 太小 / 未算一律返回 True（宁可放过）。
+    而现场杂物（木框）恰恰**永远贴着画幅边**，于是被它判成"有证据"——这也是
+    `levels/nine_grid_three_stage.py` 的"同色择优"实际拦不住木框的原因。
+    同色候选仲裁要的是硬信息，所以这里直接看数值本身。
+    """
+    e = obs.digit_evidence
+    return e is not None and e >= DIGIT_EVIDENCE_MIN
+
+
+def is_trustworthy(obs):
+    """该观测可信到可以"定数字"吗：证据硬 或 纯度达标
+
+    用于布局扫：低证据又低纯度的候选（木框那类）不参与"数字→格"绑定，
+    但仍可作为几何观测（它们的位置/裁切信息对位姿有用）。
+    """
+    return evidence_strong(obs) or getattr(obs, "purity", 0.0) >= PURITY_MIN
+
+
+def pick_same_color(obs):
+    """同色候选仲裁：黑字证据 → 纯度 → 面积；前两级都平局则**弃权**（None）
+
+    现场实测（2026-09-28）：木框会被黄/橙色掩膜命中且面积常比真面板大
+    （93k vs 62k px）。在 277 个观测上量过，**没有任何单一指标能完全分开**
+    真面板与杂物：纯度会被饱和的青色残片骗过（0.977），核心占比漏掉宽扫档
+    斜视的真面板（5/23 个真样本为 0），贴边无效（267 个真样本里 134 个贴边）。
+    只有黑字证据硬分开（真 ≥0.012 / 杂物 ≤0.003），但它有"数字被遮挡"的
+    已知反例——所以纯度当第二级兜住那种情形。
+
+    前两级都分不出时**宁可弃权**：这一色这一帧不给观测，让布局扫换机位重看，
+    而不是硬选一个面积大的（那正是当年"追着木框跑"的成因）。
+
+    单候选时**恒等于返回该候选**（no-op）：近距离到达段数字出画/被机身挡住时
+    只有一个候选，行为与不加本规则逐位相同。
+    """
+    obs = list(obs or [])
+    if not obs:
+        return None
+    if len(obs) == 1:
+        return obs[0]
+    ev_ok = [o for o in obs if evidence_strong(o)]
+    if ev_ok:
+        return max(ev_ok, key=lambda o: o.hull_area)
+    pure_ok = [o for o in obs
+               if getattr(o, "purity", 0.0) >= PURITY_MIN]
+    if pure_ok:
+        return max(pure_ok, key=lambda o: o.hull_area)
+    return None
 
 
 def _iou(a, b):

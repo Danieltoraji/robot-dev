@@ -14,6 +14,11 @@
     python tools/calibrate_palette.py --check            # 只打印（默认）
     python tools/calibrate_palette.py --write            # 写 models/nine_grid/palette.json
     python tools/calibrate_palette.py --frames tests/fixtures/field_photos <更多目录>
+
+现场复标（机器人拍照 → PC 拟合 → 回传）的完整流程与判据见
+docs/关卡算法/彩色数字九宫格-nine_grid/再标定流程-机器人拍照-PC拟合-回传.md。
+要点：**帧必须是原图**（机器人不预处理），本工具自己复刻运行时的
+「缩到 work_width → normalize_illumination → HSV」，两边空间才一致。
 """
 
 import argparse
@@ -31,7 +36,8 @@ import cv2
 
 from vision.nine_grid_detector import (NineGridDetector, COLOR_TO_ID,
                                        ID_TO_COLOR, normalize_illumination,
-                                       build_color_mask)
+                                       build_color_mask,
+                                       NORM_GAIN_WARN_MIN, NORM_GAIN_WARN_MAX)
 
 PALETTE_PATH = os.path.join(str(_REPO), "models", "nine_grid", "palette.json")
 
@@ -224,6 +230,15 @@ def loo_report(samples, fit_out):
 
 
 def main(argv=None):
+    # 控制台编码兜底（2026-09-26）：本工具的日志里有 ↔ 等非 GBK 字符，在 Windows
+    # 的 GBK 控制台上会 UnicodeEncodeError **并直接退出**——最坑的是它发生在
+    # `--write` 之前（"相邻色 H 间隔"那段），于是"复标跑完却没写出 palette.json"。
+    # 这里把 stdout/stderr 改成 UTF-8 + 不可编码字符替换，保证工具一定跑到底。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):       # 非文本流/不支持则跳过
+            pass
     ap = argparse.ArgumentParser(description="九宫格调色板标定（归一化 HSV 窗口）")
     ap.add_argument("--frames", nargs="*", default=None,
                     help="帧文件或目录（缺省：tests/fixtures/field_photos）")
@@ -235,6 +250,11 @@ def main(argv=None):
                     help="关掉'色块内要有黑字'的标签质量门（对照实验用）")
     ap.add_argument("--write", action="store_true",
                     help="写 models/nine_grid/palette.json（缺省只打印）")
+    ap.add_argument("--min-samples", type=int, default=3,
+                    help="每色最低样本数（默认 3）：不足则该色不会被 palette.json "
+                         "覆盖，机器人上会静默沿用内置窗口")
+    ap.add_argument("--allow-partial", action="store_true",
+                    help="允许在缺色情况下仍然 --write（明确接受部分覆盖）")
     args = ap.parse_args(argv)
 
     paths = []
@@ -254,6 +274,14 @@ def main(argv=None):
                                         keep_clutter=args.keep_clutter)
     for tag, digits, gain in summary:
         print(f"   {tag}: 检出 {digits}  增益 {' '.join('%.3f' % g for g in gain)}")
+    # 归一化增益超区间 = 这帧的光照离参考白点太远，样本噪声偏大（拟合判据会被拖）
+    warn = [(tag, g) for tag, _digits, gains in summary for g in gains
+            if g < NORM_GAIN_WARN_MIN or g > NORM_GAIN_WARN_MAX]
+    if warn:
+        print(f"[palette] ⚠ {len(warn)} 个通道增益超出告警区间 "
+              f"[{NORM_GAIN_WARN_MIN}, {NORM_GAIN_WARN_MAX}]："
+              + ", ".join(f"{t[:20]}({g:.2f})" for t, g in warn[:5])
+              + "——这些帧光照偏离参考白点，拟合前建议先看现场锁曝光/补光")
     if skipped:
         print(f"[palette] 标签质量门剔除 {len(skipped)} 个'色块内无黑字'样本"
               f"（木框/地垫等场内同色杂物）："
@@ -280,13 +308,31 @@ def main(argv=None):
     cs = sorted(fit_out, key=lambda c: fit_out[c]["stats"]["h_center"])
     for a, b in zip(cs, cs[1:]):
         gap = fit_out[b]["stats"]["h_center"] - fit_out[a]["stats"]["h_center"]
-        print("   %-7s ↔ %-7s %5.1f" % (a, b, gap))
+        print("   %-7s <-> %-7s %5.1f" % (a, b, gap))
     wrap = (cs[0], cs[-1])
     gap = (fit_out[cs[0]]["stats"]["h_center"]
            + 180.0 - fit_out[cs[-1]]["stats"]["h_center"])
-    print("   %-7s ↔ %-7s %5.1f（环绕）" % (wrap[1], wrap[0], gap))
+    print("   %-7s <-> %-7s %5.1f (wrap)" % (wrap[1], wrap[0], gap))
+
+    # ---- 完整性闸门：palette.json 是**逐色覆盖**，缺色会静默沿用内置窗口 ----
+    # 运行时 vision/nine_grid_detector._active_palette() 只覆盖 fitted 里出现的颜色，
+    # 缺的那一色继续用代码内置值（上一场地的标定）。于是会出现"标定过了"的错觉：
+    # 现场看着能跑，实际有一种颜色还是旧值。缺样本必须显式拦住，不能靠人记。
+    thin = [(c, len(samples.get(c, []))) for c in COLOR_TO_ID
+            if len(samples.get(c, [])) < args.min_samples]
+    if thin:
+        print(f"\n[palette] ⚠ 样本不足的颜色（各需 ≥{args.min_samples} 个）——"
+              f"写出去的 palette.json **不会**覆盖它们，机器人上继续用内置窗口：")
+        for c, n in thin:
+            print(f"    {c}: {n} 个样本")
+        print("    对策：补拍帧（加 --frames 张数/换机位），或确认该色确实不在本场地出现")
+    else:
+        print(f"\n[palette] 七色样本齐全（各 ≥{args.min_samples} 个）")
 
     if args.write:
+        if thin and not args.allow_partial:
+            print("[palette] ❌ 拒绝写入：先补样本；确实要部分覆盖时加 --allow-partial")
+            return 2
         os.makedirs(os.path.dirname(PALETTE_PATH), exist_ok=True)
         with open(PALETTE_PATH, "w", encoding="utf-8") as f:
             json.dump({"fitted": fit_out,
@@ -295,6 +341,16 @@ def main(argv=None):
                                         else "palette")},
                       f, ensure_ascii=False, indent=2)
         print(f"\n[palette] 已写 {PALETTE_PATH}")
+        print("[palette] 回传机器人：python tools/sync_to_robot.py "
+              "--paths models/nine_grid/palette.json --full")
+        # 复核命令必须显式 chdir：exec_on_robot 的内核 cwd 在 Jupyter 根
+        # （/home/pi），不是仓库根 —— 直接 `import vision` 会 ModuleNotFoundError
+        print("[palette] 生效复核（exec_on_robot 的内核不在仓库根，先 chdir）：")
+        print("  python tools/exec_on_robot.py --code \"import os, sys; "
+              "os.chdir('/home/pi/Robot_Competition'); "
+              "sys.path.insert(0, '/home/pi/Robot_Competition'); "
+              "import vision.nine_grid_detector as d; "
+              "print(d._active_palette())\"")
     return 0
 
 

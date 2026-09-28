@@ -66,8 +66,13 @@ DEFAULT_SEEDS = [3, 7, 11, 21, 42, 100, 202, 303]
 
 # 现场实测运动原语（runbook §2 测量 1）。与 tools/_tmp_recalib.py 的 REAL 同源，
 # 这里复制一份以避免依赖 gitignore 的临时脚本。
-REAL = dict(fwd=2.652, left=2.497, right=2.200,
-            tls=8.625, trs=5.200, sigma=0.06)
+# ⚠️ 2026-09-25 起这**五个值全是仓库默认**（`levels/nine_grid_shared` 的单一真源，
+# 关卡 ACTION_MODEL 与仿真 `_apply_action` 都用它）⇒ `--primitives real` 现在
+# 是**空操作**，保留该开关只为复现 2026-09-25 之前的旧日志。
+REAL = dict(fwd=SH.FORWARD_ONE_STEP_CM, left=SH.LEFT_MOVE_CM,
+            right=SH.RIGHT_MOVE_CM,
+            tls=SH.TURN_LEFT_SMALL_DEG, trs=SH.TURN_RIGHT_SMALL_DEG,
+            sigma=0.06)
 
 
 # =====================================================================

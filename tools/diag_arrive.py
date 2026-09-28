@@ -2,9 +2,20 @@
 """真值诊断：把关卡"自认"的位姿/到达与仿真真值逐格对照（tools/diag_arrive.py）
 
 **为什么需要它**（2026-09-13 假到达事故）：
-本关的到达判据是**视觉推断**（低头颜色占比峰值→回落），微动开关接 ESP32、
-Pi 侧读不到状态。于是出现了一种最难发现的失败："日志判到达 ✓、机器人其实还
-在离格心 89.5cm 处"。只看 `results` 里的 7/7 完全看不出来。
+本关的到达判据是**视觉推断**（统一决策：脚下色块份额的六条画面量；三段式：低头
+颜色占比峰值→回落），微动开关接 ESP32、Pi 侧读不到状态。于是出现了一种最难发现
+的失败："日志判到达 ✓、机器人其实还在离格心 89.5cm 处"。只看 `results` 里的 7/7
+完全看不出来。
+
+> ⚠️ 注意"到达依据"列的含义随 2026-09-26 的短路变了：统一决策的到达判据现在
+> **只吃画面量**，锚解出的位姿**不再否决**到达（那道"格的同一性核验"已降级为
+> `ARRIVE_ON_CELL_PROBE` 诊断探针，只在日志里记分歧）。所以本工具看的是**真值**，
+> 它比任何时候都重要——判据层已经不会再替我们拦"站在别处"了。
+>
+> ⚠️ 本工具用**固定布局**（`run_simulation(seed=3)` 的缺省布局）。固定布局实测
+> 22 格里 0 次跨格级假到达，但**随机布局**会出现（2026-09-26 实测 4 种子
+> 1/22 次、最差落点 132cm）。要覆盖那类空档得自己跑
+> `tools/ab_ninegrid.py --layout random --primitives real`。
 
 本工具跑三个场景，逐格打出五个**互相独立**的数字，用来区分两类完全不同的故障：
 
@@ -90,25 +101,36 @@ def _install_probes(rows):
             ctx["_peak_frame_pending"] = False
         return out
 
-    _orig_ar = ng.NineGridLevel._walk_until_underfoot
+    _orig_ar = ng.NineGridLevel._arrive_pixels_ok
 
-    def arrive_visual(self, digit, t_end):
-        ctx.update({"digit": digit, "peak": 0.0, "peak_cover": -1.0,
+    def arrive_visual(self, shares, obs, px, w):
+        """绕在**统一决策的到达判决**上（`_arrive_pixels_ok`）
+
+        2026-09-25 重写把三段式的 `NineGridLevel._walk_until_underfoot` 删了，
+        本工具原来的挂点就不存在了（一跑就 AttributeError）；2026-09-26
+        短路"格的同一性核验"时把探针改挂到这里。
+
+        ⚠️ 与旧挂点不同：这个函数**每帧都被调一次**（它是"判据"而不是"到达那一段"），
+        所以只有它返回 True（= 判定到达）时才落一行记录，否则每格会打出上百行。
+        """
+        ctx.update({"digit": self._current_digit, "peak": 0.0, "peak_cover": -1.0,
                     "_peak_frame_pending": False})
-        r = _orig_ar(self, digit, t_end)
-        rows.append({
-            "digit": digit,
-            "cell": self.digit_cell.get(digit),
-            "ok": bool(r),
-            "peak_cover": ctx["peak_cover"],
-            "evidence": self._arrive_evidence,
-        })
-        ctx["digit"] = None
+        r = _orig_ar(self, shares, obs, px, w)
+        if r:
+            rows.append({
+                "digit": self._current_digit,
+                "cell": (None if self._current_digit is None
+                         else self.digit_cell.get(self._current_digit)),
+                "ok": True,
+                "peak_cover": ctx["peak_cover"],
+                "evidence": self._arrive_evidence,
+            })
+            ctx["digit"] = None
         return r
 
     NineGridDetector.color_ratio = color_ratio
     NineGridDetector.detect_panels = detect_panels
-    ng.NineGridLevel._walk_until_underfoot = arrive_visual
+    ng.NineGridLevel._arrive_pixels_ok = arrive_visual
 
 
 def run_scene(tag, quiet=False):

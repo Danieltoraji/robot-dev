@@ -202,7 +202,6 @@ def test_capture_and_measure_counts_frames():
 # =====================================================================
 # 5. 格的同一性核验（用户方案 ②-a）
 # =====================================================================
-
 def _lv_with_anchor(cell_pose):
     """构造一个 level：digit_cell 给定，`_map_pose` 返回固定实测位姿"""
     lv = _level()
@@ -278,3 +277,79 @@ def test_map_pose_correction_returns_a_two_tuple():
     g, p = corr[0][0], corr[0][1]
     assert np.allclose(g, np.asarray(grid_cell_center(3), float)), g
     assert np.allclose(p, (100.0, 200.0)), p
+
+
+# =====================================================================
+# 6. 到达判决：**只吃画面量，位姿不参与**（2026-09-26 短路格的同一性核验）
+# =====================================================================
+# 背景：这道核验曾挂在到达门的"与"条件里，实测会拿不可信的位姿否决**正确**到达
+# （面板 5 连试三次才认；形变场景实测位姿漂 105cm 而真值离格心只有 13cm）。
+# 现在锚测量只是诊断探针（`ARRIVE_ON_CELL_PROBE`），**不改变控制流**。
+
+class _Box:
+    """最小观测桩：`_arrive_pixels_ok` 只读 bbox[2]、bbox[3]"""
+
+    def __init__(self, bw, bh):
+        self.bbox = (0.0, 0.0, float(bw), float(bh))
+
+
+# 六条判据全过的一组值（紫 0.60 ≥0.35｜橙 0.02 ≤0.10｜不对称 0.10 ≤0.55｜
+# 目标在中线｜整帧占比 0.10 ≥0.065｜宽高比 1.66 ≤2.15，均为实测中位数附近）
+_OK_SHARES = (0.10, 0.60, 0.02, 0.10)
+_OK_OBS = _Box(1000.0, 600.0)
+
+
+def test_arrive_pixels_ok_accepts_a_clean_arrival_frame():
+    """六条全过 ⇒ True（先确认判据本身没被改坏）"""
+    lv = _level()
+    assert lv._arrive_pixels_ok(_OK_SHARES, _OK_OBS, W / 2.0, W) is True
+
+
+@pytest.mark.parametrize("shares,obs,px,why", [
+    ((0.10, 0.30, 0.02, 0.10), _OK_OBS, W / 2.0, "紫区不够（0.30 < 0.35）"),
+    ((0.10, 0.60, 0.20, 0.10), _OK_OBS, W / 2.0, "橙区太多（0.20 > 0.10）"),
+    ((0.10, 0.60, 0.02, 0.70), _OK_OBS, W / 2.0, "左右不对称（0.70 > 0.55）"),
+    ((0.05, 0.60, 0.02, 0.10), _OK_OBS, W / 2.0, "整帧占比不够（0.05 < 0.065）"),
+    ((0.10, 0.60, 0.02, 0.10), _Box(1400.0, 500.0), W / 2.0,
+     "形状太扁（2.80 > 2.15）"),
+    ((0.10, 0.60, 0.02, 0.10), _OK_OBS, W / 2.0 + 0.30 * W, "目标没在中央"),
+])
+def test_arrive_pixels_ok_rejects_each_violation(shares, obs, px, why):
+    """六条各自都能单独否决（逐条钉住，防止有人以为某条是摆设）"""
+    lv = _level()
+    assert lv._arrive_pixels_ok(shares, obs, px, W) is False, why
+
+
+def test_arrive_decision_ignores_measured_pose():
+    """★ 短路的核心不变量：**到达判决与锚无关**
+
+    同一个"六条全过"的画面证据，在①锚**直接抛异常**、②锚说"我在 66cm 外、
+    根本不在目标格"两种极端下，判决都必须一样，且探针不许把异常抛出去
+    （探针只记录、不改变控制流）。
+    """
+    lv = _level()
+    lv.digit_cell = {1: 3}
+
+    def _boom(obs, fr, why=""):
+        raise AssertionError("到达判决不该读锚")
+
+    lv._map_pose = _boom                                   # ① 锚炸了
+    assert lv._arrive_pixels_ok(_OK_SHARES, _OK_OBS, W / 2.0, W) is True
+    assert lv._arrive_probe_note(1, np.zeros((10, 10, 3), np.uint8)) is None
+
+    lv2, frame = _lv_with_anchor((200.0, 200.0, 0.0))      # ② 锚说在别处
+    assert lv2._arrive_pixels_ok(_OK_SHARES, _OK_OBS, W / 2.0, W) is True
+    assert lv2._arrive_probe_note(1, frame) == "no", "探针应记录分歧，但不否决"
+
+
+def test_arrive_evidence_has_no_cell_verification():
+    """✓ 到达的那一行留档里**不许**再出现"格的核验"（防止把否决悄悄接回来）
+
+    留档是现场排查的唯一凭据；只要它重新出现，就说明短路被回滚了一半。
+    """
+    lv, frame = _lv_with_anchor((200.0, 200.0, 0.0))
+    lv._arrive_evidence = "脚下色块判据：紫区占比 0.600（≥0.35），" \
+                          "橙区占比 0.020（≤0.1），左右不对称 +0.100（≤0.55）"
+    lv._arrive_probe_note(1, frame)
+    assert "核验" not in lv._arrive_evidence
+    assert "锚" not in lv._arrive_evidence
