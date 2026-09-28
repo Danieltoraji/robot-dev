@@ -5,14 +5,24 @@ debug_server.py —— 闯关运行中的被动镜像调试服务器（机器人
 
 设计原则（详见《视觉调试指南》三工具分工）：
   - 不占摄像头：只监视关卡正常拍照落盘的照片（默认 /home/pi/Pictures/photo_*.jpg）；
-  - 零侵入：不 import core.robot_core（其模块级会连舵机串口，与闯关的 main.py
-    双进程抢串口会干扰舵机指令）；PnP 数学用 camera_config 常量本地复刻；
-  - 事件驱动：只有新照片才触发分析（一张只分析一次），无新照片时看门狗仅扫目录名；
-  - 分析在机器人端（部署真实形态），叠加绘制在 PC 浏览器（前端 canvas，可分层开关）。
+  - 零侵入：不改 core/levels/main.py 任何调用链；tag 分析器**复用关卡内部
+    逻辑**（core.robot_core 的同款 apriltag 检测 / solve_pnp_pose / 完整
+    pnp_pose_problems 门控）——import 会打开串口句柄（SDK 可导入时）但调试
+    服务器从不写串口，与 TonyPi.py/main.py 共持串口的现状一致；异常或
+    --no-core 时自动降级本地简化实现；yolo/digit/line 复用 vision/ 共享包；
+  - 事件驱动：只有新照片才触发分析（一张只分析一次），无新照片时看门狗仅扫
+    目录名；
+  - 分析在机器人端（部署真实形态），叠加绘制在 PC 浏览器（前端 canvas，可分
+    层开关）。
 
 用法（机器人上，jupyter-env 解释器以获得 apriltag/onnxruntime/cv2）：
     /home/pi/jupyter-env/bin/python3 tools/debug_server.py --port 8081
 浏览器打开 http://<机器人IP>:8081
+
+九宫格「统一判据」叠加（判据点十字 + 分区白线）**默认就有**：digit 结果里附带
+`panels[].point/zone` 与 `zone_lines`，页面图层「分区判据」默认勾上，不想要就取消
+勾选 —— 开关在图形界面，不在命令行。唯一例外是 `--no-core`：那种情况下本进程不
+加载关卡判据，页面上勾选框置灰并写明原因（见下面「九宫格统一判据叠加」一节）。
 """
 
 import argparse
@@ -91,6 +101,91 @@ def cv2_rodrigues(rvec):
 
 
 # =====================================================================
+# 九宫格「统一判据」叠加（用于决策的点 → 十字；图片分区 → 白色细线）
+# =====================================================================
+# 判据本身**不在这里实现**：直接复用 `levels.nine_grid` 的
+#   zone_at_pixel(px, py, w, h)  逐点判档（绿·直行 / 蓝·横移 / 橙·旋转）
+#   zone_lines()                 分区分割线（归一化画幅坐标）
+#   ZONE_NAME_CN                 档位中文名
+# 为什么必须复用而不是照抄：现场拿这个叠加图核对"判据到底把钱压在哪一档"，
+# 一旦这里另抄一份几何，叠加线与关卡真正的边界就会悄悄走散——那正是本仓库
+# 反复清理过的"两份真相"。
+#
+# ★ 开关只在**页面**上（2026-09-25 用户定）：要不要看是显示问题，不该由命令行
+#   决定。所以数据**默认总是算**（7 段线 + 每块色块一次判档，开销可忽略），
+#   图层的「分区判据」勾选框永远可用、默认勾上，不想要就取消勾选。
+#   只有一种情况不产出：`--no-core`（明确要求本进程不碰关卡/core 层）。
+#
+# ⚠️ 代价：import `levels.nine_grid` 会连带 import `core.robot_core`，后者在模块级
+#   新建舵机串口 Board（本服务器**只读照片、从不写串口**）。debug.sh 默认开着 tag 的
+#   core 复用模式，这次 import 本来就会发生；只有 `--no-tag --no-core` 时才靠上面
+#   那条例外把它挡掉（那种情况下页面上勾选框置灰并写明原因）。
+_ZONE_API = None        # None=未加载｜False=不可用｜否则 (zone_at_pixel, zone_lines, 中文名表)
+_ZONE_API_ERR = ""
+
+
+def _zone_api():
+    """惰性取关卡的判据函数；不可用返回 None（原因记在 `_ZONE_API_ERR`）
+
+    惰性 + 缓存：只有真的要算分区叠加时才 import 关卡模块。
+    """
+    global _ZONE_API, _ZONE_API_ERR
+    if _ZONE_API is None:
+        try:
+            from levels.nine_grid import ZONE_NAME_CN, zone_at_pixel, zone_lines
+            _ZONE_API = (zone_at_pixel, zone_lines, ZONE_NAME_CN)
+        except Exception as e:                      # 调试工具不许因此崩
+            _ZONE_API = False
+            _ZONE_API_ERR = f"{type(e).__name__}: {e}"
+    return _ZONE_API or None
+
+
+def _zone_status(args):
+    """(能不能产出分区叠加, 给页面看的原因)
+
+    默认总是产出；只有两种情况不产出，且都有明确原因（页面据此置灰勾选框）：
+      · `--no-core`：本进程明确不碰关卡/core 层 ⇒ 也不加载关卡判据；
+      · 关卡判据 import 失败（缺依赖等）。
+    """
+    if getattr(args, "no_core", False):
+        return False, "未加载（--no-core：本进程不碰关卡/core 层）"
+    if _zone_api() is None:
+        return False, f"不可用（{_ZONE_API_ERR}）"
+    return True, None
+
+
+def zone_annotation(px, py, w, h):
+    """★ 「用于决策的点」的一半叠加数据：这个点落在哪一档
+
+    返回 {"zone", "zone_cn", "dx_frac", "t"}；判据不可用时返回 None。
+    `dx_frac`/`t` 就是判据吃的两个量（横向偏移占画幅宽、纵向位置），现场一眼能
+    看出"离边界还有多远"。
+
+    ⚠️ 两个诚实的前提（页面状态栏也写着）：
+      · **头部按中位假设**：调试服务器只读落盘照片，拿不到头部脉宽。关卡判档用的
+        是"机体系中线" `_center_column_px()`（头部中位时就等于 w/2）。偏头拍摄的
+        那一帧，关卡的真实中线会平移 `头角×w/60`，本叠加图仍按中位画 —— 拿十字
+        落点核对判档时请记得这一条。
+      · 判据吃的是**目标色的最佳观测**；调试端不知道关卡当前在追哪个数字，所以
+        每个色块各自算一份，前端把最大那个标成「判据点」。
+    """
+    api = _zone_api()
+    if api is None or w <= 0 or h <= 0:
+        return None
+    zone_at_pixel, _lines, names = api
+    zone = zone_at_pixel(px, py, w, h)
+    return {"zone": zone, "zone_cn": names.get(zone, zone),
+            "dx_frac": round(abs(float(px) - w / 2.0) / w, 4),
+            "t": round(float(py) / h, 4)}
+
+
+def zone_lines():
+    """分区边界线段（归一化画幅坐标 0~1）；判据不可用时返回 []"""
+    api = _zone_api()
+    return api[1]() if api else []
+
+
+# =====================================================================
 # 分析器集合（懒加载；enabled 由网页 POST /config 实时切换）
 # =====================================================================
 
@@ -106,11 +201,32 @@ class Analyzers:
         self._yolo = None
         self._digit = None
         self._line = None
+        self.mode = None      # tag 分析模式："core"（复用关卡逻辑）/"local"（降级）
+        self._rc = None
+        self._state = None
         self.status = {"tag": "未加载", "yolo": "未加载",
                        "digit": "未加载", "line": "未加载"}
 
     # ---- tag：apriltag + 可选 PnP（levels.goodluck.tag_poses 存在时）----
     def _load_tag(self):
+        """双模式：首选复用关卡内部逻辑（core.robot_core 的同款 apriltag 检测、
+        solve_pnp_pose、完整 pnp_pose_problems 门控）；core 不可用（PC 无 SDK、
+        apriltag 缺失或 --no-core）时降级为本地简化实现。"""
+        self.mode = "local"
+        if not self.args.no_core:
+            try:
+                import core.robot_core as rc
+                from levels.goodluck import tag_poses
+                if rc.apriltag is None:
+                    raise RuntimeError("core.apriltag 不可用")
+                self._rc = rc
+                self._state = rc.RobotState(tag_poses=tag_poses)
+                self._tag_poses = {str(k): v for k, v in tag_poses.items()}
+                self.mode = "core"
+                self.status["tag"] = "core 复用模式"
+                return
+            except Exception as e:
+                self.status["tag"] = f"core 不可用({e})，降级本地实现"
         import apriltag
         self._tag_det = apriltag.Detector(
             apriltag.DetectorOptions(families="tag36h11"))
@@ -121,9 +237,57 @@ class Analyzers:
             self._tag_poses = None
             self.status["tag"] += f"（无关卡 tag_poses，跳过 PnP: {e}）"
 
-    def run_tag(self, frame):
-        if self._tag_det is None:
+    def run_tag(self, frame, photo_path=None):
+        if self.mode is None:
             self._load_tag()
+        if self.mode == "core":
+            return self._run_tag_core(photo_path)
+        return self._run_tag_local(frame)
+
+    def _run_tag_core(self, photo_path):
+        """复用关卡内部逻辑：RobotState.detect_apriltag + solve_pnp_pose +
+        pnp_pose_problems（完整门控），与闯关看到的结果同源。"""
+        rc, state = self._rc, self._state
+        if not photo_path or not os.path.exists(photo_path):
+            return {"tags": [], "pose": None}  # 照片已被清理（如 tjz 滚动删除）
+        try:
+            dets = state.detect_apriltag(photo_path) or []
+        except Exception as e:
+            self.status["tag"] = f"检测异常: {e}"
+            dets = []
+        tags, objlist, imglist, known = [], [], [], 0
+        for r in dets:
+            corners = [[round(float(x), 1), round(float(y), 1)]
+                       for x, y in r.corners]
+            tags.append({"id": int(r.tag_id), "corners": corners})
+            tid = str(r.tag_id)
+            if tid in state.tag_poses:
+                known += 1
+                objlist.extend(state.tag_poses[tid])
+                imglist.extend(
+                    np.asarray(r.corners, dtype=np.float64)[rc.TAG_CORNER_PERM])
+        pose = None
+        if known:
+            res = rc.solve_pnp_pose(objlist, imglist)
+            if res:
+                pos, ori, reproj = res
+                pose = {"position": [round(float(pos[0]), 1),
+                                     round(float(pos[1]), 1)],
+                        "cam_z": round(float(pos[2]), 1),
+                        "orientation": [round(float(ori[0]), 3),
+                                        round(float(ori[1]), 3)],
+                        "reproj": round(reproj, 2),
+                        "tags_used": known,
+                        "problems": rc.pnp_pose_problems(
+                            pos, ori, reproj, n_tags=known)}
+        return {"tags": tags, "pose": pose}
+
+    def _run_tag_local(self, frame):
+        """降级路径：本地 apriltag 检测 + camera_config 常量的简化 PnP 复刻"""
+        if self._tag_det is None:
+            import apriltag
+            self._tag_det = apriltag.Detector(
+                apriltag.DetectorOptions(families="tag36h11"))
         gray = _cv().cvtColor(frame, _cv().COLOR_BGR2GRAY)
         tags, pose = [], None
         objlist, imglist = [], []
@@ -175,28 +339,80 @@ class Analyzers:
         return {"yolo": [{"cls": d.cls, "conf": round(d.confidence, 3),
                           "bbox": [round(v, 1) for v in d.bbox]} for d in dets]}
 
-    # ---- digit：DigitRecognizer（模板缺失自动禁用）----
-    def _load_digit(self):
-        from vision.digit_recognizer import DigitRecognizer
-        tdir = self.args.digit_templates
-        templates = {}
-        if os.path.isdir(tdir):
-            cv2 = _cv()
-            for fn in sorted(os.listdir(tdir)):
-                if fn.endswith(".png") and os.path.splitext(fn)[0].isdigit():
-                    tpl = cv2.imread(os.path.join(tdir, fn), 0)
-                    if tpl is not None:
-                        templates[os.path.splitext(fn)[0]] = tpl
-        if not templates:
-            raise RuntimeError(f"数字模板目录为空: {tdir}")
-        self._digit = DigitRecognizer(templates=templates)
-
+    # ---- digit：与关卡同一条链路（色块 → 字形掩膜 → 仲裁/形状裁决）----
+    #
+    # 2026-09-23 重写。旧实现把**整帧**交给 vision.digit_recognizer.DigitRecognizer，
+    # 而那个识别器是为**单字符掩膜**设计的（min_area 默认仅 30px²、且没有任何
+    # 置信度门槛）。实测整帧会产生 84 个候选框（其中 62 个是皮尺刻度级碎片），
+    # 每个框都强行输出一个数字 ⇒ 页面底部出现一条 80+ 位的无意义数字串。
+    #
+    # 现在改为复刻关卡的实际链路（见 levels/nine_grid.layout_scan）：
+    #   detect_panels(arbitrate=True, shape=True)
+    #     → 每个色块的 .color / .color_id / .digit / .shape_digit / .shape_conf
+    #   其中 .digit 即关卡认定的数字：颜色为主判，形状仅在**颜色有歧义**且
+    #   间隔 ≥ SHAPE_OVERRIDE_MIN_CONF(0.30) 时才允许改判。
+    #
+    # 注意：不再需要 --digit-templates（那些 arial/consolas 字体模板只服务于
+    # 旧的整帧识别）；形状仲裁用的是现场自建 models/nine_grid/digit_templates.npz。
     def run_digit(self, frame):
+        from vision.nine_grid_detector import NineGridDetector
         if self._digit is None:
-            self._load_digit()
-        r = self._digit.detect(frame)
-        return {"digit": {"digits": r.digits, "conf": round(r.confidence, 3),
-                          "center": list(r.center_px) if r.center_px else None}}
+            self._digit = NineGridDetector()
+        obs = self._digit.detect_panels(frame, arbitrate=True, shape=True)
+        if not obs:
+            return {"digit": {"digits": "", "conf": 0.0, "center": None,
+                              "panels": [], "note": "未检出任何色块"}}
+        # 按可见面积降序，前端只画前几个以免刷屏
+        obs = sorted(obs, key=lambda o: o.hull_area, reverse=True)[:6]
+        # ---- 九宫格统一判据叠加（数据默认总是算；看不着是页面勾选框的事）----
+        annotate, zone_why = _zone_status(self.args)
+        fh, fw = frame.shape[:2]        # 画幅（判据的归一化基准）
+        panels = []
+        for o in obs:
+            bx, by, bw, bh = (int(v) for v in o.bbox)
+            # ★ 「用于决策的点」= 与关卡 `_capture_and_measure` **同一条取点规则**：
+            #   未裁切用四边形对角线交点 center_px（透视不变量）；被画幅裁切改用
+            #   颜色掩膜凸包面积质心（裁切后对角线交点实测偏 150~800px）。
+            point = o.hull_centroid_px if o.clipped else o.center_px
+            rec = {
+                "color": o.color,
+                "color_id": int(o.color_id),
+                "digit": int(o.digit),              # ← 关卡认定的数字
+                "shape_digit": (None if o.shape_digit is None
+                                else int(o.shape_digit)),
+                "shape_conf": round(float(o.shape_conf), 3),
+                "overridden": bool(o.shape_override),
+                "clipped": int(o.clipped),
+                "bbox": [bx, by, bw, bh],
+                # 凸包多边形（原生像素 [[x,y],...]）：只包住色块本身，比 bbox
+                # 更贴形。前端优先画它，画不出再退回 bbox 方框。
+                "poly": [[round(px, 1), round(py, 1)] for px, py in o.hull_poly],
+            }
+            if annotate:
+                # 判据点（原生像素；Hub.analyze 会随 bbox/poly 一起缩到显示坐标）
+                rec["point"] = [round(float(point[0]), 1), round(float(point[1]), 1)]
+                # 每个色块各自判一次档：调试端不知道关卡当前在追哪个数字，
+                # 前端把面积最大的那个标成「判据点」（与关卡 max(hull_area) 同规则）
+                ann = zone_annotation(float(point[0]), float(point[1]), fw, fh)
+                if ann:
+                    rec.update(ann)
+            panels.append(rec)
+        top = panels[0]
+        conf = top["shape_conf"] if top["overridden"] else 1.0
+        label = " ".join(
+            f"{p['color']}→{p['digit']}" + ("*" if p["overridden"] else "")
+            for p in panels)
+        cx = sum(p["bbox"][0] + p["bbox"][2] / 2.0 for p in panels) / len(panels)
+        cy = sum(p["bbox"][1] + p["bbox"][3] / 2.0 for p in panels) / len(panels)
+        out = {"digit": {"digits": label, "conf": round(float(conf), 3),
+                         "center": [cx, cy], "panels": panels}}
+        if annotate:
+            # 分区线只发一次（归一化坐标，与分辨率/降采样无关）
+            out["digit"]["zone_lines"] = zone_lines()
+        else:
+            # 没产出就说清原因（页面上勾选框置灰、状态栏照抄这句话）
+            out["digit"]["zone_note"] = f"分区叠加{zone_why}"
+        return out
 
     def _load_line(self):
         # 兼容两种导入风格：仓库版 line_detector 用 `from vision.detection
@@ -237,12 +453,17 @@ class Analyzers:
                          "others": len(r.others),
                          "points": pts}}
 
-    def run(self, name, frame):
-        runner = {"tag": self.run_tag, "yolo": self.run_yolo,
-                  "digit": self.run_digit, "line": self.run_line}[name]
+    def run(self, name, frame, photo_path=None):
         t0 = time.perf_counter()
         try:
-            out = runner(frame)
+            if name == "tag":
+                out = self.run_tag(frame, photo_path)
+            elif name == "yolo":
+                out = self.run_yolo(frame)
+            elif name == "digit":
+                out = self.run_digit(frame)
+            else:
+                out = self.run_line(frame)
             self.status[name] = "ok"
             return out, round((time.perf_counter() - t0) * 1000)
         except Exception as e:
@@ -328,6 +549,13 @@ class Hub:
     def analyze(self, path, mtime_s):
         frame = _cv().imread(path)
         if frame is None:
+            time.sleep(0.4)
+            frame = _cv().imread(path)
+        if frame is None:
+            # 照片在落盘/清理竞争中暂不可读（如 tjz 进程滚动删除）：
+            # 清除断点标记，下轮扫描会分析当时最新的完整照片
+            self._last_identity = None
+            print(f"[analyze] 照片暂不可读，下轮重试: {path}")
             return
         with open(path, "rb") as f:
             jpeg = f.read()
@@ -335,7 +563,7 @@ class Hub:
         for name, on in list(self.analyzers.enabled.items()):
             if not on:
                 continue
-            out, cost = self.analyzers.run(name, frame)
+            out, cost = self.analyzers.run(name, frame, self.photo_path)
             if out:
                 results.update(out)   # 异常时 run 返回 {name: 文本}，由状态栏展示
             ms[name] = cost
@@ -358,6 +586,22 @@ class Hub:
             dg = results.get("digit")
             if dg and dg.get("center"):
                 dg["center"] = [round(v * scale, 1) for v in dg["center"]]
+            # ⚠️ panels[].bbox 也必须缩 —— 否则页面上的面板框按原生分辨率画，
+            # 在降采样显示图上会放大约 1/scale 倍（960/2592 → 2.7×）而错位。
+            # 2026-09-23 实测踩坑：文字（用 center，已缩放）大致在位，框却巨大
+            # 且套不住面板，看起来像"识别错了"，实际是坐标契约不一致。
+            if dg:
+                for p in dg.get("panels") or []:
+                    p["bbox"] = [round(v * scale, 1) for v in p["bbox"]]
+                    if p.get("poly"):
+                        p["poly"] = [[round(px * scale, 1), round(py * scale, 1)]
+                                     for px, py in p["poly"]]
+                    # ★ 判据点（九宫格统一判据叠加）同批缩 —— 漏了它就会出现
+                    #   "框在位、十字偏到别处"的假象（与上面 bbox 同一条坑）。
+                    #   注意 `zone_lines` 是**归一化坐标**，不参与缩放。
+                    if p.get("point"):
+                        p["point"] = [round(p["point"][0] * scale, 1),
+                                      round(p["point"][1] * scale, 1)]
             ln = results.get("line")
             if ln and ln.get("points"):
                 ln["points"] = [[round(x * scale, 1), round(y * scale, 1)]
@@ -409,6 +653,7 @@ class Hub:
             self._capturing = False
 
     def state_payload(self):
+        zone_ok, zone_why = _zone_status(self.args)
         with self.lock:
             return {
                 "photo_age_s": round(time.time() - self.photo_ts, 1)
@@ -418,6 +663,12 @@ class Hub:
                 "image_height": getattr(self, "display_h", None) or 1944,
                 "analyzers": dict(self.analyzers.enabled),
                 "analyzer_status": dict(self.analyzers.status),
+                "tag_mode": self.analyzers.mode,
+                # 九宫格统一判据叠加：页面据此决定「分区判据」勾选框能不能用
+                # （能用时**默认勾上**，勾/不勾是纯前端的事）；zone_note 非空时
+                # 写明为什么用不了（--no-core / import 失败）。
+                "zone_overlay": zone_ok,
+                "zone_note": zone_why,
                 "capturing": self._capturing,
                 "capture_note": self.capture_note,
                 "results": self.results,
@@ -453,7 +704,7 @@ PAGE_HTML = """<!DOCTYPE html>
  <fieldset><legend>分析器（机器人端）</legend>
   <label><input type="checkbox" id="en_tag" checked> tag 定位</label><br>
   <label><input type="checkbox" id="en_yolo" checked> yolo 球/门</label><br>
-  <label><input type="checkbox" id="en_digit"> digit 数字</label><br>
+  <label><input type="checkbox" id="en_digit" checked> digit 数字</label><br>
   <label><input type="checkbox" id="en_line" checked> line 巡线</label>
  </fieldset>
  <fieldset><legend>图层显示</legend>
@@ -463,6 +714,7 @@ PAGE_HTML = """<!DOCTYPE html>
   <label><input type="checkbox" id="ly_yolo" checked> yolo 框</label><br>
   <label><input type="checkbox" id="ly_conf" checked> 置信度文本</label><br>
   <label><input type="checkbox" id="ly_digit" checked> digit</label><br>
+  <label><input type="checkbox" id="ly_zone" checked> 分区判据（十字＋白线）</label><br>
   <label><input type="checkbox" id="ly_line" checked> 巡线（红）</label>
  </fieldset>
  <fieldset><legend>状态</legend><div id="status">连接中...</div></fieldset>
@@ -519,10 +771,73 @@ function draw() {
     text(`定位 (${p.position[0]}, ${p.position[1]})cm 朝向(${p.orientation[0]}, ${p.orientation[1]}) 重投影${p.reproj}px${warn}`,
          20, sl += 40, p.problems.length ? '#ff8888' : '#ffff88');
   }
-  if (ly('ly_digit') && state.results.digit && state.results.digit.digits) {
+  if (ly('ly_digit') && state.results.digit && state.results.digit.panels) {
+    // 与关卡同一链路：每个色块画**凸包多边形**（只包色块本身，比 bbox 贴形）
+    // 并标注 颜色→关卡认定的数字（* = 被形状仲裁改判）
     const dg = state.results.digit;
-    if (dg.center) box([dg.center[0]-60, dg.center[1]-60, 120, 120], '#ff8800', 4);
-    text('digit ' + dg.digits + ' ' + dg.conf.toFixed(2), 20, canvas.height - 20, '#ff8800');
+    for (const p of dg.panels) {
+      const col = p.overridden ? '#ff44ff' : '#ff8800';
+      if (p.poly && p.poly.length >= 3) {
+        ctx.strokeStyle = col; ctx.lineWidth = 5; ctx.beginPath();
+        p.poly.forEach((q, i) => i ? ctx.lineTo(q[0]*k, q[1]*k)
+                                   : ctx.moveTo(q[0]*k, q[1]*k));
+        ctx.closePath(); ctx.stroke();
+      } else {
+        box(p.bbox, col, 5);   // 退路：多边形拿不到时仍画方框
+      }
+      let s = p.color + '→' + p.digit + (p.overridden ? '*' : '');
+      if (document.getElementById('ly_conf').checked) {
+        s += p.overridden ? ' Δ' + p.shape_conf.toFixed(2)
+                          : (p.shape_digit != null ? ' vs' + p.shape_digit : '') +
+                            (p.clipped ? ' clip' : '');
+      }
+      text(s, p.bbox[0], Math.max(p.bbox[1] - 10, 30), col);
+    }
+    const summary = dg.note ? ('digit: ' + dg.note)
+                            : ('digit ' + dg.digits);
+    text(summary, 20, canvas.height - 20, '#ff8800');
+  }
+  if (ly('ly_zone') && state.results.digit && state.results.digit.zone_lines) {
+    // ★ 九宫格统一判据叠加：白细线=图片分区，十字=用于决策的点
+    //   分区线是**归一化坐标**（占画幅多少），直接乘 canvas 宽高即可 —— 不受
+    //   /photo 降采样与坐标契约影响。
+    const dg = state.results.digit;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;                       // "稍细"：比 tag/yolo/digit 的 4~6px 细
+    ctx.beginPath();
+    for (const seg of dg.zone_lines) {
+      ctx.moveTo(seg[0][0] * canvas.width, seg[0][1] * canvas.height);
+      ctx.lineTo(seg[1][0] * canvas.width, seg[1][1] * canvas.height);
+    }
+    ctx.stroke();
+    // 十字：主判据点（面积最大的色块，= 关卡 max(hull_area) 那条规则）加粗标注，
+    // 其余色块用小十字（一眼看出"每个色块各自会判成哪一档"）
+    const cross = (p, arm, gap, width) => {
+      const x = p[0] * k, y = p[1] * k;
+      ctx.beginPath();
+      ctx.moveTo(x - arm, y); ctx.lineTo(x - gap, y);
+      ctx.moveTo(x + gap, y); ctx.lineTo(x + arm, y);
+      ctx.moveTo(x, y - arm); ctx.lineTo(x, y - gap);
+      ctx.moveTo(x, y + gap); ctx.lineTo(x, y + arm);
+      ctx.lineWidth = width;
+      ctx.stroke();
+    };
+    dg.panels.forEach((p, i) => {
+      if (!p.point) return;
+      const primary = (i === 0);
+      // 先描一层黑底衬：亮地板/暗地板都看得见这个十字
+      ctx.globalAlpha = 1; ctx.strokeStyle = '#000000';
+      cross(p.point, primary ? 24 : 14, primary ? 6 : 4, primary ? 7 : 5);
+      ctx.strokeStyle = '#ffee00'; ctx.globalAlpha = primary ? 1 : 0.75;
+      cross(p.point, primary ? 22 : 12, primary ? 6 : 4, primary ? 4 : 2);
+      ctx.globalAlpha = 1;
+      if (p.zone_cn) {
+        text((primary ? '判据点 ' : '') + p.zone_cn
+             + (document.getElementById('ly_conf').checked
+                ? ` dx${p.dx_frac} t${p.t}` : ''),
+             p.point[0] + 16, p.point[1] + 34, '#ffee00');
+      }
+    });
   }
   if (ly('ly_line') && state.results.line && state.results.line.points) {
     const L = state.results.line;
@@ -548,14 +863,47 @@ function updateStatus() {
   const lines = [`照片: ${state.photo_file || '无'} (年龄 ${state.photo_age_s}s)`];
   for (const k of ['tag', 'yolo', 'digit', 'line'])
     lines.push(`${k}: ${state.analyzers[k] ? '开' : '关'} | ${state.analyzer_status[k] || ''} | ${state.analysis_ms[k] ? state.analysis_ms[k] + 'ms' : '-'}`);
+  if (state.tag_mode) lines.push(`tag 模式: ${state.tag_mode}`);
+  // 九宫格统一判据叠加：数据默认都有；勾选框能不用看服务器（--no-core 时用不了）
+  lines.push(`分区叠加: ${state.zone_overlay ? '开（图层可勾选）' : '关'}`
+             + `｜判据点=最大色块中心，头部按中位`);
+  if (state.zone_note) lines.push(`分区叠加说明: ${state.zone_note}`);
   if (state.errors && Object.keys(state.errors).length)
     lines.push('错误: ' + JSON.stringify(state.errors));
   s.textContent = lines.join('\\n');
 }
 
 let photoLoading = false;
+let zoneEnabled = null;          // 上次见到的"服务器能不能产出分区叠加"（变了才动勾选框）
+function syncZoneLayer() {
+  // 勾选框默认就是勾上的（HTML 里写死 checked），这里只在**服务器说产不出**时
+  // 置灰并取消勾选，并把原因写进 title。勾/不勾本身是纯前端的事：数据一直都在
+  // 结果里，不用重启服务、更不用换命令。
+  // 只在"服务器状态变化"时动它，免得每秒的轮询把用户手动勾/取消的状态又拽回去。
+  if (!state || zoneEnabled === state.zone_overlay) return;
+  zoneEnabled = !!state.zone_overlay;
+  const z = document.getElementById('ly_zone');
+  z.checked = zoneEnabled;
+  z.disabled = !zoneEnabled;
+  z.title = zoneEnabled
+    ? '白色细线＝图片分区；十字＝用于决策的点（头部按中位假设）'
+    : ('分区叠加不可用：' + (state.zone_note || '见状态栏'));
+}
+function syncAnalyzers(s) {
+  // 服务端才是真源：把 4 个「分析器」复选框拉回真实状态。
+  // 根因：这 4 个框的 onchange 会**整体 POST 四个值**，而它们原先从不从
+  // /api/state 回灌 —— 于是拨动 tag/yolo/line 任意一个，就会把没被碰过的
+  // digit 一起提交为 false（页面上框还勾着，服务端其实已经关了）。
+  if (!s || !s.analyzers) return;
+  for (const id of ['en_tag', 'en_yolo', 'en_digit', 'en_line']) {
+    const k = id.slice(3);
+    if (k in s.analyzers) document.getElementById(id).checked = !!s.analyzers[k];
+  }
+}
 function refreshState() {
-  fetch('/api/state').then(r => r.json()).then(s => { state = s; updateStatus(); })
+  fetch('/api/state').then(r => r.json()).then(s => {
+    state = s; syncAnalyzers(s); syncZoneLayer(); updateStatus();
+  })
                       .catch(() => { document.getElementById('status').textContent = '连接断开（重试中）...'; });
 }
 function refreshPhoto() {
@@ -573,7 +921,8 @@ for (const id of ['en_tag', 'en_yolo', 'en_digit', 'en_line'])
       body: JSON.stringify({analyzers: {tag: en_tag.checked, yolo: en_yolo.checked,
                                         digit: en_digit.checked, line: en_line.checked}})});
   };
-for (const id of ['ly_tagbox', 'ly_tagid', 'ly_pose', 'ly_yolo', 'ly_conf', 'ly_digit', 'ly_line'])
+for (const id of ['ly_tagbox', 'ly_tagid', 'ly_pose', 'ly_yolo', 'ly_conf', 'ly_digit',
+                  'ly_zone', 'ly_line'])
   document.getElementById(id).onchange = draw;
 refreshState();
 refreshPhoto();
@@ -592,8 +941,11 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
-        if ctype.startswith("image/") or ctype == "application/json":
-            self.send_header("Cache-Control", "no-cache")
+        # ★ 所有响应一律不许缓存。HTML 以前**没发**这个头（只有 image/json 发），
+        #   浏览器就按启发式规则把整页缓存住 —— 实测踩坑（2026-09-25）：代码同步到
+        #   机器人、服务也重启了，浏览器里却还是旧页面（图层少了新增的「分区判据」
+        #   勾选框），看起来像"改了没生效"，实际是页面没重取。
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -647,12 +999,14 @@ def main():
     ap.add_argument("--model", default=DEFAULT_MODEL,
                     help=f"YOLO onnx 模型（默认 {DEFAULT_MODEL}）")
     ap.add_argument("--conf", type=float, default=0.45, help="YOLO 置信度阈值")
-    ap.add_argument("--digit-templates",
-                    default="tools/digit_templates/arial40",
-                    help="数字模板目录（0.png~9.png；缺失则 digit 分析器禁用）")
+    # 注：2026-09-23 起 digit 分析器改走关卡链路（detect_panels + 形状仲裁），
+    # 不再使用 arial/consolas 字体模板，故 --digit-templates 已移除。
     ap.add_argument("--no-tag", action="store_true", help="初始关闭 tag 分析器")
     ap.add_argument("--no-yolo", action="store_true", help="初始关闭 yolo 分析器")
     ap.add_argument("--enable-digit", action="store_true", help="初始启用 digit 分析器")
+    ap.add_argument("--no-core", action="store_true",
+                    help="tag 分析不复用 core.robot_core，强制本地简化实现；"
+                         "同时不加载关卡判据 ⇒ 没有「分区判据」叠加（页面勾选框置灰）")
     ap.add_argument("--no-line", action="store_true", help="初始关闭 line 巡线分析器")
     ap.add_argument("--line-hsv", default="0,90,80:10,255,255",
                     help="巡线 HSV 范围 'h,s,v:h,s,v'（默认红线，自动补 170~180 段）")

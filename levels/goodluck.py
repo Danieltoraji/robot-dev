@@ -54,7 +54,7 @@ ORIENTATION_THRESHOLD = 0.26  # 朝向差异模长阈值，约15°
 POSITION_THRESHOLD = 3.0  # 位置差异模长阈值，单位cm
 STOP_TIME = 0  # 到达目标点后停留秒数。2026-08-30 提速改造取消停靠（原比赛规则 3 秒），
 #               恢复停靠改回 3 即可（ROUTE 停靠点引用自动生效）
-OBSTACLE_THRESHOLD = 13.0  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
+OBSTACLE_THRESHOLD = 14.5  # 避障容忍阈值，离墙最近距离小于此值则排除该动作
 SAFE_MARGIN_CM = 3.0  # 安全点额外余量。实际安全点距离 = OBSTACLE_THRESHOLD + POSITION_THRESHOLD + SAFE_MARGIN_CM，确保机器人离墙足够远。
 CORRIDOR_CLEAR_CM = OBSTACLE_THRESHOLD + 3.0  # 走廊净空校验阈值（路点串沿线离墙最小距离）
 ORIENT_FREEZE_DIST_CM = 10.0  # 动态朝向冻结距离阈值（cm）：距目标 > 此值时用连线方向，≤ 此值时切指定朝向或冻结连线方向（防震荡）。调大防震荡，调小扩大连线方向范围，但需 > POSITION_THRESHOLD

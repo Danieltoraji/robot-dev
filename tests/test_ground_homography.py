@@ -152,11 +152,11 @@ def HEAD_PULSE(angle_deg):
 
 
 def test_grid_geometry():
-    """宫格位置编号 → 格中心（左下 6 恒空的布局约定）"""
+    """宫格位置编号 → 格中心（格号约定；位置 6 可被占据）"""
     c0 = grid_cell_center(0)   # 左上（最远排最左）
     approx(float(c0[0]), 100.0 / 6, 1e-9)
     approx(float(c0[1]), 100.0 - 100.0 / 6, 1e-9)
-    c6 = grid_cell_center(6)   # 左下恒空
+    c6 = grid_cell_center(6)   # 左下角（可被面板占据）
     approx(float(c6[0]), 100.0 / 6, 1e-9)
     approx(float(c6[1]), 100.0 / 6, 1e-9)
     c8 = grid_cell_center(8)   # 右下

@@ -21,6 +21,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cv2
+import numpy as np
 
 from vision.yolo_detector import OnnxYoloBackend
 
@@ -58,8 +59,11 @@ def main():
         frame = cv2.imread(files[idx[0]])
         dets = []
         if frame is None:
-            cv2.putText(frame, "READ FAIL", (40, 80),
-                        cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
+            # 读图失败时用占位画布，避免后续 putText/frame.shape 崩溃
+            frame = np.zeros((480, 960, 3), np.uint8)
+            cv2.putText(frame, "READ FAIL: " + os.path.basename(files[idx[0]]),
+                        (40, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.6,
+                        (0, 0, 255), 3)
         else:
             dets = backend.detect(frame)
             for d in dets:
@@ -88,16 +92,19 @@ def main():
         elif key == ord("s"):
             os.makedirs(args.out, exist_ok=True)
             frame = cv2.imread(files[idx[0]])
-            dets = backend.detect(frame)
-            for d in dets:
-                x, y, w, h = [int(v) for v in d.bbox]
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 6)
-                cv2.putText(frame, f"{d.cls} {d.confidence:.2f}",
-                            (x, max(y - 14, 40)), cv2.FONT_HERSHEY_SIMPLEX, 2.2,
-                            (0, 255, 0), 4)
-            path = os.path.join(args.out, os.path.basename(files[idx[0]]))
-            cv2.imwrite(path, frame)
-            print("已保存:", path)
+            if frame is None:
+                print("读图失败，未保存:", files[idx[0]])
+            else:
+                dets = backend.detect(frame)
+                for d in dets:
+                    x, y, w, h = [int(v) for v in d.bbox]
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 6)
+                    cv2.putText(frame, f"{d.cls} {d.confidence:.2f}",
+                                (x, max(y - 14, 40)), cv2.FONT_HERSHEY_SIMPLEX, 2.2,
+                                (0, 255, 0), 4)
+                path = os.path.join(args.out, os.path.basename(files[idx[0]]))
+                cv2.imwrite(path, frame)
+                print("已保存:", path)
 
     cv2.destroyAllWindows()
 

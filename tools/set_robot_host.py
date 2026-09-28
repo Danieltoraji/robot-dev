@@ -3,7 +3,7 @@
 """set_robot_host.py —— 设置机器人地址（持久环境变量，sync/exec/pull 三工具共用）
 
 用法：
-    python tools/set_robot_host.py http://192.168.43.81:8888   # 持久设置
+    python tools/set_robot_host.py http://192.168.31.209:8888   # 持久设置
     python tools/set_robot_host.py                              # 查看当前值
 
 说明：setx 写入用户环境变量，**已打开的终端不会生效**，重开终端后生效；
