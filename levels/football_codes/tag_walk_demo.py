@@ -32,7 +32,19 @@ from __future__ import print_function
 import argparse
 import time
 
+# 本地优先：Robot_Competition 副本为唯一真源（含 apriltag 库搜索路径修复）；
+# TonyPi/Functions 副本可能滞后或缺修复。
 try:
+    from tag_route_demo import (
+        AprilTagDetector,
+        ActionGroupMotion,
+        DEMO_PLAN,
+        NullMotion,
+        TagRouteNavigator,
+    )
+    from goalpost_detector import GoalPostDetector, draw_goalposts, goal_center_x
+    from football_kick_controller import FootballKickController
+except ImportError:
     from Functions.tag_route_demo import (
         AprilTagDetector,
         ActionGroupMotion,
@@ -46,16 +58,6 @@ try:
         goal_center_x,
     )
     from Functions.football_kick_controller import FootballKickController
-except ImportError:
-    from tag_route_demo import (
-        AprilTagDetector,
-        ActionGroupMotion,
-        DEMO_PLAN,
-        NullMotion,
-        TagRouteNavigator,
-    )
-    from goalpost_detector import GoalPostDetector, draw_goalposts, goal_center_x
-    from football_kick_controller import FootballKickController
 
 
 def open_camera():

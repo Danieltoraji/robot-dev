@@ -304,6 +304,16 @@ def run_red_line_stage(args):
             back_step_interval_s=args.patrol_recovery_back_interval,
             turn_recovery_timeout_s=args.patrol_recovery_turn_timeout,
         )
+        # 直连进入射门：前方连续看到目标 Tag 且无红线时直接结束巡线。
+        tag_streak = 0
+        tag_detector = None
+        try:
+            end_recovery._ensure_detector()
+            tag_detector = end_recovery.detector
+        except Exception as exc:
+            print("Tag 检测器初始化失败，直连进入射门的检查被禁用：{}".format(exc),
+                  flush=True)
+
         started_at = time.monotonic()
         last_status = None
 
@@ -368,8 +378,34 @@ def run_red_line_stage(args):
                 line_present = getattr(redline, "line_center_x", -1) != -1
             else:
                 display_frame = redline.run(corrected)
-                reached_end_now = end_detector.update(corrected)
                 line_present = getattr(redline, "line_center_x", -1) != -1
+
+                # 直连进入射门：当前无红线，且前方连续看到目标 Tag 即结束
+                # 巡线、直接进入 Tag/射门阶段（不经过脚下丢线与转弯进度门限）。
+                if tag_detector is not None and not line_present:
+                    try:
+                        observations = tag_detector.detect(frame)
+                        seen_ids = {int(obs.tag_id) for obs in observations}
+                    except Exception:
+                        seen_ids = set()
+                    if seen_ids & set(end_recovery.target_tag_ids):
+                        tag_streak += 1
+                    else:
+                        tag_streak = 0
+                    if tag_streak >= args.patrol_end_tag_confirm_frames:
+                        reached_end = True
+                        print(
+                            "[RedLinePatrolV5] 前方连续 {} 帧确认目标 Tag {} 且无红线，"
+                            "直接进入 Tag/射门阶段".format(
+                                tag_streak,
+                                sorted(seen_ids & set(end_recovery.target_tag_ids))),
+                            flush=True,
+                        )
+                        return True
+                elif line_present:
+                    tag_streak = 0
+
+                reached_end_now = end_detector.update(corrected)
                 foot_line = end_detector.last_foot_line_present
                 status = "检测到红线" if line_present else "当前未检测到红线"
                 if foot_line is True:
@@ -442,10 +478,12 @@ def run_red_line_stage(args):
 
 def run_tag_shot_stage(args):
     """进入现有 Tag 导航 + 足球射门总流程。"""
+    # 本地优先：Robot_Competition 副本为唯一真源（含 apriltag 库搜索路径
+    # 修复）；TonyPi/Functions 副本可能滞后或缺修复。
     try:
-        from Functions.tag_walk_demo import TagWalkDemo
-    except ImportError:
         from tag_walk_demo import TagWalkDemo
+    except ImportError:
+        from Functions.tag_walk_demo import TagWalkDemo
 
     print(
         "开始进入 Tag 导航/射门阶段（V4：每门只射 1 脚，踢完直接推进，不判断进门）",

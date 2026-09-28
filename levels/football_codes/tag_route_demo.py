@@ -173,14 +173,24 @@ class AprilTagDetector:
             refine_pose=False,
             quad_contours=True,
         )
-        # 必须用 /usr/local/lib 下的自建 libapriltag.so（含旧版封装需要的
-        # apriltag_family_create 符号）。系统默认的 /lib/aarch64-linux-gnu/
-        # libapriltag.so.3.4.2 已移除该符号，_get_demo_searchpath() 指向的
-        # 构建目录不含可用库，走默认路径会 undefined symbol 直接崩溃。
-        # 与 apriltag_sorting_task.py 的 searchpath=["/usr/local/lib"] 一致。
+        # 优先用 jupyter-env 中 pip apriltag 包自带、且含旧版封装所需
+        # apriltag_family_create 符号的 libapriltag.so（nm 已验证符号存在）；
+        # /usr/local/lib 的自建库已丢失（260928 实车报 undefined symbol:
+        # apriltag_family_create，回退加载系统 3.4.2 崩溃），留作第二候选，
+        # 若自建库日后恢复仍可用。
+        _searchpath = ["/usr/local/lib"]
+        try:
+            import glob as _glob
+            for _d in sorted(_glob.glob(
+                    "/home/pi/jupyter-env/lib/python*/site-packages")):
+                if _glob.glob(_d + "/libapriltag.so"):
+                    _searchpath.insert(0, _d)
+                    break
+        except Exception:
+            pass
         self.detector = apriltag.Detector(
             options=options,
-            searchpath=["/usr/local/lib"],
+            searchpath=_searchpath,
         )
 
     def detect(self, frame) -> List[TagObservation]:

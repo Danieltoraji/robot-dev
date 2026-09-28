@@ -92,10 +92,12 @@ class PatrolEndRecoveryController:
         if self.detector is not None:
             return
         if self.detector_factory is None:
+            # 本地优先：Robot_Competition 副本为唯一真源（含 apriltag 库
+            # 搜索路径修复）；TonyPi/Functions 副本可能滞后或缺修复。
             try:
-                from Functions.tag_route_demo import AprilTagDetector
-            except ImportError:
                 from tag_route_demo import AprilTagDetector
+            except ImportError:
+                from Functions.tag_route_demo import AprilTagDetector
             self.detector_factory = AprilTagDetector
         self.detector = self.detector_factory()
 

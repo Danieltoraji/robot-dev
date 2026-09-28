@@ -113,7 +113,7 @@ MIN_CONTOUR_AREA = 50  # 最小轮廓面积，过滤噪点
 TURN_THRESHOLD = 55  # 偏差超过此像素值才转向
 TURN_STOP_THRESHOLD = 40  # 转向后回到此偏差内才恢复直行，防止左右反复过冲
 TURN_ACTION_COOLDOWN = 0.8  # 转向动作后的视觉刷新等待时间
-TURN_CONFIRM_FRAMES = 3  # 转向后等待新的视觉帧，避免连续原地转
+TURN_CONFIRM_FRAMES = 5  # 转向后等待新的视觉帧，避免连续原地转
 # 竖线检测：轮廓高宽比超过此值视为"机器人与线平行"，改用横向平移而非转向
 # 转弯步幅较大，因此这里故意放宽，不要求像素级精确平行。
 VERTICAL_LINE_RATIO = 2.0  # 普通巡线使用的阈值
